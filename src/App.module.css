@@ -1,0 +1,161 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: #1a1a1a;
+  color: #ffffff;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+}
+
+.header {
+  padding: 1rem;
+  background-color: #2a2a2a;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.title {
+  font-size: 1.25rem;
+  font-weight: bold;
+  margin: 0;
+}
+
+.modelButtons {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.modelButton {
+  padding: 0.25rem 0.75rem;
+  border-radius: 0.25rem;
+  background-color: #3a3a3a;
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.modelButton:hover:not(:disabled) {
+  background-color: #4a4a4a;
+  transform: translateY(-1px);
+}
+
+.modelButtonSelected {
+  background-color: #007bff;
+}
+
+.modelButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chatArea {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+.message {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  max-width: 70%;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.userMessage {
+  background-color: #007bff;
+  margin-left: auto;
+}
+
+.aiMessage {
+  background-color: #3a3a3a;
+}
+
+.aiModelTag {
+  font-size: 0.75rem;
+  color: #aaaaaa;
+}
+
+.messageText {
+  margin: 0;
+}
+
+.timestamp {
+  font-size: 0.625rem;
+  color: #aaaaaa;
+  margin-top: 0.25rem;
+}
+
+.loadingMessage {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  max-width: 70%;
+  background-color: #3a3a3a;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.inputArea {
+  padding: 1rem;
+  background-color: #2a2a2a;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.inputContainer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.input {
+  flex: 1;
+  padding: 0.5rem;
+  background-color: #3a3a3a;
+  color: #ffffff;
+  border: none;
+  border-radius: 0.25rem;
+  outline: none;
+}
+
+.input:focus {
+  box-shadow: 0 0 0 2px #007bff;
+}
+
+.input::placeholder {
+  color: #aaaaaa;
+}
+
+.sendButton {
+  padding: 0.5rem 1rem;
+  background-color: #007bff;
+  color: #ffffff;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.sendButton:hover:not(:disabled) {
+  background-color: #0056b3;
+  transform: translateY(-1px);
+}
+
+.sendButton:disabled {
+  background-color: #6c757d;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
