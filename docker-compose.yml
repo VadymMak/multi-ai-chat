@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: ai-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - llm_sqlite_data:/app/app/memory/data # SQLite persistent volume
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - frontend
+
+  frontend:
+    build: ./frontend
+    container_name: ai-frontend
+    ports:
+      - "3000:80" # CRA builds are served via Nginx on port 80
+    depends_on:
+      - backend
+
+volumes:
+  llm_sqlite_data:
