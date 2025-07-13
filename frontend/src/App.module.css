@@ -1,0 +1,114 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  background-color: #121212;
+  color: #ffffff;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Inter", sans-serif;
+  background-color: #1e1e1e;
+  color: #fff;
+}
+
+/* Remove white border */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* Header */
+.header {
+  background-color: #1f1f1f;
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #2b2b2b;
+}
+
+.title {
+  font-size: 1.6rem;
+  font-weight: 600;
+}
+
+.modelButtons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.modelButton {
+  background-color: #2b2b2b;
+  color: #fff;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s ease-in-out;
+}
+
+.modelButton:hover {
+  background-color: #3d3d3d;
+}
+
+.modelButtonSelected {
+  background-color: #007bff;
+  border: none;
+}
+
+/* Input Area */
+.inputArea {
+  padding: 1rem 2rem;
+  background-color: #1f1f1f;
+  border-top: 1px solid #2b2b2b;
+}
+
+.inputContainer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.input {
+  flex: 1;
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: none;
+  font-size: 1rem;
+  background-color: #2a2a2a;
+  color: #fff;
+}
+
+.input::placeholder {
+  color: #aaa;
+}
+
+.sendButton {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.2s ease-in-out;
+}
+
+.sendButton:hover {
+  background-color: #0056b3;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 4px;
+}
