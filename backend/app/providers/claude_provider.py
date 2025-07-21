@@ -1,15 +1,8 @@
-# backend/app/providers/claude_provider.py
 from __future__ import annotations
 
 import os, time, json
 from typing import List
-
 from anthropic import Anthropic, AnthropicError
-
-
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-if not client.api_key:
-    raise ValueError("ANTHROPIC_API_KEY not found in environment")
 
 DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
 MAX_RETRIES = 3
@@ -24,57 +17,63 @@ def _clean_history(raw: List[dict]) -> tuple[List[dict], str | None]:
         if m["role"] == "system":
             system_msg = m["content"]
             continue
-        # skip empty or previous error text
         if "[Claude Error]" in m.get("content", "") or not m.get("content", "").strip():
             continue
         out.append(m)
 
-    # guarantee at least one user message
     if not any(m["role"] == "user" for m in out):
         out.append({"role": "user", "content": "Please respond to the previous message."})
 
     return out, system_msg
 
 def ask_claude(messages: List[dict], model: str = DEFAULT_MODEL) -> str:
-    clean_msgs, system_msg = _clean_history(messages)
-    kwargs = dict(
-        model=model,
-        max_tokens=1024,
-        temperature=0.7,
-        messages=clean_msgs,
-    )
-    if system_msg:
-        kwargs["system"] = system_msg
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Anthropic error: API key not configured")
+        return "[Claude Error] ANTHROPIC_API_KEY not found in environment"
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            print(f"[Claude] attempt {attempt}/{MAX_RETRIES} → {json.dumps(kwargs, indent=2)[:500]}...")
-            resp = client.messages.create(**kwargs)
+    try:
+        client = Anthropic(api_key=api_key)
+        clean_msgs, system_msg = _clean_history(messages)
+        kwargs = dict(
+            model=model,
+            max_tokens=1024,
+            temperature=0.7,
+            messages=clean_msgs,
+        )
+        if system_msg:
+            kwargs["system"] = system_msg
 
-            if not resp.content:
-                raise AnthropicError("Claude returned empty content")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                print(f"[Claude] attempt {attempt}/{MAX_RETRIES} → {json.dumps(kwargs, indent=2)[:500]}...")
+                resp = client.messages.create(**kwargs)
 
-            answer = resp.content[0].text.strip()
-            return answer or "[Claude Error] Claude returned empty content"
+                if not resp.content:
+                    raise AnthropicError("Claude returned empty content")
 
-        except AnthropicError as err:
-            # Detect overload / 529
-            err_str = str(err).lower()
-            if "overloaded" in err_str or "529" in err_str:
-                if attempt < MAX_RETRIES:
-                    wait = BACKOFF_SEC * attempt
-                    print(f"[Claude] overloaded – retrying in {wait:.1f}s")
-                    time.sleep(wait)
-                    continue
-                return "[Claude Error] Claude is temporarily overloaded – please retry."
+                answer = resp.content[0].text.strip()
+                return answer or "[Claude Error] Claude returned empty content"
 
-            # Any other Anthropic API error → return immediately
-            print(f"[Claude] API error: {err}")
-            return f"[Claude Error] {err}"
+            except AnthropicError as err:
+                err_str = str(err).lower()
+                if "overloaded" in err_str or "529" in err_str:
+                    if attempt < MAX_RETRIES:
+                        wait = BACKOFF_SEC * attempt
+                        print(f"[Claude] overloaded – retrying in {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+                    return "[Claude Error] Claude is temporarily overloaded – please retry."
 
-        except Exception as err:
-            print(f"[Claude] unexpected error: {err}")
-            return f"[Claude Error] {err}"
+                print(f"[Claude] API error: {err}")
+                return f"[Claude Error] {err}"
 
-    # Shouldn’t reach here
-    return "[Claude Error] Unknown failure after retries"
+            except Exception as err:
+                print(f"[Claude] unexpected error: {err}")
+                return f"[Claude Error] {err}"
+
+        return "[Claude Error] Unknown failure after retries"
+
+    except Exception as e:
+        print(f"[Claude] unexpected error during client initialization: {e}")
+        return f"[Claude Error] {e}"

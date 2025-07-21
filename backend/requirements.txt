@@ -1,5 +1,4 @@
 # Core FastAPI stack
-pip>=23.1
 fastapi==0.116.1
 uvicorn==0.35.0
 starlette==0.47.1
@@ -7,9 +6,8 @@ starlette==0.47.1
 # Pydantic + typing
 pydantic==2.11.7
 pydantic_core==2.33.2
-typing-inspection==0.4.1
-typing_extensions==4.14.1
 annotated-types==0.7.0
+typing_extensions==4.14.1
 
 # ASGI dependencies
 anyio==4.9.0
@@ -17,20 +15,26 @@ h11==0.16.0
 sniffio==1.3.1
 click==8.2.1
 colorama==0.4.6
-idna==3.10  # Added back for potential HTTP library compatibility
+idna==3.10
 
 # Environment variables
 python-dotenv==1.1.1
 
-# DB
-sqlalchemy==2.0.30
+# Database
+sqlalchemy==2.0.35
 
-# Tokenization (updated for GPT-4o support)
+# Tokenization
 tiktoken==0.7.0
 
 # LLM providers
-openai>=1.0.0
-anthropic>=0.58.2
+openai==1.50.2
+anthropic==0.58.2
 
 # YouTube support
-google-api-python-client==2.125.0
+google-api-python-client==2.149.0
+
+# Trading and sentiment analysis
+# nltk==3.9.1
+# ccxt==4.3.118
+# pandas==2.2.2
+# numpy==2.1.1
