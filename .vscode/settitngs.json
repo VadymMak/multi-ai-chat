@@ -2,5 +2,8 @@
   "python.languageServer": "Pylance",
   "python.analysis.extraPaths": ["E:/projects/ai-assistant/backend/app"],
   "python.envFile": "${workspaceFolder}/.vscode/.env",
-  "python.pythonPath": "E:\\projects\\llm_env\\Scripts\\python.exe"
+  "python.pythonPath": "E:\\projects\\llm_env\\Scripts\\python.exe",
+  "files.associations": {
+    "tailwind.css": "postcss"
+  }
 }

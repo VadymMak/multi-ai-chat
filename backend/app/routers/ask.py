@@ -1,4 +1,5 @@
 # backend/app/routers/ask.py
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Literal
@@ -12,28 +13,29 @@ from app.memory.db import get_db
 router = APIRouter()
 
 class AskRequest(BaseModel):
-    query: str
+    question: str
     provider: Literal["openai", "anthropic", "all"]
-    role_id: str
+    role: str  # ← updated to match frontend
 
 @router.post("/ask")
 async def ask_route(data: AskRequest, db: Session = Depends(get_db)):
     memory = MemoryManager(db)
-    history = memory.retrieve_messages(data.role_id, limit=6)
-    user_input = {"role": "user", "content": data.query}
+    role_id = data.role  # ← internal name remains role_id if needed
+    history = memory.retrieve_messages(role_id, limit=6)
+    user_input = {"role": "user", "content": data.question}
 
     if data.provider == "openai":
         answer = ask_openai(history + [user_input])
-        raw_text = f"User: {data.query}\nOpenAI: {answer}"
+        raw_text = f"User: {data.question}\nOpenAI: {answer}"
         summary = memory.summarize_messages([raw_text])
-        memory.store_memory(data.role_id, summary, raw_text)
+        memory.store_memory(role_id, summary, raw_text)
         return {"provider": "openai", "answer": answer}
 
     elif data.provider == "anthropic":
         answer = ask_claude(history + [user_input])
-        raw_text = f"User: {data.query}\nAnthropic: {answer}"
+        raw_text = f"User: {data.question}\nAnthropic: {answer}"
         summary = memory.summarize_messages([raw_text])
-        memory.store_memory(data.role_id, summary, raw_text)
+        memory.store_memory(role_id, summary, raw_text)
         return {"provider": "anthropic", "answer": answer}
 
     elif data.provider == "all":
@@ -50,13 +52,13 @@ Claude said:
 """
         summary = ask_openai([{"role": "user", "content": summary_prompt}])
         raw_text = (
-            f"User: {data.query}\n"
+            f"User: {data.question}\n"
             f"OpenAI: {openai_answer}\n"
             f"Anthropic: {claude_answer}\n"
             f"Final: {summary}"
         )
         mem_summary = memory.summarize_messages([raw_text])
-        memory.store_memory(data.role_id, mem_summary, raw_text)
+        memory.store_memory(role_id, mem_summary, raw_text)
 
         return {
             "provider": "all",

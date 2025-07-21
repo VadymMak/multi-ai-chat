@@ -1,67 +1,30 @@
-import React, { useState } from "react";
-import styles from "./App.module.css";
-import Header from "./components/Header/Header";
-import ChatArea from "./components/ChartArea/ChatArea";
-import InputBox from "./components/InputArea/InputBox";
-import { Model } from "./types";
-import { useAiChat } from "./hooks/useAiChat";
+// File: src/App.tsx
+
+import React from "react";
+import { Link } from "react-router-dom";
 
 const App: React.FC = () => {
-  const { messages, isLoading, askLLM, askAiToAi } = useAiChat();
-  const [input, setInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState<Model>("all");
-  const [selectedRole, setSelectedRole] = useState("llm_engineer");
-
-  const handleSend = async () => {
-    if (!input.trim() || isLoading) {
-      console.log(
-        "handleSend blocked: input empty or isLoading:",
-        isLoading,
-        input
-      );
-      return;
-    }
-    console.log(
-      "handleSend triggered with input:",
-      input,
-      "isLoading:",
-      isLoading
-    );
-    const prompt = input;
-    setInput("");
-    try {
-      if (selectedModel === "all") {
-        await askAiToAi(prompt, selectedRole);
-      } else {
-        await askLLM(prompt, selectedModel, selectedRole);
-      }
-    } catch (error) {
-      console.error("Error in handleSend:", error);
-    }
-  };
-
-  // NEW: Debug to monitor isLoading state
-  console.log("App render - isLoading:", isLoading);
-
   return (
-    <div className={styles.app}>
-      <Header
-        selectedModel={selectedModel}
-        onSelectModel={setSelectedModel}
-        selectedRole={selectedRole}
-        onSelectRole={setSelectedRole}
-      />
-      <ChatArea
-        messages={messages}
-        isLoading={isLoading}
-        selectedModel={selectedModel}
-      />
-      <InputBox
-        input={input}
-        setInput={setInput}
-        onSend={handleSend}
-        isLoading={isLoading}
-      />
+    // <div className="bg-black text-white text-5xl p-20 text-center">
+    //   Tailwind is working!
+    // </div>
+
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 text-gray-800 p-8">
+      <h1 className="text-3xl font-bold mb-6">🤖 Multi-AI Assistant</h1>
+      <p className="mb-4 text-center max-w-md">
+        Welcome to your AI assistant powered by OpenAI, Anthropic, and Grok. You
+        can ask questions, switch roles, or initiate an AI-to-AI debate.
+      </p>
+      <Link
+        to="/chat"
+        className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+      >
+        💬 Enter Chat Interface
+      </Link>
+
+      <footer className="mt-10 text-sm text-gray-500">
+        © {new Date().getFullYear()} Your Assistant Project
+      </footer>
     </div>
   );
 };

@@ -1,17 +1,22 @@
+// File: src/index.tsx
+
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
-import * as serviceWorkerRegistration from "./serviceWorkerRegistration";
-import reportWebVitals from "./reportWebVitals";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import "./styles/tailwind.css";
 
-const root = ReactDOM.createRoot(
-  document.getElementById("root") as HTMLElement
-);
+import Landing from "./pages/Landing";
+import AiChat from "./features/aiConversation/AiChat";
+
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+
 root.render(
   <React.StrictMode>
-    <App />
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/chat" element={<AiChat />} />
+      </Routes>
+    </BrowserRouter>
   </React.StrictMode>
 );
-
-serviceWorkerRegistration.register();
-reportWebVitals();
