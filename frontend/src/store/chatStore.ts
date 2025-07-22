@@ -1,14 +1,8 @@
+// src/store/chatStore.ts
 import { create } from "zustand";
-
-export type Sender = "user" | "openai" | "anthropic" | "grok";
-
-export interface ChatMessage {
-  id: string;
-  sender: Sender;
-  text: string;
-  isTyping?: boolean;
-  isSummary?: boolean;
-}
+import { persist } from "zustand/middleware";
+import { createSelectors } from "./createSelectors";
+import type { ChatMessage } from "../types/chat";
 
 export interface ChatState {
   messages: ChatMessage[];
@@ -20,30 +14,45 @@ export interface ChatState {
   clearMessages: () => void;
 }
 
-export const useChatStore = create<ChatState>((set) => ({
-  messages: [],
-  isTyping: false,
+const useBaseChatStore = create<ChatState>()(
+  persist(
+    (set) => ({
+      messages: [],
+      isTyping: false,
+      addMessage: (msg) =>
+        set((state) => {
+          const exists = state.messages.some((m) => m.id === msg.id);
+          if (exists) return state; // Skip if duplicate
+          return { messages: [...state.messages, msg] };
+        }),
 
-  addMessage: (msg) =>
-    set((state) => ({
-      messages: [...state.messages, msg],
-    })),
+      setTyping: (typing) => set({ isTyping: typing }),
+      updateMessageText: (id, newText) => {
+        console.log(`[Zustand] Updating text for ${id}:`, newText.slice(0, 60));
+        set((state) => ({
+          messages: state.messages.map((msg) =>
+            msg.id === id ? { ...msg, text: newText } : msg
+          ),
+        }));
+      },
 
-  setTyping: (typing) => set(() => ({ isTyping: typing })),
+      markMessageDone: (id) => {
+        console.log(`[Zustand] Marking done for ${id}`);
+        set((state) => ({
+          messages: state.messages.map((msg) =>
+            msg.id === id ? { ...msg, isTyping: false } : msg
+          ),
+        }));
+      },
 
-  updateMessageText: (id, newText) =>
-    set((state) => ({
-      messages: state.messages.map((msg) =>
-        msg.id === id ? { ...msg, text: newText } : msg
-      ),
-    })),
+      clearMessages: () => set({ messages: [] }),
+    }),
+    {
+      name: "chat-storage",
+      partialize: (state) => ({ messages: state.messages }),
+    }
+  )
+);
 
-  markMessageDone: (id) =>
-    set((state) => ({
-      messages: state.messages.map((msg) =>
-        msg.id === id ? { ...msg, isTyping: false } : msg
-      ),
-    })),
-
-  clearMessages: () => set({ messages: [] }),
-}));
+// ✅ Correctly typed enhanced selector version
+export const useChatStore = createSelectors<ChatState>(useBaseChatStore);

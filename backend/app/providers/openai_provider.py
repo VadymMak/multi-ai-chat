@@ -8,7 +8,6 @@ DEFAULT_MODEL = "gpt-4o"
 MAX_TOKENS = 1024
 TEMPERATURE = 0.7
 MAX_RETRIES = 3
-BACKOFF_SEC = 1.0
 
 @retry(stop=stop_after_attempt(MAX_RETRIES), wait=wait_exponential(multiplier=1, min=4, max=10))
 def ask_openai(
@@ -16,6 +15,7 @@ def ask_openai(
     model: str = DEFAULT_MODEL,
     temperature: float = TEMPERATURE,
     max_tokens: int = MAX_TOKENS,
+    system_prompt: str | None = None,  # ✅ allow memory injection via system prompt
 ) -> str:
     api_key = os.getenv("CHATITNOW_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -23,15 +23,22 @@ def ask_openai(
         return "[OpenAI Error] API key not configured"
 
     try:
-        client = openai.OpenAI(api_key=api_key)  # Add base_url if ChatItNow requires
+        client = openai.OpenAI(api_key=api_key)
+
+        final_messages = []
+        if system_prompt:
+            final_messages.append({"role": "system", "content": system_prompt})
+        final_messages.extend(messages)
+
         response = client.chat.completions.create(
             model=model,
-            messages=messages,
+            messages=final_messages,
             max_tokens=max_tokens,
             temperature=temperature,
         )
         if not response or not response.choices:
             return "[OpenAI Error] Empty response from OpenAI"
+
         answer = response.choices[0].message.content.strip()
         return answer or "[OpenAI Error] Empty response"
     except openai.AuthenticationError as e:

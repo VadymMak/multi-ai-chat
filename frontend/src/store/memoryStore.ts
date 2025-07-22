@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { MemoryRole } from "../types/memory";
+import type { MemoryRole } from "../types/memory";
 
 interface MemoryStore {
   role: MemoryRole;
@@ -12,11 +12,12 @@ interface MemoryStore {
 export const useMemoryStore = create<MemoryStore>()(
   persist(
     (set) => ({
-      role: "LLM Engineer", // default
+      role: "LLM Engineer", // default role
       setRole: (role) => set({ role }),
     }),
     {
       name: "memory-role-store",
+      partialize: (state) => ({ role: state.role }), // only persist `role`
     }
   )
 );

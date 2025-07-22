@@ -1,8 +1,7 @@
 import React from "react";
-import { useMemoryStore } from "../../store/memoryStore";
-import { MemoryRole } from "../../types/memory";
+import { useModelStore } from "../../store/modelStore";
 
-const roles: MemoryRole[] = [
+const roles: string[] = [
   "LLM Engineer",
   "Vessel Engineer",
   "ML Engineer",
@@ -13,8 +12,8 @@ const roles: MemoryRole[] = [
 ];
 
 const MemoryRoleSelector: React.FC = () => {
-  const currentRole = useMemoryStore((state) => state.role);
-  const setRole = useMemoryStore((state) => state.setRole);
+  const currentRole = useModelStore((state) => state.role);
+  const setRole = useModelStore((state) => state.setRole);
 
   return (
     <div className="flex flex-wrap gap-2 bg-white border border-gray-200 p-3 rounded-xl shadow-sm">

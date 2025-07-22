@@ -1,4 +1,3 @@
-# backend/app/memory/models.py
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -15,10 +14,12 @@ class Role(Base):
 
     memories = relationship("MemoryEntry", back_populates="role")
 
+
 class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 
     id = Column(Integer, primary_key=True)
+    project_id = Column(String(100), nullable=False, default="default")  # ✅ New field
     role_id = Column(Integer, ForeignKey("roles.id"))
     timestamp = Column(DateTime, default=datetime.utcnow)
     tokens = Column(Integer)

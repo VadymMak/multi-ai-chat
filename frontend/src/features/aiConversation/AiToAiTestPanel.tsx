@@ -1,5 +1,7 @@
 import React, { useState } from "react";
 import { sendAiToAiMessage } from "../../services/aiApi";
+import { useModelStore } from "../../store/modelStore";
+import { useProjectStore } from "../../store/projectStore";
 
 const AiToAiTestPanel: React.FC = () => {
   const [topic, setTopic] = useState("");
@@ -7,11 +9,14 @@ const AiToAiTestPanel: React.FC = () => {
   const [result, setResult] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const role = useModelStore((state) => state.role);
+  const projectId = useProjectStore((state) => state.projectId); // ✅ pull projectId from store
+
   const handleRun = async () => {
     if (!topic.trim()) return;
     setLoading(true);
     try {
-      const response = await sendAiToAiMessage(topic, starter);
+      const response = await sendAiToAiMessage(topic, starter, role, projectId); // ✅ pass all 4 args
       setResult(response);
     } catch (err) {
       console.error("AI-to-AI error:", err);
@@ -51,24 +56,62 @@ const AiToAiTestPanel: React.FC = () => {
       </div>
 
       {result && (
-        <div className="bg-gray-50 border rounded-lg p-4 text-sm space-y-3">
+        <div className="bg-gray-50 border rounded-lg p-4 text-sm space-y-4">
           <div>
             <p className="font-semibold mb-1">Conversation:</p>
             <div className="space-y-2">
-              {result.conversation.map((msg: any, i: number) => (
+              {result.messages.map((msg: any, i: number) => (
                 <div key={i}>
-                  <strong>{msg.role}:</strong> {msg.content}
+                  <strong>{msg.sender}:</strong> {msg.text}
                 </div>
               ))}
             </div>
           </div>
 
-          <div>
-            <p className="font-semibold">🧾 Final Summary:</p>
-            <div className="bg-white border rounded p-3 mt-1 text-gray-700">
-              {result.final_summary}
+          {result.messages[2]?.text && (
+            <div>
+              <p className="font-semibold">🧾 Final Summary:</p>
+              <div className="bg-white border rounded p-3 mt-1 text-gray-700">
+                {result.messages[2].text}
+              </div>
             </div>
-          </div>
+          )}
+
+          {Array.isArray(result.youtube) && result.youtube.length > 0 && (
+            <div>
+              <p className="font-semibold">📺 YouTube Results:</p>
+              <ul className="list-disc pl-5 space-y-1 text-blue-700">
+                {result.youtube.map((v: any, i: number) => (
+                  <li key={i}>
+                    <a href={v.url} target="_blank" rel="noopener noreferrer">
+                      {v.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {Array.isArray(result.web) && result.web.length > 0 && (
+            <div>
+              <p className="font-semibold">🌐 Web Search Results:</p>
+              <ul className="list-disc pl-5 space-y-2 text-gray-800">
+                {result.web.map((item: any, i: number) => (
+                  <li key={i}>
+                    <a
+                      href={item.url}
+                      className="text-blue-700"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {item.title}
+                    </a>
+                    <p className="text-gray-600 text-xs">{item.snippet}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -3,21 +3,16 @@ from __future__ import annotations
 import os
 import time
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from anthropic import Anthropic, AnthropicError
+from anthropic.types import Message
 
 DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
 MAX_RETRIES = 3
 BACKOFF_SEC = 1.5
 
 
-def _clean_history(raw: List[dict]) -> Tuple[List[dict], str | None]:
-    """
-    Filters the input messages:
-    - Removes invalid/empty/error messages
-    - Keeps at most 6 most recent messages
-    - Ensures the last message is from user
-    """
+def _clean_history(raw: List[dict]) -> Tuple[List[dict], Optional[str]]:
     clean: List[dict] = []
     system_msg = None
 
@@ -39,11 +34,13 @@ def _clean_history(raw: List[dict]) -> Tuple[List[dict], str | None]:
     return clean[-6:], system_msg
 
 
-def ask_claude(messages: List[dict], model: str = DEFAULT_MODEL) -> str:
-    """
-    Sends a message to Claude and returns the response text.
-    Automatically retries if the API is overloaded.
-    """
+def ask_claude(
+    messages: List[dict],
+    model: str = DEFAULT_MODEL,
+    system: Optional[str] = None,
+    memory: Optional[List[dict]] = None,
+    temperature: float = 0.7
+) -> str:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return "[Claude Error] Missing ANTHROPIC_API_KEY in environment"
@@ -54,22 +51,47 @@ def ask_claude(messages: List[dict], model: str = DEFAULT_MODEL) -> str:
         print(f"[Claude] Client init failed: {e}")
         return f"[Claude Error] {e}"
 
-    clean_msgs, system_msg = _clean_history(messages)
+    # Step 1: Clean input
+    if memory is None:
+        memory, inferred_system = _clean_history(messages)
+    else:
+        inferred_system = None
 
+    final_messages = []
+    if memory:
+        final_messages.extend(memory)
+    final_messages.extend(messages)
+
+    # Validate messages before sending
+    print("✅ Final messages being sent:")
+    for msg in final_messages:
+        if msg["role"] not in {"user", "assistant"}:
+            print(f"[Claude] ⚠️ Invalid message role detected: {msg}")
+            return f"[Claude Error] Invalid message role: {msg['role']}"
+
+    # Step 2: Build API call
     kwargs = {
         "model": model,
         "max_tokens": 1024,
-        "temperature": 0.7,
-        "messages": clean_msgs
+        "temperature": temperature,
+        "messages": final_messages,
     }
+    if system:
+        kwargs["system"] = system
+    elif inferred_system:
+        kwargs["system"] = inferred_system
 
-    if system_msg:
-        kwargs["system"] = system_msg
-
+    # Step 3: Send request with retries
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            print(f"[Claude] attempt {attempt}/{MAX_RETRIES} → {json.dumps(kwargs, indent=2)[:400]}...")
-            response: Message = client.messages.create(**kwargs)
+            print(f"[Claude] attempt {attempt}/{MAX_RETRIES} → {json.dumps(kwargs, indent=2)[:500]}...")
+            response: Message = client.messages.create(
+                model=kwargs["model"],
+                max_tokens=kwargs["max_tokens"],
+                temperature=kwargs["temperature"],
+                messages=kwargs["messages"],
+                system=kwargs.get("system")
+            )
             print(f"[Claude] full response: {response}")
 
             if not response.content or not isinstance(response.content, list):
