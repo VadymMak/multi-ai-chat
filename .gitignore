@@ -1,6 +1,20 @@
-# Ignore node_modules and Python env
-frontend/node_modules
-backend/__pycache__/
+# Node.js and frontend artifacts
+frontend/node_modules/
+*.log
+*.lock
+
+# Python artifacts
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
 *.env
 llm_env/
+.env
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore documentation drafts (optional)
+FollowMe.md

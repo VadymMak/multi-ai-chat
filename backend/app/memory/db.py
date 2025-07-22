@@ -1,60 +1,73 @@
-# backend/app/memory/db.py
+# File: backend/app/memory/db.py
+
 import os
+import time
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import OperationalError
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import OperationalError
+
 from .models import Base
 
-# Configure logging
+# ✅ Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# ✅ Load environment variables
 load_dotenv(dotenv_path="E:/projects/ai-assistant/backend/.env")
 
-# Database URL: Default to SQLite, allow override via environment variable
-SQLALCHEMY_URL = os.getenv("SQLALCHEMY_URL", "sqlite:///./memory.db")
+# ✅ Determine database path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.abspath(os.path.join(BASE_DIR, "../../memory.db"))
 
-# Engine configuration
+# ✅ SQLAlchemy database URL
+SQLALCHEMY_URL = os.getenv("SQLALCHEMY_URL", f"sqlite:///{DB_PATH}")
+
+# ✅ Engine config based on backend
 engine_args = {}
 if SQLALCHEMY_URL.startswith("sqlite"):
     engine_args["connect_args"] = {"check_same_thread": False}
 elif SQLALCHEMY_URL.startswith("postgresql"):
-    engine_args["pool_size"] = 5
-    engine_args["max_overflow"] = 10
-    engine_args["pool_timeout"] = 30
+    engine_args.update({
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_timeout": 30,
+    })
 
+# ✅ Create SQLAlchemy engine
 try:
     engine = create_engine(SQLALCHEMY_URL, **engine_args)
     logger.info(f"Database engine created: {SQLALCHEMY_URL}")
 except Exception as e:
-    logger.error(f"Failed to create database engine: {e}")
+    logger.error(f"❌ Failed to create engine: {e}")
     raise
 
+# ✅ Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def init_db() -> None:
-    """Create tables if they don't exist, with retry logic for robustness."""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            Base.metadata.create_all(bind=engine)
-            logger.info("Database tables created successfully")
-            return
-        except OperationalError as e:
-            logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to create tables: {e}")
-            if attempt == max_retries - 1:
-                logger.error("Failed to create database tables after retries")
-                raise
-            import time
-            time.sleep(1)  # Wait before retrying
-
+# ✅ For FastAPI dependency injection
 def get_db():
-    """Dependency to provide a database session."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+# ✅ For standalone script access (e.g. insert/test/query)
+def get_session() -> Session:
+    return SessionLocal()
+
+# ✅ Create tables if missing
+def init_db(retries: int = 3):
+    for attempt in range(retries):
+        try:
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables created successfully.")
+            return
+        except OperationalError as e:
+            logger.warning(f"⚠️ Attempt {attempt+1}/{retries} failed: {e}")
+            if attempt == retries - 1:
+                logger.error("❌ Failed to create tables after all retries.")
+                raise
+            time.sleep(1)
