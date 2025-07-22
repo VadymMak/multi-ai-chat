@@ -1,5 +1,8 @@
 # app/memory/utils.py
+
 import tiktoken
+from sqlalchemy.orm import Session
+from app.memory.models import Project
 
 MAX_MEMORY_TOKENS = 1000
 ENCODING_MODEL = "gpt-3.5-turbo"
@@ -14,3 +17,9 @@ def trim_memory(texts: list[str], max_tokens: int = MAX_MEMORY_TOKENS) -> str:
     if len(tokens) > max_tokens:
         tokens = tokens[-max_tokens:]
     return enc.decode(tokens)
+
+
+def get_project_structure(db: Session, project_id: int) -> str:
+    """Retrieve project_structure markdown string for prompt injection."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    return project.project_structure or "" if project else ""

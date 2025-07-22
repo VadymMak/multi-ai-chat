@@ -1,28 +1,36 @@
-import React from "react";
+import React, { useMemo, useCallback } from "react";
 import { useModelStore } from "../../store/modelStore";
 import { getModelIcon } from "../../utils/getModelIcons";
-import { FiZap } from "react-icons/fi"; // Custom icon for Boost Mode
-
-const models: {
-  id: "openai" | "anthropic" | "grok" | "boost";
-  label: string;
-}[] = [
-  { id: "openai", label: "OpenAI" },
-  { id: "anthropic", label: "Claude" },
-  { id: "grok", label: "Grok" },
-  { id: "boost", label: "Boost Mode" },
-];
+import { FiZap } from "react-icons/fi"; // Boost Mode icon
 
 const AiSelector: React.FC = () => {
   const current = useModelStore((state) => state.provider);
   const setProvider = useModelStore((state) => state.setProvider);
+
+  const models = useMemo(
+    () =>
+      [
+        { id: "openai", label: "OpenAI" },
+        { id: "anthropic", label: "Claude" },
+        { id: "grok", label: "Grok" },
+        { id: "boost", label: "Boost Mode" },
+      ] as const, // ✅ fixes TypeScript narrowing
+    []
+  );
+
+  const handleSelect = useCallback(
+    (id: (typeof models)[number]["id"]) => {
+      setProvider(id);
+    },
+    [setProvider] // ✅ removed models
+  );
 
   return (
     <div className="flex flex-wrap gap-2 bg-white border border-gray-200 p-3 rounded-xl shadow-sm">
       {models.map((model) => (
         <button
           key={model.id}
-          onClick={() => setProvider(model.id)}
+          onClick={() => handleSelect(model.id)}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium border transition 
             ${
               current === model.id

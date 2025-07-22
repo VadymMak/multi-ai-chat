@@ -3,14 +3,26 @@ import { motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import { ChatMessage } from "../../types/chat";
 import { getModelIcon } from "../../utils/getModelIcons";
+import { FaYoutube, FaGlobeEurope } from "react-icons/fa";
 
 interface Props {
   message: ChatMessage;
-  isLatestAiMessage?: boolean; // ✅ allow for typing effects, optional
+  isLatestAiMessage?: boolean;
 }
 
-const ChatMessageBubble: React.FC<Props> = ({ message, isLatestAiMessage }) => {
-  const isUser = message.sender === "user";
+const ChatMessageBubble: React.FC<Props> = ({ message }) => {
+  const { sender, text, isSummary, isTyping } = message;
+
+  const isUser = sender === "user";
+  const isYouTube = sender === "youtube";
+  const isWeb = sender === "web";
+  const isOpenAI = sender === "openai" && !isSummary;
+  const isClaude = sender === "anthropic" && !isSummary;
+
+  const isYouTubeFallback =
+    isYouTube && text?.includes("No specific results found");
+  const isWebFallback =
+    isWeb && text?.includes("No specific Wikipedia results found");
 
   return (
     <motion.div
@@ -20,56 +32,101 @@ const ChatMessageBubble: React.FC<Props> = ({ message, isLatestAiMessage }) => {
       className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
     >
       <div
-        className={`relative px-4 py-3 rounded-2xl shadow-md max-w-[85%] sm:max-w-[70%] break-words ${
+        className={`relative px-4 py-3 rounded-2xl max-w-[85%] sm:max-w-[70%] whitespace-pre-wrap leading-tight
+        ${
           isUser
-            ? "bg-blue-600 text-white rounded-br-sm"
-            : message.isSummary
-            ? "bg-blue-50 border border-blue-300 text-blue-900 rounded-bl-sm"
-            : "bg-gray-100 text-gray-900 rounded-bl-sm"
+            ? "bg-blue-600 text-white rounded-br-sm shadow-md"
+            : isYouTube
+            ? "bg-red-50 text-red-900 rounded-bl-sm border border-red-300 shadow-sm"
+            : isWeb
+            ? "bg-green-50 text-green-900 rounded-bl-sm border border-green-300 shadow-sm"
+            : isSummary
+            ? "bg-violet-50 text-violet-900 rounded-bl-sm shadow-sm"
+            : "bg-gray-100 text-gray-900 rounded-bl-sm shadow-md"
         }`}
       >
-        {/* AI sender info */}
-        {!isUser && (
+        {/* Sender Badge */}
+        {!isUser && !isYouTubeFallback && (
           <div className="flex items-center gap-2 mb-1 text-sm text-gray-500">
-            {getModelIcon(message.sender)}
-            <span className="capitalize">
-              {message.isSummary ? "📘 Final Summary" : message.sender}
-            </span>
+            {isYouTube && (
+              <>
+                {FaYoutube({ className: "text-red-500", size: 16 })}
+                <span>📺 YouTube Insight</span>
+              </>
+            )}
+            {isWeb && (
+              <>
+                {FaGlobeEurope({ className: "text-green-600", size: 16 })}
+                <span>🌐 Web Insight</span>
+              </>
+            )}
+            {isSummary && (
+              <>
+                {getModelIcon("anthropic")}
+                <span className="font-serif italic text-[17px] text-violet-800">
+                  ✅ Final Answer by <strong>Claude</strong>
+                </span>
+              </>
+            )}
+            {isOpenAI && (
+              <>
+                {getModelIcon("openai")}
+                <span className="text-blue-700 font-medium">💡 OpenAI</span>
+              </>
+            )}
+            {isClaude && (
+              <>
+                {getModelIcon("anthropic")}
+                <span className="text-violet-700 font-medium">🤖 Claude</span>
+              </>
+            )}
           </div>
         )}
 
-        {/* Markdown-rendered content */}
-        <ReactMarkdown
-          components={{
-            p: ({ node, ...props }) => (
-              <p
-                className="prose prose-sm sm:prose-base break-words max-w-full"
-                {...props}
-              />
-            ),
-            a: ({ node, children, ...props }) => (
-              <a
-                className="text-blue-200 underline hover:text-white"
-                target="_blank"
-                rel="noopener noreferrer"
-                {...props}
-              >
-                {children}
-              </a>
-            ),
-            code: ({ node, ...props }) => (
-              <code
-                className="bg-gray-200 px-1 py-0.5 rounded text-xs"
-                {...props}
-              />
-            ),
-          }}
+        {/* Message Content */}
+        <div
+          className={`text-sm leading-tight break-words ${
+            isSummary ? "text-violet-900 font-serif" : ""
+          }`}
         >
-          {message.text}
-        </ReactMarkdown>
+          <ReactMarkdown
+            components={{
+              p: ({ node, ...props }) => <p className="mb-2" {...props} />,
+              a: ({ node, children, ...props }) => (
+                <a
+                  className={`underline ${
+                    isUser
+                      ? "text-blue-200 hover:text-white"
+                      : "text-blue-600 hover:text-blue-800"
+                  }`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  {...props}
+                >
+                  {children}
+                </a>
+              ),
+              code: ({ node, ...props }) => (
+                <code
+                  className="bg-gray-200 px-1 py-0.5 rounded text-xs font-mono"
+                  {...props}
+                />
+              ),
+              li: ({ node, children, ...props }) => (
+                <li className="ml-5 list-disc leading-tight mb-1" {...props}>
+                  {children}
+                </li>
+              ),
+            }}
+          >
+            {isWebFallback
+              ? "⚠️ No direct Wikipedia match. Try the manual search link below."
+              : text || ""}
+          </ReactMarkdown>
+        </div>
 
-        {/* Optional Typing indicator */}
-        {message.isTyping && (
+        {/* Typing Indicator */}
+        {isTyping && (
           <div className="mt-1 animate-pulse text-sm text-gray-400">
             Typing...
           </div>

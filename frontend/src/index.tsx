@@ -1,22 +1,18 @@
 // File: src/index.tsx
-
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import "./styles/tailwind.css";
+import App from "./App";
+import "./styles/tailwind.css"; // or your global styles
 
-import Landing from "./pages/Landing";
-import AiChat from "./features/aiConversation/AiChat";
+// ✅ Remove preloader before rendering React
+const preloader = document.getElementById("preloader");
+if (preloader) {
+  preloader.remove();
+}
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
-
 root.render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/chat" element={<AiChat />} />
-      </Routes>
-    </BrowserRouter>
+    <App />
   </React.StrictMode>
 );

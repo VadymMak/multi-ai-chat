@@ -1,4 +1,5 @@
 # backend/app/memory/db.py
+
 import os
 import logging
 from sqlalchemy import create_engine
@@ -14,8 +15,12 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv(dotenv_path="E:/projects/ai-assistant/backend/.env")
 
-# Database URL: Default to SQLite, allow override via environment variable
-SQLALCHEMY_URL = os.getenv("SQLALCHEMY_URL", "sqlite:///./memory.db")
+# Determine absolute path to memory.db
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.abspath(os.path.join(BASE_DIR, "../../memory.db"))
+
+# Database URL: Use env override, else default to memory.db in root
+SQLALCHEMY_URL = os.getenv("SQLALCHEMY_URL", f"sqlite:///{DB_PATH}")
 
 # Engine configuration
 engine_args = {}
