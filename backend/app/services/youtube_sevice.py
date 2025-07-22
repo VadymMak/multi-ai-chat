@@ -1,76 +1,156 @@
-import os, json, re, time
-from typing import Tuple, List
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+# app/services/youtube_sevice.py
+import os
+import json
+import re
+from typing import Tuple, List, Dict, Optional, Union
+
+try:
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.errors import HttpError  # type: ignore
+    _HAVE_GOOGLE_API = True
+except Exception:
+    # Degrade gracefully if the library isn't installed
+    build = None  # type: ignore
+    HttpError = Exception  # type: ignore
+    _HAVE_GOOGLE_API = False
+
 from app.memory.manager import MemoryManager
 
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-if not YOUTUBE_API_KEY:
-    raise RuntimeError("❌  YOUTUBE_API_KEY is missing from .env")
+
+def _extract_keywords(text: str, max_length: int = 120) -> str:
+    """Clean text and return a space-separated keyword string."""
+    text = (text or "").strip()
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
+    words = text.split()
+    stop = {"the", "and", "for", "with", "a", "an", "in", "to", "of", "by", "on"}
+    keywords = [w for w in words if len(w) > 2 and w.lower() not in stop]
+    return " ".join(keywords[:max_length]).strip()
+
+
+def _build_search_query(original: str) -> str:
+    """Apply simple heuristics to refine search query."""
+    cleaned = _extract_keywords(original.lower())
+    if not cleaned:
+        return "technology tutorial"
+
+    if any(k in cleaned for k in ("gpu", "nvidia", "ai")):
+        return f"{cleaned} GPU AI benchmark 2025"
+    if any(k in cleaned for k in ("monitor", "screen")):
+        return f"{cleaned} developer monitor reviews 2025"
+    if any(k in cleaned for k in ("compare", "price", "model")):
+        return f"{cleaned} updated comparison 2025"
+    if any(k in cleaned for k in ("contactor", "electrical", "220v")):
+        return f"{cleaned} electrical wiring tutorial"
+    if "dell" in cleaned:
+        return f"{cleaned} dell hardware repair guide"
+    return f"{cleaned} technology tutorial"
+
+
+def _search_youtube_api(api_key: str, query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """Call the YouTube Data API and return normalized hits."""
+    if not _HAVE_GOOGLE_API or build is None:
+        print("[YouTube] googleapiclient not installed; skipping API call.")
+        return []
+
+    yt = build("youtube", "v3", developerKey=api_key)
+    print(f"[YouTube] Searching for: '{query}'")
+    resp = yt.search().list(
+        part="snippet",
+        q=query,
+        type="video",
+        maxResults=max_results,
+        videoCategoryId="27",  # Technology category
+        order="relevance",
+        publishedAfter="2023-01-01T00:00:00Z",
+        safeSearch="none",
+    ).execute()
+
+    items = resp.get("items", []) or []
+    hits: List[Dict[str, str]] = []
+    for it in items:
+        vid = ((it.get("id") or {}).get("videoId") or "").strip()
+        if not vid:
+            continue
+        # Filter obvious garbage IDs (very rare)
+        if vid.startswith("s"):
+            continue
+        snip = it.get("snippet") or {}
+        title = (snip.get("title") or "").strip()
+        desc = (snip.get("description") or "").strip()
+        hits.append({
+            "title": title,
+            "videoId": vid,
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "description": desc[:200]
+        })
+    return hits
+
 
 def perform_youtube_search(
-    query: str, mem: MemoryManager, role_id: str
+    query: str,
+    mem: MemoryManager,
+    role_id: Union[int, str],
+    project_id: Union[int, str],
 ) -> Tuple[str, List[dict]]:
-    """Return (block-for-LLM, top-3 hits). With context-aware filtering."""
+    """
+    Perform a YouTube search, optionally retry on no results, and store findings in memory.
+    Returns a Markdown block and structured list of search results.
+    """
     try:
-        yt = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+        api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
+        if not api_key:
+            print("[YouTube] YOUTUBE_API_KEY missing; skipping search.")
+            return "\n\nℹ️ YouTube search not configured.", []
 
-        # Extract specific term from prompt
-        search_match = re.search(r"search for(?: and provide)?(?: 3)?(?: valid)?(?: YouTube links)?(?: with titles and URLs)? specifically about ([\w\s]+)", query, re.IGNORECASE)
-        search_query = search_match.group(1) if search_match else query.lower().strip()
+        # Build query & try search
+        search_query = _build_search_query(query or "")
+        hits = _search_youtube_api(api_key, search_query)[:3]
 
-        # Apply keyword filters
-        if any(kw in query.lower() for kw in ("contactor", "wiring", "electrical", "220v")):
-            search_query += " electrical engineering home system -tire -car"
-        elif "replace" in query.lower() or "change" in query.lower():
-            search_query += " tutorial -tire -car"
-        else:
-            search_query += " -tire -car"
-
-        resp = yt.search().list(
-            part="snippet",
-            q=search_query,
-            type="video",
-            maxResults=10,
-            videoCategoryId=27,  # Education/Tech
-            order="date",
-            publishedAfter="2024-01-01T00:00:00Z"
-        ).execute()
-
-        hits = [
-            {
-                "title": it["snippet"]["title"],
-                "videoId": it["id"]["videoId"],
-                "url": f"https://www.youtube.com/watch?v={it['id']['videoId']}",
-                "description": it["snippet"]["description"][:200] if it["snippet"]["description"] else ""
-            } for it in resp["items"]
-            if not it["id"]["videoId"].startswith("s")  # Skip Shorts
-        ][:3]
+        # Retry with fallback if no hits
+        if not hits:
+            fallback_query = _extract_keywords(query or "")
+            if fallback_query and fallback_query != search_query:
+                hits = _search_youtube_api(api_key, fallback_query)[:3]
+                search_query = fallback_query
 
         if not hits:
-            hits = [
-                {
-                    "title": "No specific results found",
-                    "url": f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}",
-                    "videoId": "fallback",
-                    "description": f"Search YouTube for '{search_query}' manually."
-                }
-            ] * 3
+            print("[YouTube] No relevant results. Returning fallback link.")
+            hits = [{
+                "title": "No relevant YouTube results found",
+                "videoId": "fallback",
+                "url": f"https://www.youtube.com/results?search_query={(search_query or 'technology').replace(' ', '+')}",
+                "description": f"Try this query manually: '{search_query}'"
+            }]
 
-        raw = f"YouTube search ({query}): {json.dumps(hits)}"
-        mem.store_memory(role_id, mem.summarize_messages([raw]), raw)
+        # Best-effort memory/audit (won’t fail the request if these error)
+        try:
+            raw = f"YouTube search ({query}): {json.dumps(hits, indent=2)}"
+            summary = mem.summarize_messages([raw])
+            mem.store_memory(
+                project_id=str(project_id),
+                role_id=int(role_id),
+                summary=summary,
+                raw_text=raw
+            )
+            try:
+                mem.insert_audit_log(str(project_id), int(role_id), None, "youtube", "search", search_query[:300])
+            except Exception:
+                pass
+        except Exception as e:
+            print("[YouTube] Memory logging failed:", e)
 
         block = (
-            f"\n\nYouTube search results for **{search_query}**:\n" +
-            "\n".join(f"- {h['title']} — {h['url']}" for h in hits) +
-            "\nPlease leverage these when crafting your answer."
+            f"\n\n▶️ **YouTube search results for:** `{search_query}`\n"
+            + "\n".join(f"- [{h['title']}]({h['url']})" for h in hits)
         )
-        print("[DEBUG] yt_block len:", len(block), "hits:", len(hits))
+
+        print("[YouTube] block_len:", len(block), "hits:", len(hits))
         return block, hits
 
     except HttpError as e:
-        print("[DEBUG] YouTube API error:", e)
-        return f"\n\nYouTube API Error: {str(e)}", []
+        print("[YouTube API Error]", e)
+        return "\n\n⚠️ YouTube API error.", []
+
     except Exception as e:
-        print("[DEBUG] General YouTube error:", e)
-        return "", []
+        print("[YouTube] General error:", e)
+        return "\n\n⚠️ YouTube search failed.", []

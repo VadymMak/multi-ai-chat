@@ -1,0 +1,41 @@
+--- a/src/store/chatStore.ts
++++ b/src/store/chatStore.ts
+@@ -1,3 +1,8 @@
++const fetchedHistoryKeys = new Set();
+# Added: Tracks fetched history to avoid redundant API calls
++const noHistoryKeys = new Set();
+# Added: Tracks sessions with no history to skip useless fetches
++
+ function loadOrInitSessionForRoleProject(roleId, projectId) {
++  const key = `${roleId}-${projectId}`;
++  if (fetchedHistoryKeys.has(key) || noHistoryKeys.has(key)) return;
+# Added: Tracks fetched history to avoid redundant API calls
+   // Fetch logic here
+ }
+
+--- a/src/components/Chat/ChatArea.tsx
++++ b/src/components/Chat/ChatArea.tsx
+@@ -1,3 +1,9 @@
++const hasSessionMessages = useMemo(() => {
+# Optimization: Memoized check to avoid unnecessary re-fetch loops
++  return messages[chatSessionId]?.length > 0;
++}, [messages, chatSessionId]);
++
+ useEffect(() => {
+-  loadOrInitSessionForRoleProject(roleId, projectId);
+-}, [roleId, projectId]);
++  if (!hasSessionMessages && !fetchedHistoryKeys.has(key)) {
+# Added: Tracks fetched history to avoid redundant API calls
++    loadOrInitSessionForRoleProject(roleId, projectId);
++  }
++}, [roleId, projectId, hasSessionMessages]);
+
+--- a/src/components/Chat/ChatHistoryPanel.tsx
++++ b/src/components/Chat/ChatHistoryPanel.tsx
+@@ -1,3 +1,3 @@
+ function ChatHistoryPanel() {
+-  const summaries = [];
++  const summaries = useChatStore((state) => state.summaries);
+# Updated: Now reading summaries directly from store instead of local state
+ }
+

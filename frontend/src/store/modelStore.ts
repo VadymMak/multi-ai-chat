@@ -1,23 +1,47 @@
 // File: src/store/modelStore.ts
-
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
 
-export type ModelProvider = "openai" | "anthropic" | "grok" | "boost";
+// ✅ Supported AI model providers
+export type ModelProvider = "openai" | "anthropic" | "grok" | "boost" | "all";
 
-interface ModelState {
-  provider: ModelProvider;
-  setProvider: (provider: ModelProvider) => void;
+// ✅ Role structure
+export interface MemoryRole {
+  id: number;
+  name: string;
 }
 
-export const useModelStore = create<ModelState>()(
+// ✅ Zustand store state
+interface ModelStore {
+  provider: ModelProvider;
+  role: MemoryRole | null;
+  setProvider: (provider: ModelProvider) => void;
+  setRole: (role: MemoryRole | null) => void;
+}
+
+// ✅ Zustand store with built-in persistence
+export const useModelStore = create<ModelStore>()(
   persist(
     (set) => ({
       provider: "openai",
-      setProvider: (provider) => set({ provider }),
+      role: null,
+
+      setProvider: (provider) => {
+        set({ provider });
+      },
+
+      setRole: (role) => {
+        set({ role });
+      },
     }),
     {
-      name: "model-store", // localStorage key
+      name: "model-store",
+      version: 1,
+      storage: createJSONStorage(() => sessionStorage), // ✅ Matches chat/memory/project store
+      partialize: (state) => ({
+        provider: state.provider, // 🧠 Keep provider if needed across reloads
+        role: state.role, // 🧠 Discard after session if needed
+      }),
     }
   )
 );

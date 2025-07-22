@@ -169,3 +169,28 @@ Contributing
 Contributions are welcome! Fork the repository, make changes, and submit a pull request.
 License
 MIT License. See LICENSE for details.
+
+/src
+│
+├── /pages # Full page views routed via React Router
+│ ├── LoginPage.tsx
+│ ├── RegisterPage.tsx
+│ ├── ChatPage.tsx ← contains full layout with ChatArea, Header, etc.
+│ └── NotFoundPage.tsx
+│
+├── /components
+│ ├── /Chat
+│ │ ├── ChatArea.tsx
+│ │ ├── ChatMessageBubble.tsx
+│ │ ├── ChatHistoryPanel.tsx ← ✅ New
+│ │ └── TypingIndicator.tsx
+│ ├── /Prompt
+│ └── /Shared
+│ ├── Header.tsx
+│ ├── Footer.tsx
+│ └── AuthGuard.tsx (optional)
+│
+├── /store
+├── /services
+├── /types
+└── App.tsx ← Configure routes here using React Router
