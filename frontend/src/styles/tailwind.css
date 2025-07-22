@@ -1,3 +1,211 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* =========================================
+   CSS Variables for Theme System
+   ========================================= */
+@layer base {
+  /* ✅ DARK THEME (default) */
+  :root,
+  .dark {
+    --color-background: #0a0a0a;
+    --color-panel: #1a1a1a;
+    --color-surface: #2a2a2a;
+    --color-border: #3a3a3a;
+    --color-primary: #3b82f6;
+    --color-success: #10b981;
+    --color-warning: #f59e0b;
+    --color-error: #ef4444;
+    --color-text-primary: #f5f5f5;
+    --color-text-secondary: #a3a3a3;
+    --color-purple: #a855f7;
+  }
+
+  .light {
+    --color-background: #f5f5f7; /* Мягкий серый фон вместо белого */
+    --color-panel: #ffffff; /* Белый для панелей */
+    --color-surface: #fafafa; /* Очень светлый серый */
+    --color-border: #d1d5db; /* Средний серый для границ */
+    --color-primary: #3b82f6; /* Синий остается */
+    --color-success: #10b981; /* Зеленый остается */
+    --color-warning: #f59e0b; /* Оранжевый остается */
+    --color-error: #ef4444; /* Красный остается */
+    --color-text-primary: #1f2937; /* Темно-серый текст */
+    --color-text-secondary: #6b7280; /* Средний серый */
+    --color-purple: #a855f7; /* Фиолетовый остается */
+  }
+}
+
+/* =========================================
+   Base Layout — full-width app, no centering
+   ========================================= */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    /* Let the app stretch full width; remove centering */
+    margin: 0;
+    @apply bg-background text-text-primary antialiased;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch; /* was center — that caused the "boxed" look */
+    justify-content: flex-start;
+  }
+
+  #root {
+    /* Full width app container (no max-width here) */
+    width: 100%;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    /* If you want side gutters, keep these; otherwise remove */
+    /* padding-left: 1rem;
+       padding-right: 1rem; */
+  }
+
+  /* Mono stack via Tailwind utility so precedence stays sane */
+  code,
+  kbd,
+  samp,
+  pre {
+    @apply font-mono;
+    font-feature-settings: normal;
+    font-variation-settings: normal;
+    /* Let Tailwind size utilities control font-size where needed */
+  }
+}
+
+/* =========================
+   (Optional) nicer code UI
+   ========================= */
+/* If you want a universal look for <pre>/<code> everywhere,
+   uncomment this block; otherwise we already style them inside the bubble.
+
+@layer components {
+  pre {
+    @apply bg-neutral-100 border border-neutral-200 rounded-2xl p-3 overflow-x-auto;
+  }
+  code {
+    @apply text-neutral-900;
+  }
+}
+*/
+
+/* =========================
+   Preloader + Fade (unchanged)
+   ========================= */
+#preloader {
+  background: #0a0b0d;
+  color: #e8e9ed;
+  font-family: sans-serif;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  opacity: 1;
+  transition: opacity 0.5s ease;
+}
+
+#preloader.fade-out {
+  opacity: 0;
+}
+
+.app-fade-in {
+  opacity: 0;
+  animation: fadeInApp 0.5s ease forwards;
+  animation-delay: 0.5s;
+}
+
+@keyframes fadeInApp {
+  to {
+    opacity: 1;
+  }
+}
+
+/* =========================
+   Trading Platform Scrollbar - Dark Theme
+   ========================= */
+@layer utilities {
+  /* Custom scrollbar for webkit browsers - Dark */
+  :root::-webkit-scrollbar,
+  .dark ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  :root::-webkit-scrollbar-track,
+  .dark ::-webkit-scrollbar-track {
+    background: #16171b;
+  }
+
+  :root::-webkit-scrollbar-thumb,
+  .dark ::-webkit-scrollbar-thumb {
+    background: #2a2b2f;
+    border-radius: 4px;
+  }
+
+  :root::-webkit-scrollbar-thumb:hover,
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: #3a3b3f;
+  }
+
+  /* Custom scrollbar for webkit browsers - Light */
+  .light ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .light ::-webkit-scrollbar-track {
+    background: #f3f4f6;
+  }
+
+  .light ::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 4px;
+  }
+
+  .light ::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
+  }
+}
+
+/* =========================
+   Smooth Transitions
+   ========================= */
+@layer base {
+  /* Плавное изменение темы */
+  * {
+    transition-property: background-color, border-color, color, fill, stroke;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 150ms;
+  }
+
+  /* Исключения - элементы без transition */
+  *[data-no-transition],
+  *[data-no-transition] * {
+    transition: none !important;
+  }
+}
+
+/* Fade in animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}

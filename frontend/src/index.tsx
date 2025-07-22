@@ -1,22 +1,36 @@
-// File: src/index.tsx
-
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
 import "./styles/tailwind.css";
+import App from "./App";
+import { bootstrapApp } from "./bootstrap/bootstrapApp";
 
-import Landing from "./pages/Landing";
-import AiChat from "./features/aiConversation/AiChat";
+const fadeOutPreloader = () => {
+  const preloader = document.getElementById("preloader");
+  if (!preloader) return;
+  preloader.classList.add("fade-out");
+  setTimeout(() => preloader.remove(), 500);
+};
 
+// Render immediately (no awaiting boot)
 const root = ReactDOM.createRoot(document.getElementById("root")!);
+const isInitialLoad = process.env.NODE_ENV === "production";
 
 root.render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/chat" element={<AiChat />} />
-      </Routes>
-    </BrowserRouter>
+    <div className={isInitialLoad ? "app-fade-in" : ""}>
+      <App />
+    </div>
   </React.StrictMode>
 );
+
+// Kick off bootstrap asynchronously and NEVER block UI
+(async () => {
+  try {
+    await bootstrapApp({ nonBlocking: true, maxTotalMs: 1500 });
+  } catch (e) {
+    // Don’t care — UI must not be blocked
+    console.warn("bootstrap skipped/failed (non-blocking):", e);
+  } finally {
+    requestAnimationFrame(fadeOutPreloader);
+  }
+})();

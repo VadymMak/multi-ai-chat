@@ -1,31 +1,89 @@
 // File: src/App.tsx
-
-import React from "react";
-import { Link } from "react-router-dom";
+import React, { useEffect } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Landing from "./pages/Landing";
+import ChatPage from "./pages/ChatPage";
+import { useAppStore } from "./store/appStore";
+import AppInitializer from "./components/Core/AppInitializer";
+import LoadingOverlay from "./components/Shared/LoadingOverlay";
+import { useSettingsStore } from "./store/settingsStore";
+import ToastContainer from "./components/Shared/ToastContainer";
 
 const App: React.FC = () => {
+  const isLoading = useAppStore((s) => s.isLoading);
+
+  // Theme system
+  const theme = useSettingsStore((s) => s.theme);
+  const fontSize = useSettingsStore((s) => s.fontSize);
+
+  // Apply theme
+  useEffect(() => {
+    const root = document.documentElement;
+
+    console.log("🎨 Theme changed to:", theme);
+    console.log("🎨 Root classes before:", root.className);
+
+    if (theme === "light") {
+      root.classList.remove("dark");
+      root.classList.add("light");
+    } else if (theme === "dark") {
+      root.classList.add("dark");
+      root.classList.remove("light");
+    } else if (theme === "auto") {
+      // Detect system preference
+      const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      if (isDark) {
+        root.classList.add("dark");
+        root.classList.remove("light");
+      } else {
+        root.classList.remove("dark");
+        root.classList.add("light");
+      }
+
+      // Listen for system theme changes
+      const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const handleChange = (e: MediaQueryListEvent) => {
+        if (e.matches) {
+          root.classList.add("dark");
+          root.classList.remove("light");
+        } else {
+          root.classList.remove("dark");
+          root.classList.add("light");
+        }
+      };
+
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+
+    console.log("🎨 Root classes after:", root.className);
+  }, [theme]);
+
+  // Apply font size to root
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${fontSize}px`;
+  }, [fontSize]);
+
   return (
-    // <div className="bg-black text-white text-5xl p-20 text-center">
-    //   Tailwind is working!
-    // </div>
+    <BrowserRouter>
+      <AppInitializer />
 
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 text-gray-800 p-8">
-      <h1 className="text-3xl font-bold mb-6">🤖 Multi-AI Assistant</h1>
-      <p className="mb-4 text-center max-w-md">
-        Welcome to your AI assistant powered by OpenAI, Anthropic, and Grok. You
-        can ask questions, switch roles, or initiate an AI-to-AI debate.
-      </p>
-      <Link
-        to="/chat"
-        className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-      >
-        💬 Enter Chat Interface
-      </Link>
+      {isLoading && <LoadingOverlay />}
 
-      <footer className="mt-10 text-sm text-gray-500">
-        © {new Date().getFullYear()} Your Assistant Project
-      </footer>
-    </div>
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/chat" element={<ChatPage />} />
+        <Route
+          path="*"
+          element={
+            <div className="p-10 text-center text-error text-xl">
+              404 - Page Not Found
+            </div>
+          }
+        />
+      </Routes>
+      <ToastContainer />
+    </BrowserRouter>
   );
 };
 
