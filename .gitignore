@@ -4,3 +4,7 @@ backend/__pycache__/
 *.pyc
 *.env
 llm_env/
+
+# Python virtual envs
+venv/
+backend/venv/
