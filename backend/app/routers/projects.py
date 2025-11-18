@@ -5,7 +5,7 @@ from app.memory.models import Project
 from pydantic import BaseModel
 from typing import Optional, List
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(tags=["projects"])
 
 
 class ProjectCreate(BaseModel):
@@ -30,14 +30,14 @@ class ProjectResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("/", response_model=List[ProjectResponse])
+@router.get("/projects", response_model=List[ProjectResponse])
 async def list_projects(db: Session = Depends(get_db)):
     """List all projects"""
     projects = db.query(Project).order_by(Project.id.desc()).all()
     return projects
 
 
-@router.get("/{project_id}", response_model=ProjectResponse)
+@router.get("/projects/{project_id}", response_model=ProjectResponse)
 async def get_project(project_id: int, db: Session = Depends(get_db)):
     """Get specific project"""
     project = db.query(Project).filter(Project.id == project_id).first()
@@ -46,7 +46,7 @@ async def get_project(project_id: int, db: Session = Depends(get_db)):
     return project
 
 
-@router.post("/", response_model=ProjectResponse)
+@router.post("/projects", response_model=ProjectResponse)
 async def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     """Create new project"""
     # Check if project with same name exists
@@ -65,7 +65,7 @@ async def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     return db_project
 
 
-@router.put("/{project_id}", response_model=ProjectResponse)
+@router.put("/projects/{project_id}", response_model=ProjectResponse)
 async def update_project(
     project_id: int, 
     project: ProjectUpdate, 
@@ -93,7 +93,7 @@ async def update_project(
     return db_project
 
 
-@router.delete("/{project_id}")
+@router.delete("/projects/{project_id}")
 async def delete_project(project_id: int, db: Session = Depends(get_db)):
     """Delete project"""
     db_project = db.query(Project).filter(Project.id == project_id).first()

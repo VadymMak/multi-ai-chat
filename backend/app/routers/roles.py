@@ -5,7 +5,7 @@ from app.memory.models import Role
 from pydantic import BaseModel
 from typing import Optional, List
 
-router = APIRouter(prefix="/roles", tags=["roles"])
+router = APIRouter(tags=["roles"])
 
 
 class RoleCreate(BaseModel):
@@ -27,14 +27,14 @@ class RoleResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("/", response_model=List[RoleResponse])
+@router.get("/roles", response_model=List[RoleResponse])
 async def list_roles(db: Session = Depends(get_db)):
     """List all roles/assistants"""
     roles = db.query(Role).order_by(Role.id.desc()).all()
     return roles
 
 
-@router.get("/{role_id}", response_model=RoleResponse)
+@router.get("/roles/{role_id}", response_model=RoleResponse)
 async def get_role(role_id: int, db: Session = Depends(get_db)):
     """Get specific role"""
     role = db.query(Role).filter(Role.id == role_id).first()
@@ -43,7 +43,7 @@ async def get_role(role_id: int, db: Session = Depends(get_db)):
     return role
 
 
-@router.post("/", response_model=RoleResponse)
+@router.post("/roles", response_model=RoleResponse)
 async def create_role(role: RoleCreate, db: Session = Depends(get_db)):
     """Create new role/assistant"""
     # Check if role with same name exists
@@ -61,7 +61,7 @@ async def create_role(role: RoleCreate, db: Session = Depends(get_db)):
     return db_role
 
 
-@router.put("/{role_id}", response_model=RoleResponse)
+@router.put("/roles/{role_id}", response_model=RoleResponse)
 async def update_role(
     role_id: int, 
     role: RoleUpdate, 
@@ -87,7 +87,7 @@ async def update_role(
     return db_role
 
 
-@router.delete("/{role_id}")
+@router.delete("/roles/{role_id}")
 async def delete_role(role_id: int, db: Session = Depends(get_db)):
     """Delete role"""
     db_role = db.query(Role).filter(Role.id == role_id).first()
