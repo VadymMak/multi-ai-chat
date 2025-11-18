@@ -39,6 +39,19 @@ else:
 # ───────────────────── Database URL / Paths ─────────────────────
 DEFAULT_DB_PATH = os.path.abspath(os.path.join(PROJECT_ROOT, "memory.db"))
 DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
+
+# ═══════════════════════ DEBUG LOGGING ═══════════════════════
+logger.info("=" * 80)
+logger.info("🔍 [DATABASE_URL DEBUG]")
+logger.info(f"  Raw value: {DATABASE_URL}")
+logger.info(f"  Type: {type(DATABASE_URL)}")
+logger.info(f"  Length: {len(DATABASE_URL) if DATABASE_URL else 0}")
+logger.info(f"  Starts with 'postgresql': {DATABASE_URL.startswith('postgresql') if DATABASE_URL else False}")
+logger.info(f"  Starts with 'sqlite': {DATABASE_URL.startswith('sqlite') if DATABASE_URL else False}")
+logger.info(f"  Default DB path: {DEFAULT_DB_PATH}")
+logger.info("=" * 80)
+# ═══════════════════════════════════════════════════════════════
+
 SQLALCHEMY_URL: str = DATABASE_URL  # Backward compatibility alias
 ECHO = (os.getenv("SQLALCHEMY_ECHO", "0").strip().lower() in {"1", "true", "yes", "on"})
 
