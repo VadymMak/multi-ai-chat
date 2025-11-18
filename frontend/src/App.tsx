@@ -1,68 +1,89 @@
-import React, { useState } from "react";
-import styles from "./App.module.css";
-import Header from "./components/Header/Header";
-import ChatArea from "./components/ChartArea/ChatArea";
-import InputBox from "./components/InputArea/InputBox";
-import { Model } from "./types";
-import { useAiChat } from "./hooks/useAiChat";
+// File: src/App.tsx
+import React, { useEffect } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Landing from "./pages/Landing";
+import ChatPage from "./pages/ChatPage";
+import { useAppStore } from "./store/appStore";
+import AppInitializer from "./components/Core/AppInitializer";
+import LoadingOverlay from "./components/Shared/LoadingOverlay";
+import { useSettingsStore } from "./store/settingsStore";
+import ToastContainer from "./components/Shared/ToastContainer";
 
 const App: React.FC = () => {
-  const { messages, isLoading, askLLM, askAiToAi } = useAiChat();
-  const [input, setInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState<Model>("all");
-  const [selectedRole, setSelectedRole] = useState("llm_engineer");
+  const isLoading = useAppStore((s) => s.isLoading);
 
-  const handleSend = async () => {
-    if (!input.trim() || isLoading) {
-      console.log(
-        "handleSend blocked: input empty or isLoading:",
-        isLoading,
-        input
-      );
-      return;
-    }
-    console.log(
-      "handleSend triggered with input:",
-      input,
-      "isLoading:",
-      isLoading
-    );
-    const prompt = input;
-    setInput("");
-    try {
-      if (selectedModel === "all") {
-        await askAiToAi(prompt, selectedRole);
+  // Theme system
+  const theme = useSettingsStore((s) => s.theme);
+  const fontSize = useSettingsStore((s) => s.fontSize);
+
+  // Apply theme
+  useEffect(() => {
+    const root = document.documentElement;
+
+    console.log("🎨 Theme changed to:", theme);
+    console.log("🎨 Root classes before:", root.className);
+
+    if (theme === "light") {
+      root.classList.remove("dark");
+      root.classList.add("light");
+    } else if (theme === "dark") {
+      root.classList.add("dark");
+      root.classList.remove("light");
+    } else if (theme === "auto") {
+      // Detect system preference
+      const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      if (isDark) {
+        root.classList.add("dark");
+        root.classList.remove("light");
       } else {
-        await askLLM(prompt, selectedModel, selectedRole);
+        root.classList.remove("dark");
+        root.classList.add("light");
       }
-    } catch (error) {
-      console.error("Error in handleSend:", error);
-    }
-  };
 
-  // NEW: Debug to monitor isLoading state
-  console.log("App render - isLoading:", isLoading);
+      // Listen for system theme changes
+      const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const handleChange = (e: MediaQueryListEvent) => {
+        if (e.matches) {
+          root.classList.add("dark");
+          root.classList.remove("light");
+        } else {
+          root.classList.remove("dark");
+          root.classList.add("light");
+        }
+      };
+
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+
+    console.log("🎨 Root classes after:", root.className);
+  }, [theme]);
+
+  // Apply font size to root
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${fontSize}px`;
+  }, [fontSize]);
 
   return (
-    <div className={styles.app}>
-      <Header
-        selectedModel={selectedModel}
-        onSelectModel={setSelectedModel}
-        selectedRole={selectedRole}
-        onSelectRole={setSelectedRole}
-      />
-      <ChatArea
-        messages={messages}
-        isLoading={isLoading}
-        selectedModel={selectedModel}
-      />
-      <InputBox
-        input={input}
-        setInput={setInput}
-        onSend={handleSend}
-        isLoading={isLoading}
-      />
-    </div>
+    <BrowserRouter>
+      <AppInitializer />
+
+      {isLoading && <LoadingOverlay />}
+
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/chat" element={<ChatPage />} />
+        <Route
+          path="*"
+          element={
+            <div className="p-10 text-center text-error text-xl">
+              404 - Page Not Found
+            </div>
+          }
+        />
+      </Routes>
+      <ToastContainer />
+    </BrowserRouter>
   );
 };
 

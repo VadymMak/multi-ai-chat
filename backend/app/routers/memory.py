@@ -1,69 +1,87 @@
 # app/routers/memory.py
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.memory.db import get_db
 from app.memory.models import MemoryEntry, Role
-from tiktoken import encoding_for_model   # pip install tiktoken
+from app.memory.manager import MemoryManager
 
-router = APIRouter(prefix="/memory", tags=["memory"])
+router = APIRouter(prefix="/memory", tags=["Memory"])
 
+
+# ---------- Schemas ----------
 
 class MemoryIn(BaseModel):
     role_id: int
+    project_id: Union[int, str]
     summary: str = Field(..., max_length=1000)
     raw_text: str
+    chat_session_id: Optional[str] = None
+    is_ai_to_ai: bool = False  # optional, for provenance
+
+    @field_validator("project_id", mode="before")
+    @classmethod
+    def normalize_project_id(cls, v):
+        return "0" if v in (None, "", "default") else str(v).strip()
 
 
 class MemoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)  # Pydantic v2
     id: int
     timestamp: datetime
     summary: str
-
-    class Config:
-        orm_mode = True
+    project_id: str
 
 
-def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
-    enc = encoding_for_model(model)
-    return len(enc.encode(text))
+# ---------- Create a memory record (long-term, is_summary=True) ----------
 
-
-# ----------  Сохранить новую запись памяти  ----------
 @router.post("/", response_model=MemoryOut)
 def save_memory(item: MemoryIn, db: Session = Depends(get_db)):
-    role = db.query(Role).get(item.role_id)
+    # Validate role exists (clear 404 instead of silent FK-ish failure)
+    role = db.get(Role, item.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
-    tokens = count_tokens(item.raw_text)
-    entry = MemoryEntry(
+    mm = MemoryManager(db)
+
+    # Use MemoryManager to handle token counting & safe fields
+    entry = mm.store_memory(
+        project_id=item.project_id,          # normalized to str by validator
         role_id=item.role_id,
-        tokens=tokens,
         summary=item.summary,
         raw_text=item.raw_text,
+        chat_session_id=item.chat_session_id,
+        is_ai_to_ai=item.is_ai_to_ai,
     )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
     return entry
 
 
-# ----------  Получить последние N записей по роли  ----------
+# ---------- Get last N memories for a role (optionally filter by project) ----------
+
 @router.get("/{role_id}", response_model=List[MemoryOut])
-def list_memory(role_id: int, limit: int = 5, db: Session = Depends(get_db)):
-    role = db.query(Role).get(role_id)
+def list_memory(
+    role_id: int,
+    limit: int = Query(5, ge=1, le=200),
+    project_id: Optional[str] = Query(None, description="Optional project filter"),
+    db: Session = Depends(get_db),
+):
+    role = db.get(Role, role_id)
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
-    entries = (
+    q = (
         db.query(MemoryEntry)
-        .filter(MemoryEntry.role_id == role_id)
-        .order_by(MemoryEntry.timestamp.desc())
+        .filter(MemoryEntry.role_id == role_id, MemoryEntry.is_summary == True)  # noqa: E712
+    )
+    if project_id:
+        q = q.filter(MemoryEntry.project_id == str(project_id).strip())
+
+    entries = (
+        q.order_by(MemoryEntry.timestamp.desc())
         .limit(limit)
         .all()
     )
