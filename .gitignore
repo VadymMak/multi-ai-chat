@@ -1,20 +1,46 @@
-# Node.js and frontend artifacts
-frontend/node_modules/
-*.log
-*.lock
+# Python virtual environments
+venv/
+env/
+backend/venv/
+llm_env/
 
-# Python artifacts
+# Python
 __pycache__/
+*.py[cod]
 *.pyc
 *.pyo
 *.pyd
-*.env
-llm_env/
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
 .env
+*.db
+*.sqlite3
 
-# Ignore system files
+# Node.js and frontend
+frontend/node_modules/
+node_modules/
+*.log
+*.lock
+package-lock.json
+yarn.lock
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
 Thumbs.db
 
-# Ignore documentation drafts (optional)
+# Documentation
 FollowMe.md
+
+# Build artifacts
+*.dll
+*.exe
