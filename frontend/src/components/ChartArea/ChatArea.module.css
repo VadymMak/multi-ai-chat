@@ -1,0 +1,188 @@
+.chatArea {
+  flex-grow: 1;
+  padding: 1.5rem;
+  overflow-y: auto;
+  background: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+}
+
+.message {
+  margin-bottom: 1rem;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  max-width: 75%;
+}
+
+.userMessage {
+  align-self: flex-end;
+  text-align: right;
+}
+
+.aiMessage {
+  align-self: flex-start;
+  text-align: left;
+}
+
+.messageText {
+  padding: 0.75rem 1rem;
+  background-color: #2a2a2a;
+  color: #f1f1f1;
+  border-radius: 12px;
+  font-size: 1rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.userMessage .messageText {
+  background-color: #0070f3;
+  color: #fff;
+  border-bottom-right-radius: 0;
+}
+
+.aiMessage .messageText {
+  background-color: #333;
+  border-bottom-left-radius: 0;
+}
+
+.aiModelTag {
+  font-size: 0.75rem;
+  color: #00b4ff;
+  margin-bottom: 0.25rem;
+  font-weight: 500;
+}
+
+.timestamp {
+  font-size: 0.7rem;
+  color: #999;
+  margin-top: 0.3rem;
+  align-self: flex-end;
+}
+
+.link {
+  color: #00b4ff;
+  text-decoration: underline;
+  transition: color 0.2s ease;
+}
+
+.link:hover {
+  color: #0077cc;
+}
+
+/* 🧠 Continue AI-to-AI Button */
+.continueContainer {
+  display: flex;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.continueButton {
+  background-color: #0070f3;
+  color: white;
+  border: none;
+  padding: 0.5rem 1.25rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.continueButton:hover {
+  background-color: #005bb5;
+}
+
+.thinkingIndicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  color: #00b4ff;
+  font-size: 0.9rem;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.brainIcon {
+  width: 24px;
+  height: 24px;
+  background: url("https://cdn-icons-png.flaticon.com/512/254/254025.png")
+    no-repeat center center / cover;
+  animation: pulse 1.5s infinite;
+  filter: brightness(1.2);
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.youtubeResults {
+  margin-top: 0.75rem;
+}
+
+.youtubeBlock {
+  background-color: #292929;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid #444;
+  margin-top: 0.5rem;
+}
+
+.youtubeBlock h4 {
+  color: #00b4ff;
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.youtubeList {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.youtubeItem {
+  margin-bottom: 1rem;
+  border-left: 4px solid #00b4ff;
+  padding-left: 0.75rem;
+}
+
+.youtubeLink {
+  font-weight: 600;
+  color: #4dabf7;
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+.youtubeLink:hover {
+  text-decoration: underline;
+  color: #2196f3;
+}
+
+.youtubeDescription {
+  font-size: 0.85rem;
+  color: #ccc;
+  margin-top: 0.25rem;
+}
