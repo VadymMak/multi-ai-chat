@@ -139,16 +139,12 @@ def get_session() -> Session:
 # ────────────────────────── Init helpers ────────────────────────
 def init_db(retries: int = 3, delay: float = 1.0) -> None:
     """
-    Create all tables (including CanonItem) with a small retry loop for
-    first-boot races (e.g., containerized environments).
-    Also enables pgvector extension for PostgreSQL databases.
+    Create all tables with pgvector extension enabled first.
+    Extension must be enabled BEFORE creating tables with vector columns.
     """
     for attempt in range(1, retries + 1):
         try:
-            Base.metadata.create_all(bind=engine)
-            logger.info("✅ Database tables created successfully.")
-            
-            # Enable pgvector extension (PostgreSQL only)
+            # Enable pgvector extension FIRST (PostgreSQL only)
             if str(engine.url).startswith("postgresql"):
                 try:
                     with engine.connect() as conn:
@@ -156,14 +152,19 @@ def init_db(retries: int = 3, delay: float = 1.0) -> None:
                         conn.commit()
                     logger.info("✅ pgvector extension enabled")
                 except Exception as e:
-                    logger.warning(f"⚠️ pgvector extension not available: {e}")
-                    logger.info("💡 Semantic search will be disabled. Install pgvector to enable.")
+                    logger.error(f"❌ Failed to enable pgvector: {e}")
+                    logger.warning("⚠️ Continuing without vector support")
+                    # Don't raise - allow app to run without semantic search
+            
+            # NOW create tables
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables created successfully.")
             
             return
         except OperationalError as e:
-            logger.warning(f"⚠️ Attempt {attempt}/{retries} failed creating tables: {e}")
+            logger.warning(f"⚠️ Attempt {attempt}/{retries} failed: {e}")
             if attempt == retries:
-                logger.error("❌ Failed to create tables after all retries.")
+                logger.error("❌ Failed after all retries.")
                 raise
             time.sleep(delay)
 
