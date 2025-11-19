@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import (
     Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Index, JSON
 )
 from sqlalchemy.orm import declarative_base, relationship
+from passlib.hash import bcrypt
 
 # pgvector support (graceful import for SQLite compatibility)
 try:
@@ -23,6 +24,8 @@ __all__ = [
     "PromptTemplate",
     "AuditLog",
     "Attachment",
+    "User",
+    "UserAPIKey",
 ]
 
 # ✅ Role table
@@ -55,10 +58,24 @@ class Project(Base):
     __tablename__ = "projects"
 
     id = Column(Integer, primary_key=True)
-    name = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False, index=True)  # REMOVED unique=True - uniqueness per user now
     description = Column(Text, nullable=True)
     project_structure = Column(Text, nullable=True)
+    
+    # ✅ User ownership
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # ✅ Assistant link
+    assistant_id = Column(Integer, ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
+    
+    # ✅ Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Relationships
+    user = relationship("User", back_populates="projects")
+    assistant = relationship("Role", foreign_keys=[assistant_id])
+    
     # View-only mirrors for FK-int join convenience
     memories = relationship(
         "MemoryEntry",
@@ -75,7 +92,7 @@ class Project(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Project id={self.id} name={self.name!r}>"
+        return f"<Project id={self.id} name={self.name!r} user_id={self.user_id}>"
 
 # ✅ Link table for Role ↔ Project (many-to-many)
 class RoleProjectLink(Base):
@@ -264,3 +281,67 @@ class Attachment(Base):
 
     def __repr__(self) -> str:
         return f"<Attachment(id={self.id}, filename={self.filename}, type={self.file_type})>"
+
+
+# ✅ User model
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    
+    # Status & Access Control
+    status = Column(String(20), default="trial", nullable=False, index=True)  # trial/active/suspended/inactive
+    is_superuser = Column(Boolean, default=False, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Trial & Subscription Management
+    trial_ends_at = Column(DateTime, nullable=True)
+    subscription_ends_at = Column(DateTime, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    api_keys = relationship("UserAPIKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+    
+    def __repr__(self) -> str:
+        return f"<User id={self.id} username={self.username!r} status={self.status}>"
+    
+    def verify_password(self, password: str) -> bool:
+        """Verify password against hash"""
+        return bcrypt.verify(password, self.password_hash)
+    
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Hash password with bcrypt"""
+        return bcrypt.hash(password)
+
+
+# ✅ User API Keys (encrypted)
+class UserAPIKey(Base):
+    __tablename__ = "user_api_keys"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    
+    # Encrypted API keys (Fernet encryption)
+    openai_key_encrypted = Column(Text, nullable=True)
+    anthropic_key_encrypted = Column(Text, nullable=True)
+    youtube_key_encrypted = Column(Text, nullable=True)
+    google_search_key_encrypted = Column(Text, nullable=True)
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", back_populates="api_keys")
+    
+    def __repr__(self) -> str:
+        return f"<UserAPIKey user_id={self.user_id}>"

@@ -27,7 +27,7 @@ class RoleResponse(BaseModel):
         from_attributes = True
 
 
-@router.get("/", response_model=List[RoleResponse])
+@router.get("", response_model=List[RoleResponse])
 async def list_roles(db: Session = Depends(get_db)):
     """List all roles/assistants"""
     roles = db.query(Role).order_by(Role.id.desc()).all()
@@ -43,7 +43,7 @@ async def get_role(role_id: int, db: Session = Depends(get_db)):
     return role
 
 
-@router.post("/", response_model=RoleResponse)
+@router.post("", response_model=RoleResponse)
 async def create_role(role: RoleCreate, db: Session = Depends(get_db)):
     """Create new role/assistant"""
     # Check if role with same name exists

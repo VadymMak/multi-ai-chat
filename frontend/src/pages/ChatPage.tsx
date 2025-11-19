@@ -15,7 +15,6 @@ import { useMemoryStore } from "../store/memoryStore";
 import { useStreamText } from "../hooks/useStreamText";
 import { useSessionCleanup } from "../hooks/useSessionCleanup";
 import { useAppStore } from "../store/appStore";
-import LoadingOverlay from "../components/Shared/LoadingOverlay";
 import Sidebar from "../components/Sidebar/Sidebar";
 import {
   sendAiMessage,
@@ -130,7 +129,6 @@ const ChatPage: React.FC = () => {
   const addMessage = useChatStore((s) => s.addMessage);
   const setTyping = useChatStore((s) => s.setTyping);
 
-  const { isLoading } = useAppStore();
   const streamText = useStreamText();
   const roleId = typeof role?.id === "number" ? role.id : null;
   const hasRestoredRole = useRef(false);
@@ -175,56 +173,28 @@ const ChatPage: React.FC = () => {
     };
   }, []);
 
-  // Try to map backend role_name → knownRoles only once
-  useEffect(() => {
-    const restoreLastSession = async () => {
-      if (hasRestoredRole.current || !hasHydrated) return;
-      if (!role && roleId && projectId) {
-        try {
-          const res = await getLastSessionByRole(roleId, projectId);
-          if (res?.role_id && res?.role_name) {
-            const matched = knownRoles.find(
-              (r) => r.id === res.role_id && r.name === res.role_name
-            );
-            if (matched) {
-              hasRestoredRole.current = true;
-              useMemoryStore.getState().setRole(matched);
-            }
-          }
-        } catch (err) {
-          console.warn("⚠️ Could not restore role from backend:", err);
-        }
-      }
-    };
-    restoreLastSession();
-  }, [hasHydrated, role, roleId, projectId]);
-
-  // Bootstrap or restore chat session
-  useEffect(() => {
-    if (!hasHydrated) return;
-    const store = useChatStore.getState();
-    if (store.sessionReady) return;
-
-    if (store.lastSessionMarker) {
-      store.restoreSessionFromMarker().then((ok) => {
-        if (!ok && roleId && projectId) {
-          store.loadOrInitSessionForRoleProject(roleId, Number(projectId));
-        }
-      });
-      return;
-    }
-
-    if (roleId && projectId) {
-      store.loadOrInitSessionForRoleProject(roleId, Number(projectId));
-    }
-  }, [hasHydrated, roleId, projectId]);
-
   useSessionCleanup();
 
   // HYDRATE HISTORY once per (roleId, projectId, chatSessionId)
   useEffect(() => {
+    console.log("🔍 [History Effect]", {
+      roleId,
+      projectId,
+      chatSessionId,
+      sessionReady: useChatStore.getState().sessionReady,
+      messagesCount: useChatStore.getState().messages.length,
+    });
+
     const store = useChatStore.getState();
-    if (!roleId || !projectId || !chatSessionId || !store.sessionReady) return;
+    if (!roleId || !projectId || !chatSessionId || !store.sessionReady) {
+      console.log("⏸️ [History] Not ready yet", {
+        hasRoleId: !!roleId,
+        hasProjectId: !!projectId,
+        hasChatSessionId: !!chatSessionId,
+        sessionReady: store.sessionReady,
+      });
+      return;
+    }
 
     const alreadyHas = store.messages?.some(
       (m) =>
@@ -232,7 +202,10 @@ const ChatPage: React.FC = () => {
         String(m.chat_session_id) === String(chatSessionId) &&
         Number(m.role_id) === Number(roleId)
     );
-    if (alreadyHas) return;
+
+    if (alreadyHas) {
+      return;
+    }
 
     (async () => {
       try {
@@ -241,14 +214,19 @@ const ChatPage: React.FC = () => {
           roleId,
           chatSessionId
         );
-        if (messages.length && typeof store.addMessage === "function") {
-          messages.forEach((m) => store.addMessage(m));
+
+        if (messages.length) {
+          useChatStore.getState().setMessages(messages);
+        } else {
+          console.log("⚠️ [History] No messages to load");
         }
       } catch (e) {
-        console.error("⚠️ Failed to load chat history:", e);
+        console.error("❌ [History] Failed to load:", e);
       }
     })();
   }, [roleId, projectId, chatSessionId]);
+
+  useSessionCleanup();
 
   const ensureSessionId = useCallback(
     async (rid: number, pid: number): Promise<string | null> => {
@@ -763,7 +741,6 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
 
   return (
     <>
-      {isLoading && <LoadingOverlay />}
       <div className="flex flex-col h-screen overflow-hidden bg-background">
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">

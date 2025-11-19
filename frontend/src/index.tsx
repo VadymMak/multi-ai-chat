@@ -1,3 +1,4 @@
+import "promise-polyfill/src/finally";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/tailwind.css";
@@ -13,7 +14,7 @@ const fadeOutPreloader = () => {
 
 // Render immediately (no awaiting boot)
 const root = ReactDOM.createRoot(document.getElementById("root")!);
-const isInitialLoad = process.env.NODE_ENV === "production";
+const isInitialLoad = import.meta.env.MODE === "production";
 
 root.render(
   <React.StrictMode>

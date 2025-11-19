@@ -189,6 +189,8 @@ const baseMemoryStore: UseBoundStore<StoreApi<MemoryStore>> = create<
     }
   )
 );
-
-// ✅ Export
 export const useMemoryStore = baseMemoryStore;
+// ✅ Export
+if (typeof window !== "undefined") {
+  (window as any).useMemoryStore = useMemoryStore;
+}
