@@ -9,7 +9,7 @@ import { useChatStore } from "../store/chatStore";
 interface UseChatHandlerParams {
   input: string;
   setInput: (val: string) => void;
-  abortRef: React.RefObject<AbortController | null>;
+  abortRef: React.MutableRefObject<AbortController | null>;
   provider: string | null; // "boost" or null
   typedProvider: "openai" | "anthropic" | "all" | null;
   roleId: number | null;
@@ -31,6 +31,105 @@ type SendOverrides = {
   presentation?: "default" | "poem_plain" | "poem_code";
   language?: string | null;
   filename?: string | null;
+};
+
+// ============================================================================
+// CODE GENERATION DETECTION
+// ============================================================================
+
+const isCodeGenerationRequest = (query: string): boolean => {
+  const lower = query.toLowerCase();
+
+  // ✅ ENHANCED direct triggers - ADD THESE LINES
+  const directTriggers = [
+    "create app",
+    "build app",
+    "make app",
+    "create todo",
+    "build todo",
+    "make todo",
+    "create website",
+    "build website",
+    "write code for",
+    "generate code for",
+    "implement a",
+    "develop a",
+
+    // ✅✅✅ ADD THESE NEW TRIGGERS ✅✅✅
+    "provide code",
+    "provide the code",
+    "provide me code",
+    "provide me the code",
+    "give me code",
+    "give code",
+    "give me the code",
+    "show me code",
+    "show code",
+    "show the code",
+    "send me code",
+    "send code",
+    "can you code",
+    "can you create",
+    "can you build",
+    "can you make",
+  ];
+
+  if (directTriggers.some((trigger) => lower.includes(trigger))) {
+    console.log("✅ [Detection] Matched trigger for:", lower); // ← Add debug
+    return true;
+  }
+
+  // ✅ Keyword-based (existing logic)
+  const codeKeywords = [
+    "create",
+    "build",
+    "make",
+    "generate",
+    "write",
+    "develop",
+    "implement",
+    "code",
+    "program",
+  ];
+
+  const projectKeywords = [
+    "app",
+    "application",
+    "website",
+    "page",
+    "component",
+    "function",
+    "class",
+    "module",
+    "script",
+    "todo",
+    "frontend",
+    "backend",
+    "full stack",
+    "fullstack",
+    "node",
+    "nodejs",
+    "react",
+    "vue",
+    "angular",
+    "api",
+    "server",
+    "express",
+    "fastapi",
+  ];
+
+  const hasCodeKeyword = codeKeywords.some((kw) => lower.includes(kw));
+  const hasProjectKeyword = projectKeywords.some((kw) => lower.includes(kw));
+
+  const matched = hasCodeKeyword && hasProjectKeyword;
+
+  if (matched) {
+    console.log("✅ [Detection] Matched keywords for:", lower); // ← Add debug
+  } else {
+    console.log("❌ [Detection] No match for:", lower); // ← Add debug
+  }
+
+  return matched;
 };
 
 // ============================================================================
@@ -131,6 +230,175 @@ function deriveMode(
 }
 
 // ============================================================================
+// STREAMING REQUEST HANDLER
+// ============================================================================
+
+const handleStreamingRequest = async (
+  query: string,
+  provider: "openai" | "anthropic",
+  roleId: number,
+  projectId: string | number,
+  chatSessionId: string,
+  addMessage: (msg: ChatMessage) => void
+): Promise<void> => {
+  const { toast } = await import("../store/toastStore");
+
+  toast.info("⏳ Generating code... This may take 1-2 minutes.");
+
+  const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
+
+  try {
+    const response = await fetch(`${API_URL}/ask-stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
+      },
+      body: JSON.stringify({
+        query,
+        provider,
+        role_id: roleId,
+        project_id: projectId,
+        chat_session_id: chatSessionId,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Streaming failed: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("No reader available");
+    }
+
+    const decoder = new TextDecoder();
+    let accumulated = "";
+    const streamingMsgId = `ai-${uuidv4()}`;
+
+    // ✅ Multi-file tracking
+    const files = new Map<string, string>();
+    let currentFile: string | null = null;
+    let totalFiles = 0;
+
+    // ✅ Add message with BOTH flags
+    addMessage({
+      id: streamingMsgId,
+      sender: provider,
+      text: "",
+      isStreaming: true,
+      isTyping: true,
+      role_id: roleId,
+      project_id: String(projectId),
+      chat_session_id: chatSessionId,
+    } as ChatMessage);
+
+    console.log("🌊 [Streaming] Started for message:", streamingMsgId);
+
+    // ✅ Throttled update mechanism
+    let lastUpdateTime = Date.now();
+    const UPDATE_INTERVAL = 100; // ms
+
+    const scheduleUpdate = (text: string) => {
+      const now = Date.now();
+
+      if (now - lastUpdateTime >= UPDATE_INTERVAL || text.length % 200 === 0) {
+        useChatStore.getState().updateMessageText(streamingMsgId, text);
+        lastUpdateTime = now;
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        console.log("✅ [Streaming] Done");
+        // Final update
+        useChatStore.getState().updateMessageText(streamingMsgId, accumulated);
+        break;
+      }
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (!line.trim() || !line.startsWith("data: ")) continue;
+
+        const data = line.substring(6).trim();
+        if (data === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(data);
+
+          // ✅ Handle different event types
+          if (parsed.event === "chunk") {
+            accumulated += parsed.data.content;
+            scheduleUpdate(accumulated);
+          } else if (parsed.event === "files_detected") {
+            totalFiles = parsed.data.total_files;
+            toast.info(`📁 Detected ${totalFiles} files...`);
+          } else if (parsed.event === "file_start") {
+            const filename: string = parsed.data.filename || "unknown.txt";
+            currentFile = filename;
+            files.set(filename, "");
+            toast.info(
+              `📝 Generating ${filename} (${parsed.data.index}/${parsed.data.total})`
+            );
+          } else if (parsed.event === "file_chunk") {
+            if (currentFile) {
+              const existing = files.get(currentFile) || "";
+              files.set(currentFile, existing + parsed.data.content);
+
+              // Render all files
+              const allFiles = Array.from(files.entries())
+                .map(
+                  ([name, content]) =>
+                    `### 📄 ${name}\n\`\`\`\n${content}\n\`\`\``
+                )
+                .join("\n\n");
+
+              scheduleUpdate(allFiles);
+            }
+          } else if (parsed.event === "file_end") {
+            toast.success(`✅ ${parsed.data.filename} complete!`);
+          } else if (parsed.event === "done") {
+            console.log("✅ [Streaming] Complete event received");
+
+            // Remove flags
+            const messages = useChatStore.getState().messages;
+            const updatedMessages = messages.map((msg) =>
+              msg.id === streamingMsgId
+                ? {
+                    ...msg,
+                    text: accumulated,
+                    isStreaming: false,
+                    isTyping: false,
+                  }
+                : msg
+            );
+            useChatStore.getState().setMessages(updatedMessages);
+
+            toast.success(
+              `✅ Code generated successfully!${
+                totalFiles > 1 ? ` (${totalFiles} files)` : ""
+              }`
+            );
+          } else if (parsed.event === "error") {
+            throw new Error(parsed.data?.error || "Streaming error");
+          }
+        } catch (parseError) {
+          console.error("❌ [Streaming] Parse error:", parseError);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("❌ [Streaming] Error:", error);
+    toast.error("❌ Failed to generate code. Please try again.");
+    throw error;
+  }
+};
+
+// ============================================================================
 // MAIN HOOK
 // ============================================================================
 
@@ -161,21 +429,105 @@ export const useChatHandler = ({
       )
         return;
 
-      // ✅ Add timeout tracking
+      // Declare initialSessionId at the start
+      const initialSessionId =
+        chatSessionId || useChatStore.getState().chatSessionId || "";
+
+      // ✅ AUTO-DETECT CODE GENERATION AND USE STREAMING
+      if (isCodeGenerationRequest(messageToSend)) {
+        console.log("=".repeat(60));
+        console.log("🌊 [Code Generation] Detected - using streaming");
+        console.log("📝 [DEBUG] Query:", messageToSend);
+        console.log("📝 [DEBUG] Role ID:", roleId);
+        console.log("📝 [DEBUG] Project ID:", projectId);
+        console.log("📝 [DEBUG] Session ID:", initialSessionId);
+        console.log("=".repeat(60));
+
+        setTyping(true);
+        abortRef.current?.abort();
+        abortRef.current = new AbortController();
+
+        // Echo user message
+        const userMessage: ChatMessage = {
+          id: `user-${uuidv4()}`,
+          sender: "user",
+          text: messageToSend,
+          chat_session_id: initialSessionId,
+          role_id: roleId,
+          project_id: String(projectId),
+        };
+
+        console.log("📤 [DEBUG] User message object:");
+        console.log(JSON.stringify(userMessage, null, 2));
+        console.log("📤 [DEBUG] Store BEFORE addMessage:");
+        console.log(
+          "  - Messages count:",
+          useChatStore.getState().messages.length
+        );
+        console.log(
+          "  - Last 3 messages:",
+          useChatStore
+            .getState()
+            .messages.slice(-3)
+            .map((m) => ({
+              id: m.id,
+              sender: m.sender,
+              text: m.text?.substring(0, 30),
+            }))
+        );
+
+        addMessage(userMessage);
+
+        console.log("✅ [DEBUG] Store AFTER addMessage:");
+        console.log(
+          "  - Messages count:",
+          useChatStore.getState().messages.length
+        );
+        console.log(
+          "  - Last 3 messages:",
+          useChatStore
+            .getState()
+            .messages.slice(-3)
+            .map((m) => ({
+              id: m.id,
+              sender: m.sender,
+              text: m.text?.substring(0, 30),
+            }))
+        );
+        console.log("=".repeat(60));
+
+        setInput("");
+
+        try {
+          await handleStreamingRequest(
+            messageToSend,
+            (typedProvider === "all" ? "openai" : typedProvider) as
+              | "openai"
+              | "anthropic",
+            roleId,
+            projectId,
+            initialSessionId,
+            addMessage
+          );
+        } catch (error) {
+          console.error("❌ Streaming failed:", error);
+        } finally {
+          setTyping(false);
+        }
+
+        return;
+      }
+
+      // ✅ NON-STREAMING PATH (normal requests)
       let timeoutWarning1: NodeJS.Timeout | null = null;
       let timeoutWarning2: NodeJS.Timeout | null = null;
       let timeoutFinal: NodeJS.Timeout | null = null;
 
-      // Prepare abort controller for this turn
       setTyping(true);
       abortRef.current?.abort();
       abortRef.current = new AbortController();
 
-      // Snapshot the best-known session id
-      const initialSessionId =
-        chatSessionId || useChatStore.getState().chatSessionId || "";
-
-      // Echo user message immediately
+      // Echo user message for non-streaming requests
       const userMessage: ChatMessage = {
         id: `user-${uuidv4()}`,
         sender: "user",
@@ -187,31 +539,29 @@ export const useChatHandler = ({
       addMessage(userMessage);
       setInput("");
 
-      // ✅ Progressive timeout warnings
+      // Progressive timeout warnings
       const { toast } = await import("../store/toastStore");
 
       timeoutWarning1 = setTimeout(() => {
         toast.info("⏳ Processing large response... Please wait.");
-      }, 15000); // 15 seconds
+      }, 15000);
 
       timeoutWarning2 = setTimeout(() => {
         toast.warning("⚠️ Still working... This is taking longer than usual.");
-      }, 30000); // 30 seconds
+      }, 30000);
 
       timeoutFinal = setTimeout(() => {
         toast.error("❌ Request timeout. Please try a shorter query.");
         abortRef.current?.abort();
         setTyping(false);
-      }, 120000); // 2 minutes - HARD TIMEOUT
+      }, 120000);
 
-      // ✅ Auto-retry logic with exponential backoff
       const maxRetries = 3;
       let retryCount = 0;
 
       const attemptSend = async (): Promise<void> => {
         try {
           if (provider === "boost") {
-            // ===== Boost path (Ai-to-Ai) =====
             const result = await sendAiToAiMessage(
               messageToSend,
               "openai",
@@ -220,12 +570,10 @@ export const useChatHandler = ({
               initialSessionId
             );
 
-            // Clear timeouts on success
             if (timeoutWarning1) clearTimeout(timeoutWarning1);
             if (timeoutWarning2) clearTimeout(timeoutWarning2);
             if (timeoutFinal) clearTimeout(timeoutFinal);
 
-            // In case backend rotated/created a new session, adopt it
             if ((result as any)?.chat_session_id) {
               useChatStore
                 .getState()
@@ -289,7 +637,6 @@ export const useChatHandler = ({
           }
 
           if (typedProvider) {
-            // ===== Normal /api/ask path =====
             const mode = deriveMode(overrides);
 
             const askRes = await sendAiMessage(
@@ -304,12 +651,10 @@ export const useChatHandler = ({
               }
             );
 
-            // Clear timeouts on success
             if (timeoutWarning1) clearTimeout(timeoutWarning1);
             if (timeoutWarning2) clearTimeout(timeoutWarning2);
             if (timeoutFinal) clearTimeout(timeoutFinal);
 
-            // Adopt server-provided session id if present
             if ((askRes as any)?.chat_session_id) {
               useChatStore
                 .getState()
@@ -320,7 +665,6 @@ export const useChatHandler = ({
             const sessId =
               useChatStore.getState().chatSessionId || initialSessionId;
 
-            // Multi-model
             if (typedProvider === "all") {
               for (const m of askRes.messages ?? []) {
                 const id = `ai-${uuidv4()}`;
@@ -348,7 +692,6 @@ export const useChatHandler = ({
                 );
               }
 
-              // supplemental
               if ((askRes as any)?.youtube?.length) {
                 await renderSupplementary(
                   "youtube",
@@ -383,7 +726,6 @@ export const useChatHandler = ({
               return;
             }
 
-            // Single provider
             const m = askRes.messages?.[0] as any;
             const id = `ai-${uuidv4()}`;
             const textOut = String(m?.text ?? "");
@@ -408,7 +750,6 @@ export const useChatHandler = ({
               abortRef.current?.signal
             );
 
-            // supplemental
             if ((askRes as any)?.youtube?.length) {
               await renderSupplementary(
                 "youtube",
@@ -443,36 +784,29 @@ export const useChatHandler = ({
         } catch (err) {
           console.error("❌ send failed:", err);
 
-          // Clear timeouts
           if (timeoutWarning1) clearTimeout(timeoutWarning1);
           if (timeoutWarning2) clearTimeout(timeoutWarning2);
           if (timeoutFinal) clearTimeout(timeoutFinal);
 
-          // ✅ RETRY LOGIC
           if (retryCount < maxRetries) {
-            // Check if error is retriable
             const isRetriable =
               isNetworkError(err) || isTimeoutError(err) || isServerError(err);
 
             if (isRetriable) {
               retryCount++;
-              const delayMs = Math.pow(2, retryCount) * 1000; // 2s, 4s, 8s
+              const delayMs = Math.pow(2, retryCount) * 1000;
 
               toast.warning(
                 `🔄 Retry ${retryCount}/${maxRetries} in ${delayMs / 1000}s...`
               );
 
               await sleep(delayMs);
-
-              // Recursive retry
               return attemptSend();
             }
           }
 
-          // ✅ FINAL ERROR HANDLING
           const errorMsg = getErrorMessage(err);
 
-          // Show toast notification
           if (is401Error(err)) {
             toast.error("🔑 " + errorMsg + " → Open Settings");
           } else if (isRateLimitError(err)) {
@@ -481,7 +815,6 @@ export const useChatHandler = ({
             toast.error("❌ " + errorMsg);
           }
 
-          // Add error message to chat
           const sessId =
             useChatStore.getState().chatSessionId || initialSessionId;
           addMessage({
@@ -493,21 +826,18 @@ export const useChatHandler = ({
             project_id: String(projectId),
           } as ChatMessage);
 
-          throw err; // Re-throw for outer catch
+          throw err;
         }
       };
 
-      // ✅ START: Initial attempt
       try {
         await attemptSend();
       } catch (finalError) {
         console.error("❌ Final error after retries:", finalError);
       } finally {
-        // Clean up timeouts
         if (timeoutWarning1) clearTimeout(timeoutWarning1);
         if (timeoutWarning2) clearTimeout(timeoutWarning2);
         if (timeoutFinal) clearTimeout(timeoutFinal);
-
         setTyping(false);
       }
     },

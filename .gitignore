@@ -15,9 +15,19 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.env
 *.db
 *.sqlite3
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+backend/.env
+backend/.env.development
+backend/.env.local
+frontend/.env.local
+frontend/.env.development
 
 # Node.js and frontend
 frontend/node_modules/
@@ -26,6 +36,8 @@ node_modules/
 *.lock
 package-lock.json
 yarn.lock
+frontend/build/
+frontend/.cache/
 
 # IDEs
 .vscode/
@@ -44,3 +56,21 @@ FollowMe.md
 # Build artifacts
 *.dll
 *.exe
+
+# Database backups
+*.sql
+backup.sql
+
+# Temporary files
+*.tmp
+*.temp
+
+# Railway/Docker
+.railway/
+docker-compose.override.yml
+
+# Testing
+coverage/
+.coverage
+*.cover
+.pytest_cache/

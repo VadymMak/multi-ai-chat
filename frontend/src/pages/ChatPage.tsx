@@ -15,8 +15,11 @@ import { useMemoryStore } from "../store/memoryStore";
 import { useStreamText } from "../hooks/useStreamText";
 import { useSessionCleanup } from "../hooks/useSessionCleanup";
 import { useAppStore } from "../store/appStore";
-import LoadingOverlay from "../components/Shared/LoadingOverlay";
+import { useNetworkStatus } from "../hooks/useNetworkStatus";
+import { toast } from "../store/toastStore";
 import Sidebar from "../components/Sidebar/Sidebar";
+import { WelcomeScreen } from "../components/Chat/WelcomeScreen";
+import SettingsModal from "../components/Settings/SettingsModal";
 import {
   sendAiMessage,
   sendAiToAiMessage,
@@ -127,13 +130,26 @@ const ChatPage: React.FC = () => {
   const projectId = useProjectStore((s) => s.projectId ?? null);
 
   const chatSessionId = useChatStore((s) => s.chatSessionId);
+  const sessionReady = useChatStore((s) => s.sessionReady);
   const addMessage = useChatStore((s) => s.addMessage);
   const setTyping = useChatStore((s) => s.setTyping);
 
-  const { isLoading } = useAppStore();
   const streamText = useStreamText();
   const roleId = typeof role?.id === "number" ? role.id : null;
   const hasRestoredRole = useRef(false);
+
+  // Network status
+  const { isOnline } = useNetworkStatus();
+
+  // State for first-time user and settings modal
+  const [isFirstTimeUser, setIsFirstTimeUser] = useState(() => {
+    return !localStorage.getItem("hasCreatedProject");
+  });
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  const openCreateProjectModal = () => {
+    setIsSettingsOpen(true);
+  };
 
   // Observe InputBar wrapper height (throttled via rAF)
   useEffect(() => {
@@ -175,56 +191,28 @@ const ChatPage: React.FC = () => {
     };
   }, []);
 
-  // Try to map backend role_name → knownRoles only once
-  useEffect(() => {
-    const restoreLastSession = async () => {
-      if (hasRestoredRole.current || !hasHydrated) return;
-      if (!role && roleId && projectId) {
-        try {
-          const res = await getLastSessionByRole(roleId, projectId);
-          if (res?.role_id && res?.role_name) {
-            const matched = knownRoles.find(
-              (r) => r.id === res.role_id && r.name === res.role_name
-            );
-            if (matched) {
-              hasRestoredRole.current = true;
-              useMemoryStore.getState().setRole(matched);
-            }
-          }
-        } catch (err) {
-          console.warn("⚠️ Could not restore role from backend:", err);
-        }
-      }
-    };
-    restoreLastSession();
-  }, [hasHydrated, role, roleId, projectId]);
-
-  // Bootstrap or restore chat session
-  useEffect(() => {
-    if (!hasHydrated) return;
-    const store = useChatStore.getState();
-    if (store.sessionReady) return;
-
-    if (store.lastSessionMarker) {
-      store.restoreSessionFromMarker().then((ok) => {
-        if (!ok && roleId && projectId) {
-          store.loadOrInitSessionForRoleProject(roleId, Number(projectId));
-        }
-      });
-      return;
-    }
-
-    if (roleId && projectId) {
-      store.loadOrInitSessionForRoleProject(roleId, Number(projectId));
-    }
-  }, [hasHydrated, roleId, projectId]);
-
   useSessionCleanup();
 
   // HYDRATE HISTORY once per (roleId, projectId, chatSessionId)
   useEffect(() => {
+    console.log("🔍 [History Effect]", {
+      roleId,
+      projectId,
+      chatSessionId,
+      sessionReady: useChatStore.getState().sessionReady,
+      messagesCount: useChatStore.getState().messages.length,
+    });
+
     const store = useChatStore.getState();
-    if (!roleId || !projectId || !chatSessionId || !store.sessionReady) return;
+    if (!roleId || !projectId || !chatSessionId || !store.sessionReady) {
+      console.log("⏸️ [History] Not ready yet", {
+        hasRoleId: !!roleId,
+        hasProjectId: !!projectId,
+        hasChatSessionId: !!chatSessionId,
+        sessionReady: store.sessionReady,
+      });
+      return;
+    }
 
     const alreadyHas = store.messages?.some(
       (m) =>
@@ -232,7 +220,10 @@ const ChatPage: React.FC = () => {
         String(m.chat_session_id) === String(chatSessionId) &&
         Number(m.role_id) === Number(roleId)
     );
-    if (alreadyHas) return;
+
+    if (alreadyHas) {
+      return;
+    }
 
     (async () => {
       try {
@@ -241,14 +232,19 @@ const ChatPage: React.FC = () => {
           roleId,
           chatSessionId
         );
-        if (messages.length && typeof store.addMessage === "function") {
-          messages.forEach((m) => store.addMessage(m));
+
+        if (messages.length) {
+          useChatStore.getState().setMessages(messages);
+        } else {
+          console.log("⚠️ [History] No messages to load");
         }
       } catch (e) {
-        console.error("⚠️ Failed to load chat history:", e);
+        console.error("❌ [History] Failed to load:", e);
       }
     })();
   }, [roleId, projectId, chatSessionId]);
+
+  useSessionCleanup();
 
   const ensureSessionId = useCallback(
     async (rid: number, pid: number): Promise<string | null> => {
@@ -278,6 +274,12 @@ const ChatPage: React.FC = () => {
     ) => {
       const raw = (text ?? input).trim();
       if (!raw || !roleId || !projectId) return;
+
+      // Check network status before sending
+      if (!isOnline) {
+        toast.warning("📡 No internet connection. Please check your network.");
+        return;
+      }
 
       const { clean, kind: parsedKind } = parseRenderOverride(raw);
       const selectedKind = overrides?.kind ?? parsedKind;
@@ -732,14 +734,32 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
             }
           }
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("❌ Send failed:", err);
+
+        // Handle different error types with appropriate toasts
+        if (err?.isNetworkError) {
+          toast.warning(
+            "📡 Network error. Please check your internet connection."
+          );
+        } else if (err?.isTimeout) {
+          toast.warning(
+            "⏱️ Request timeout. The server is taking too long to respond."
+          );
+        } else if (err?.status >= 500) {
+          toast.error("❌ Server error. Please try again later.");
+        } else if (err?.message) {
+          toast.error(`❌ ${err.message}`);
+        } else {
+          toast.error("❌ Failed to send message. Please try again.");
+        }
       } finally {
         setTyping(false);
       }
     },
     [
       input,
+      isOnline,
       provider,
       roleId,
       projectId,
@@ -763,7 +783,6 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
 
   return (
     <>
-      {isLoading && <LoadingOverlay />}
       <div className="flex flex-col h-screen overflow-hidden bg-background">
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
@@ -777,38 +796,44 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
               <HeaderControls />
             </Suspense>
             <div className="flex-1 min-h-0">
-              <Suspense
-                fallback={
-                  <div className="p-4 text-sm text-text-secondary">
-                    Loading chat…
-                  </div>
-                }
-              >
-                <ChatArea bottomPad={inputHeight} />
-              </Suspense>
+              {sessionReady && projectId === null && isFirstTimeUser ? (
+                <WelcomeScreen onCreateProject={openCreateProjectModal} />
+              ) : (
+                <Suspense
+                  fallback={
+                    <div className="p-4 text-sm text-text-secondary">
+                      Loading chat…
+                    </div>
+                  }
+                >
+                  <ChatArea bottomPad={inputHeight} />
+                </Suspense>
+              )}
             </div>
 
-            {/* InputBar */}
-            <div
-              ref={inputWrapRef}
-              className="border-t border-border p-3 bg-panel shrink-0"
-            >
-              <Suspense
-                fallback={
-                  <div className="p-2 text-sm text-text-secondary">
-                    Loading input…
-                  </div>
-                }
+            {/* InputBar - only show when there's a project */}
+            {projectId !== null && (
+              <div
+                ref={inputWrapRef}
+                className="border-t border-border p-3 bg-panel shrink-0"
               >
-                <InputBar
-                  input={input}
-                  setInput={setInput}
-                  handleSend={handleSend}
-                  handleKeyDown={handleKeyDown}
-                  abortRef={abortRef}
-                />
-              </Suspense>
-            </div>
+                <Suspense
+                  fallback={
+                    <div className="p-2 text-sm text-text-secondary">
+                      Loading input…
+                    </div>
+                  }
+                >
+                  <InputBar
+                    input={input}
+                    setInput={setInput}
+                    handleSend={handleSend}
+                    handleKeyDown={handleKeyDown}
+                    abortRef={abortRef}
+                  />
+                </Suspense>
+              </div>
+            )}
           </div>
         </div>
 
@@ -817,6 +842,13 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
           FastAPI
         </footer>
       </div>
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        initialTab="projects"
+      />
     </>
   );
 };

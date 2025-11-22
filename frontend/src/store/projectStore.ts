@@ -2,14 +2,9 @@
 import { create, StateCreator, StoreApi, UseBoundStore } from "zustand";
 import { persist, PersistOptions, createJSONStorage } from "zustand/middleware";
 import api from "../services/api";
+import type { Project } from "../types/projects";
 
 type ProjectId = number;
-
-export interface Project {
-  id: ProjectId;
-  name: string;
-  description?: string | null;
-}
 
 export interface ProjectStore {
   projectId: ProjectId | null;
@@ -37,6 +32,7 @@ export interface ProjectStore {
   createProject: (data: {
     name: string;
     description?: string;
+    assistant_id?: number;
   }) => Promise<Project | null>;
   updateProject: (
     id: number,
@@ -334,12 +330,20 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
         }
       },
 
-      createProject: async (data: { name: string; description?: string }) => {
+      createProject: async (data: {
+        name: string;
+        description?: string;
+        assistant_id?: number;
+      }) => {
         try {
-          const res = await api.post("/projects", {
+          const payload: any = {
             name: data.name.trim(),
             description: data.description?.trim() || "",
-          });
+          };
+          if (data.assistant_id) {
+            payload.assistant_id = data.assistant_id;
+          }
+          const res = await api.post("/projects", payload);
           const newProject = res?.data;
           if (newProject && typeof newProject.id === "number") {
             if (process.env.NODE_ENV !== "production") {
@@ -434,3 +438,8 @@ export const selectBasics = (s: ProjectStore) => ({
 
 /* -------------------- Export -------------------- */
 export const useProjectStore = baseProjectStore;
+
+// ✅ DEBUG: Export to window for console access
+if (typeof window !== "undefined") {
+  (window as any).useProjectStore = useProjectStore;
+}

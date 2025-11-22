@@ -1,10 +1,15 @@
 // src/services/api.ts
-import axios, { AxiosError, AxiosResponse } from "axios";
+import axios, {
+  AxiosError,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from "axios";
+import { useAuthStore } from "../store/authStore";
 
-const ENV_BASE = process.env.REACT_APP_API_BASE_URL;
+const ENV_BASE = import.meta.env.VITE_API_BASE_URL;
 if (!ENV_BASE) {
   console.warn(
-    "⚠️ REACT_APP_API_BASE_URL is not defined. Falling back to localhost."
+    "⚠️ VITE_API_BASE_URL is not defined. Falling back to localhost."
   );
 }
 const baseURL = ENV_BASE || "http://localhost:8000/api";
@@ -31,9 +36,12 @@ function looksLikeHtml(res: AxiosResponse): boolean {
 
 export type NormalizedAxiosError = {
   name: string;
+  message: string;
   status: number | null;
   url: string;
-  detail: string;
+  detail?: string;
+  isNetworkError?: boolean;
+  isTimeout?: boolean;
   original: any;
 };
 
@@ -42,19 +50,63 @@ function normalizeAxiosError(err: any): NormalizedAxiosError {
   const status = ax.response?.status ?? (ax as any)?.status ?? null;
   const url = ax.config?.url || (ax as any)?.url || "";
   const data = ax.response?.data;
+
+  // Check for network error (no response received)
+  const isNetworkError =
+    ax.code === "ERR_NETWORK" || (!ax.response && ax.request);
+
+  // Check for timeout error
+  const isTimeout =
+    ax.code === "ECONNABORTED" || ax.message?.includes("timeout");
+
+  let name = "AxiosError";
+  let message = ax.message || "Unknown error";
+
+  if (isNetworkError) {
+    name = "NetworkError";
+    message = "Network error. Please check your internet connection.";
+  } else if (isTimeout) {
+    name = "TimeoutError";
+    message = "Request timeout. The server is taking too long to respond.";
+  }
+
   const detail =
     (data &&
       typeof (data as any).detail === "string" &&
       (data as any).detail) ||
-    (typeof data === "string"
-      ? data.slice(0, 200)
-      : ax.message || "Unknown error");
-  return { name: "AxiosError", status, url, detail, original: err };
+    (typeof data === "string" ? data.slice(0, 200) : undefined);
+
+  return {
+    name,
+    message,
+    status,
+    url,
+    detail,
+    isNetworkError,
+    isTimeout,
+    original: err,
+  };
 }
 
 // ---------- Interceptors ----------
+
+// Request interceptor - добавляем Authorization header
+api.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    const token = useAuthStore.getState().token;
+
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    return config;
+  },
+  (error: AxiosError) => Promise.reject(error)
+);
+
+// Response interceptor - обработка ошибок + 401
 api.interceptors.response.use(
-  (res) => {
+  (res: AxiosResponse) => {
     if (looksLikeHtml(res)) {
       const preview =
         typeof res.data === "string"
@@ -70,7 +122,18 @@ api.interceptors.response.use(
     }
     return res;
   },
-  (err) => Promise.reject(normalizeAxiosError(err))
+  (err: AxiosError) => {
+    const normalized = normalizeAxiosError(err);
+
+    // Обработка 401 Unauthorized - logout и redirect
+    if (normalized.status === 401) {
+      console.error("[Auth] 401 Unauthorized - logging out");
+      useAuthStore.getState().logout();
+      window.location.href = "/login";
+    }
+
+    return Promise.reject(normalized);
+  }
 );
 
 // ===================================================================

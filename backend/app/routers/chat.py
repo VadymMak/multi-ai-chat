@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator, Field
 from sqlalchemy.orm import Session
 
 from app.memory.db import get_db  # ✅ use the same get_db as the rest of the app
+from app.deps import get_current_user
 from app.memory.manager import MemoryManager
 from app.memory.utils import safe_text
 from app.config.settings import settings  # flags and thresholds
@@ -332,7 +333,7 @@ async def _safe_youtube(topic: str) -> List[Dict[str, str]]:
 # ====== BUILD LAST-SESSION (used by two endpoints) ======
 
 def _build_last_session_payload(
-    db: Session, *, role_id: int, project_id: str, limit: int
+    db: Session, *, role_id: int, project_id: str, limit: int, user_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Core implementation shared by /last-session-by-role and /last-session.
@@ -341,11 +342,11 @@ def _build_last_session_payload(
     """
     project_id = str(project_id).strip()
     print(
-        f"📅 Looking up last session (memory_entries) role_id={role_id}, project_id={project_id}, limit={limit}"
+        f"📅 Looking up last session (memory_entries) role_id={role_id}, project_id={project_id}, limit={limit}, user_id={user_id}"
     )
 
     memory = MemoryManager(db)
-    last = memory.get_last_session(role_id=role_id, project_id=project_id)  # may be None
+    last = memory.get_last_session(role_id=role_id, project_id=project_id, user_id=user_id)  # may be None
 
     session_id = _get_last_session_id_from_record(last)
     role_name = safe_text((last or {}).get("role_name") or "")
@@ -357,6 +358,7 @@ def _build_last_session_payload(
         chat_session_id=session_id if session_id else None,
         limit=int(limit),
         for_display=True,  # ← FULL MESSAGES FOR UI!
+        user_id=user_id,
     )
     
     # Extract messages from dict response
@@ -412,15 +414,33 @@ def get_last_session_by_role(
     project_id: str,
     limit: int = Query(20, ge=1, le=1000),
     debug: Optional[bool] = Query(default=False, description="Include basic diagnostic info"),
+    current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Returns the last session for a given role/project (from memory_entries).
     Always returns a consistent shape (messages & summaries arrays).
     """
+    # Verify project ownership
+    try:
+        from app.memory.models import Project
+        
+        project = db.query(Project).filter(
+            Project.id == int(project_id),
+            Project.user_id == current_user.id
+        ).first()
+        
+        if not project:
+            raise HTTPException(
+                status_code=403, 
+                detail="Access denied: Project not found or not owned by user"
+            )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    
     try:
         payload = _build_last_session_payload(
-            db, role_id=role_id, project_id=project_id, limit=limit
+            db, role_id=role_id, project_id=project_id, limit=limit, user_id=current_user.id
         )
         if debug:
             payload["debug"] = {
@@ -475,6 +495,7 @@ async def get_chat_history(
     chat_session_id: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=1000),
     include_youtube: bool = Query(True, description="If true, rehydrate YouTube cards by re-running the deterministic search for the most recent YouTube-intent user message."),
+    current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -488,6 +509,23 @@ async def get_chat_history(
     if not str(project_id).strip():
         raise HTTPException(status_code=400, detail="Invalid project_id")
 
+    # Verify project ownership
+    try:
+        from app.memory.models import Project
+        
+        project = db.query(Project).filter(
+            Project.id == int(project_id),
+            Project.user_id == current_user.id
+        ).first()
+        
+        if not project:
+            raise HTTPException(
+                status_code=403, 
+                detail="Access denied: Project not found or not owned by user"
+            )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+
     try:
         project_id = str(project_id).strip()
         memory = MemoryManager(db)
@@ -498,6 +536,7 @@ async def get_chat_history(
             chat_session_id=chat_session_id,
             limit=int(limit),
             for_display=True,  # ← FULL MESSAGES FOR UI!
+            user_id=current_user.id,
         )
         
         # Extract messages and token info from dict response

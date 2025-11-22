@@ -414,8 +414,25 @@ const useBaseChatStore = create<ChatState>()(
 
       setMessages: (msgs) =>
         set((state) => {
+          console.log("🔧 [setMessages] ========== CALLED ==========");
+          console.log("🔧 [setMessages] Input messages:", msgs?.length);
+          console.log("🔧 [setMessages] Input data:", msgs);
+          console.log(
+            "🔧 [setMessages] Current messages in store:",
+            state.messages.length
+          );
+          console.log(
+            "🔧 [setMessages] Stack trace:",
+            new Error().stack?.split("\n").slice(1, 5).join("\n")
+          );
+
           revokeAttachmentUrls(state.messages);
           const normalized = withIds(msgs);
+
+          console.log("🔧 [setMessages] After withIds:", normalized.length);
+          console.log("🔧 [setMessages] Normalized data:", normalized);
+          console.log("🔧 [setMessages] ========== END ==========");
+
           return { messages: normalized, noHistory: normalized.length === 0 };
         }),
 
@@ -680,12 +697,8 @@ const useBaseChatStore = create<ChatState>()(
     }),
     {
       name: "chat-storage",
-      // ✅ Use localStorage so AppInitializer can read it on hard refresh
       storage: createJSONStorage(() => localStorage),
-      // Persist just the marker so we can restore on reload
-      partialize: (state) => ({
-        lastSessionMarker: state.lastSessionMarker,
-      }),
+      partialize: () => ({}),
     }
   )
 );

@@ -88,6 +88,7 @@ export interface ChatMessage {
   /** UI state flags */
   isTyping?: boolean;
   isSummary?: boolean;
+  isStreaming?: boolean;
 
   /** Optional timestamp (ISO string) if you store it */
   timestamp?: string;

@@ -502,7 +502,37 @@ const ChatMessageBubbleBase: React.FC<Props> = ({ message }) => {
             </div>
           )}
 
-        {isTyping && (
+        {/* ✅ ENHANCED STREAMING INDICATOR */}
+        {message.isStreaming && (
+          <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <div className="animate-spin text-2xl">⚙️</div>
+                <div className="absolute inset-0 animate-ping opacity-20">
+                  ⚙️
+                </div>
+              </div>
+              <div className="flex-1">
+                <div className="text-sm text-blue-600 dark:text-blue-400 font-medium">
+                  Generating code...
+                </div>
+                <div className="text-xs text-blue-500 dark:text-blue-500 mt-0.5">
+                  This may take 1-2 minutes for large projects
+                </div>
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div className="mt-2 h-1 bg-blue-200 dark:bg-blue-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 animate-pulse"
+                style={{ width: "60%" }}
+              />
+            </div>
+          </div>
+        )}
+
+        {isTyping && !message.isStreaming && (
           <div className="mt-1 animate-pulse text-sm text-text-secondary">
             Typing...
           </div>

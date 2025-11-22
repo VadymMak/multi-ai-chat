@@ -1,11 +1,11 @@
 import axios from "axios";
 
 const fallbackBaseURL =
-  process.env.NODE_ENV === "development"
+  import.meta.env.MODE === "development"
     ? "http://localhost:8000/api"
     : "https://your-production-url.com/api"; // Replace with real prod URL
 
-const baseURL = process.env.REACT_APP_API_BASE_URL || fallbackBaseURL;
+const baseURL = import.meta.env.VITE_API_BASE_URL || fallbackBaseURL;
 
 if (!baseURL) {
   throw new Error("❌ API base URL is not defined. Check .env setup.");

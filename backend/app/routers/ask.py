@@ -166,6 +166,67 @@ def _suggest_filename(lang: Optional[str]) -> Optional[str]:
         "text": "poem.txt",
     }.get(l)
 
+# ---------- Multi-file code detection helpers ----------
+def extract_code_blocks(text: str) -> List[Tuple[str, str, str]]:
+    """
+    Extract multiple code blocks from AI response.
+    Returns: List of (filename, language, code) tuples
+    """
+    # Match: ```language [optional filename]
+    pattern = r'```(\w+)(?:\s+([^\n]+))?\n(.*?)```'
+    matches = re.finditer(pattern, text, re.DOTALL | re.MULTILINE)
+    
+    files = []
+    file_index = 1
+    
+    for match in matches:
+        language = match.group(1) or "text"
+        filename = match.group(2)
+        code = match.group(3)
+        
+        # Generate filename if not provided
+        if not filename or filename.startswith('#'):
+            ext_map = {
+                'python': 'py', 'javascript': 'js', 'typescript': 'ts',
+                'jsx': 'jsx', 'tsx': 'tsx', 'java': 'java',
+                'cpp': 'cpp', 'c': 'c', 'go': 'go', 'rust': 'rs',
+                'html': 'html', 'css': 'css', 'sql': 'sql',
+                'bash': 'sh', 'shell': 'sh', 'json': 'json'
+            }
+            ext = ext_map.get(language.lower(), 'txt')
+            filename = f"file{file_index}.{ext}"
+            file_index += 1
+        
+        files.append((filename.strip(), language.strip(), code.strip()))
+    
+    return files
+
+def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
+    """
+    Split text into chunks for smooth streaming.
+    Chunk by lines to avoid breaking code mid-line.
+    """
+    lines = text.split('\n')
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        
+        if current_size + line_len > chunk_size and current_chunk:
+            chunks.append('\n'.join(current_chunk))
+            current_chunk = [line]
+            current_size = line_len
+        else:
+            current_chunk.append(line)
+            current_size += line_len
+    
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+    
+    return chunks
+
 # ---------- YouTube helpers ----------
 _YT_PREFIX = re.compile(r"^\s*(?:youtube:|yt:)\s*(.+)$", re.IGNORECASE)
 _YT_FIND = re.compile(r"\b(?:find on youtube|search youtube for)\b[:\s]*(.+)$", re.IGNORECASE)
@@ -846,6 +907,60 @@ async def ask_stream_route(
                     "data": json.dumps({"error": error_msg})
                 }
                 return
+
+            # 6a) Detect and stream multiple files separately
+            code_blocks = extract_code_blocks(full_response)
+            
+            if len(code_blocks) > 1:
+                # Multiple files detected - stream each separately
+                print(f"📁 [Multi-File Detection] Found {len(code_blocks)} code files")
+                
+                yield {
+                    "event": "files_detected",
+                    "data": json.dumps({
+                        "total_files": len(code_blocks),
+                        "files": [
+                            {"filename": f[0], "language": f[1], "size": len(f[2])}
+                            for f in code_blocks
+                        ]
+                    })
+                }
+                
+                for idx, (filename, language, code) in enumerate(code_blocks, 1):
+                    # File start event
+                    yield {
+                        "event": "file_start",
+                        "data": json.dumps({
+                            "filename": filename,
+                            "language": language,
+                            "index": idx,
+                            "total": len(code_blocks)
+                        })
+                    }
+                    
+                    # Stream file content in chunks
+                    chunks = chunk_text(code, chunk_size=500)
+                    for chunk in chunks:
+                        yield {
+                            "event": "file_chunk",
+                            "data": json.dumps({
+                                "filename": filename,
+                                "content": chunk
+                            })
+                        }
+                        # Small delay to prevent overwhelming frontend
+                        await asyncio.sleep(0.01)
+                    
+                    # File end event
+                    yield {
+                        "event": "file_end",
+                        "data": json.dumps({
+                            "filename": filename,
+                            "size": len(code)
+                        })
+                    }
+                    
+                    print(f"  ✅ File {idx}/{len(code_blocks)}: {filename} ({len(code)} chars)")
 
             # 7) Store complete message in database
             ai_entry = memory.store_chat_message(

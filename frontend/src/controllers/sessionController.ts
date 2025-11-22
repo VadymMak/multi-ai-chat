@@ -88,26 +88,22 @@ export const queueSessionSync = async (
 
 export const rehydrateLastSessionFromStorage = async (): Promise<void> => {
   const chatStore = useChatStore.getState();
-  const projectStore = useProjectStore.getState();
-  const memoryStore = useMemoryStore.getState();
-
   const marker = chatStore.lastSessionMarker;
-  const targetRoleId = marker?.roleId ?? memoryStore.role?.id;
-  const targetProjectId = marker?.projectId ?? projectStore.projectId;
 
-  logSessionFlow("🚀 rehydrateLastSessionFromStorage", {
-    marker,
-    targetRoleId,
-    targetProjectId,
-  });
+  logSessionFlow("🚀 rehydrateLastSessionFromStorage", { marker });
 
-  if (!targetRoleId || !targetProjectId) {
-    logSessionFlow(
-      "⚠️ rehydrateLastSessionFromStorage → no role/project to restore",
-      {}
-    );
+  // Use ONLY saved marker from localStorage, no fallbacks to current store state.
+  // This ensures we restore the exact session that was persisted, not the current UI state.
+  if (!marker?.roleId || !marker?.projectId) {
+    logSessionFlow("⚠️ No valid marker to restore", {});
     return;
   }
 
-  await queueSessionSync(targetRoleId, targetProjectId);
+  logSessionFlow("✅ Restoring saved session", {
+    roleId: marker.roleId,
+    projectId: marker.projectId,
+    chatSessionId: marker.chatSessionId,
+  });
+
+  await queueSessionSync(marker.roleId, marker.projectId);
 };

@@ -1,8 +1,22 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { Folder, Plus, Edit2, Trash2, Check, X } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import {
+  Folder,
+  Plus,
+  Edit2,
+  Trash2,
+  Check,
+  X,
+  Sparkles,
+  ArrowLeft,
+} from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
+import { useRoleStore } from "../../store/roleStore";
 import { toast } from "../../store/toastStore";
-import type { Project } from "../../store/projectStore";
+import type { Project } from "../../types/projects";
+import {
+  ASSISTANT_TEMPLATES,
+  type AssistantTemplate,
+} from "../../constants/assistantTemplates";
 
 const ProjectsTab: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -10,35 +24,173 @@ const ProjectsTab: React.FC = () => {
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
 
+  // Assistant selection states
+  const [selectedAssistantId, setSelectedAssistantId] = useState<number | null>(
+    null
+  );
+  const [showAssistantModal, setShowAssistantModal] = useState(false);
+  const [customAssistantForm, setCustomAssistantForm] = useState({
+    name: "",
+    description: "",
+  });
+
   // Form states
   const [createForm, setCreateForm] = useState({ name: "", description: "" });
   const [editForm, setEditForm] = useState({ name: "", description: "" });
 
   const { fetchAllProjects, createProject, updateProject, deleteProject } =
     useProjectStore();
+  const { roles, fetchRoles, addRole } = useRoleStore();
 
-  // Wrap loadProjects in useCallback to prevent infinite loop
-  const loadProjects = useCallback(async () => {
+  // Load data once on mount
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoading(true);
+      try {
+        const projectData = await fetchAllProjects();
+        setProjects(projectData);
+        await fetchRoles();
+      } catch (error) {
+        console.error("Failed to load data:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Run once on mount - store methods are stable
+
+  // Helper function to reload projects (used after create/update/delete)
+  const loadProjects = async () => {
     setIsLoading(true);
     const data = await fetchAllProjects();
     setProjects(data);
     setIsLoading(false);
-  }, [fetchAllProjects]);
+  };
 
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+  const handleSelectTemplate = async (template: AssistantTemplate) => {
+    // Check if role already exists
+    let role = roles.find((r) => r.name === template.name);
+
+    if (!role) {
+      // Role doesn't exist, create it
+      console.log(`📝 Creating new role: ${template.name}`);
+      await addRole(template.name, template.systemPrompt);
+      await fetchRoles();
+
+      // Find the newly created assistant
+      role = roles.find((r) => r.name === template.name);
+    } else {
+      // Role exists, reuse it
+      console.log(
+        `✅ Reusing existing role: ${template.name} (id: ${role.id})`
+      );
+    }
+
+    if (role) {
+      setSelectedAssistantId(role.id);
+      toast.success(`${template.name} template applied!`);
+    }
+  };
+
+  const handleCreateCustomAssistant = async () => {
+    if (
+      !customAssistantForm.name.trim() ||
+      !customAssistantForm.description.trim()
+    ) {
+      toast.error("Name and description are required");
+      return;
+    }
+
+    // Check if role already exists
+    let customRole = roles.find((r) => r.name === customAssistantForm.name);
+
+    if (!customRole) {
+      // Role doesn't exist, create it
+      console.log(`📝 Creating new custom role: ${customAssistantForm.name}`);
+      await addRole(customAssistantForm.name, customAssistantForm.description);
+      await fetchRoles();
+
+      // Find the newly created assistant
+      customRole = roles.find((r) => r.name === customAssistantForm.name);
+    } else {
+      // Role exists, reuse it
+      console.log(
+        `✅ Reusing existing custom role: ${customAssistantForm.name} (id: ${customRole.id})`
+      );
+    }
+
+    if (customRole) {
+      setSelectedAssistantId(customRole.id);
+      setShowAssistantModal(false);
+      setCustomAssistantForm({ name: "", description: "" });
+      toast.success("Custom assistant created!");
+    }
+  };
 
   const handleCreate = async () => {
     if (!createForm.name.trim()) {
       toast.error("Project name is required");
       return;
     }
-    const newProject = await createProject(createForm);
+    if (!selectedAssistantId) {
+      toast.error("Please select an assistant");
+      return;
+    }
+
+    const newProject = await createProject({
+      ...createForm,
+      assistant_id: selectedAssistantId,
+    });
+
     if (newProject) {
       toast.success("Project created!");
+
+      // ✅ Track that user created first project
+      localStorage.setItem("hasCreatedProject", "true");
+
+      // Initialize session for the new project immediately
+      console.log("✅ Project created, initializing session...");
+
+      try {
+        // Get the SessionManager
+        const { sessionManager } = await import(
+          "../../services/SessionManager"
+        );
+
+        // Get the newly created project ID and role ID
+        const newProjectId = newProject.id;
+        const roleId = selectedAssistantId;
+
+        // Set the project in projectStore
+        const { setProjectId } = useProjectStore.getState();
+        setProjectId(newProjectId);
+
+        // Set the role in memoryStore
+        const selectedRole = roles.find((r) => r.id === roleId);
+        if (selectedRole) {
+          const { useMemoryStore } = await import("../../store/memoryStore");
+          useMemoryStore.getState().setRole({
+            id: selectedRole.id,
+            name: selectedRole.name,
+          });
+        }
+
+        // Initialize the chat session for this project
+        const { useChatStore } = await import("../../store/chatStore");
+        await useChatStore
+          .getState()
+          .initializeChatSession(newProjectId, roleId);
+
+        console.log("✅ Session initialized for new project");
+      } catch (error) {
+        console.error("❌ Failed to initialize session:", error);
+      }
+
       setShowCreate(false);
       setCreateForm({ name: "", description: "" });
+      setSelectedAssistantId(null);
       await loadProjects();
 
       // Trigger refresh in ProjectSelector
@@ -94,6 +246,14 @@ const ProjectsTab: React.FC = () => {
     }
   };
 
+  const cancelCreate = () => {
+    setShowCreate(false);
+    setCreateForm({ name: "", description: "" });
+    setSelectedAssistantId(null);
+    setShowAssistantModal(false);
+    setCustomAssistantForm({ name: "", description: "" });
+  };
+
   if (isLoading && projects.length === 0) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -108,7 +268,7 @@ const ProjectsTab: React.FC = () => {
         <div>
           <h3 className="text-lg font-semibold text-gray-100">Projects</h3>
           <p className="text-sm text-gray-400">
-            Manage your projects and contexts
+            Create projects and choose assistants with specific expertise
           </p>
         </div>
       </div>
@@ -179,9 +339,15 @@ const ProjectsTab: React.FC = () => {
                     </h4>
                   </div>
                   {project.description && (
-                    <p className="text-sm text-gray-400 ml-6">
+                    <p className="text-sm text-gray-400 ml-6 mb-2">
                       {project.description}
                     </p>
+                  )}
+                  {project.assistant && (
+                    <div className="flex items-center gap-2 ml-6 text-xs text-gray-500">
+                      <span>🤖</span>
+                      <span>{project.assistant.name}</span>
+                    </div>
                   )}
                 </div>
                 <div className="flex gap-2 ml-4">
@@ -219,10 +385,12 @@ const ProjectsTab: React.FC = () => {
           <h4 className="text-sm font-semibold text-gray-100 mb-3">
             Create New Project
           </h4>
+
           <div className="space-y-3">
+            {/* Project Name */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Name
+                Project Name
               </label>
               <input
                 type="text"
@@ -231,10 +399,12 @@ const ProjectsTab: React.FC = () => {
                   setCreateForm({ ...createForm, name: e.target.value })
                 }
                 className="w-full bg-gray-700 text-gray-100 rounded px-3 py-2 text-sm border border-gray-600 focus:outline-none focus:border-blue-500"
-                placeholder="Project name"
+                placeholder="Enter project name"
                 autoFocus
               />
             </div>
+
+            {/* Project Description */}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
                 Description
@@ -249,20 +419,138 @@ const ProjectsTab: React.FC = () => {
                 rows={2}
               />
             </div>
-            <div className="flex gap-2">
+
+            {/* Assistant Selection */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Choose Assistant
+              </label>
+
+              {!showAssistantModal ? (
+                <div className="space-y-2">
+                  {/* Template Grid */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {ASSISTANT_TEMPLATES.map((template) => (
+                      <button
+                        key={template.id}
+                        onClick={() => handleSelectTemplate(template)}
+                        className={`text-left p-3 rounded-lg border transition-all ${
+                          selectedAssistantId &&
+                          roles.find((a) => a.id === selectedAssistantId)
+                            ?.name === template.name
+                            ? "border-blue-500 bg-blue-500/10"
+                            : "border-gray-600 bg-gray-700 hover:border-blue-400"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-lg">{template.icon}</span>
+                          <span className="text-sm font-medium text-gray-100">
+                            {template.name}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-400 line-clamp-2">
+                          {template.description}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Assistant Option */}
+                  <button
+                    onClick={() => setShowAssistantModal(true)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gray-700 hover:bg-gray-600 text-purple-400 rounded-lg border border-gray-600 hover:border-purple-500 transition-colors"
+                  >
+                    <Sparkles size={16} />
+                    <span className="text-sm font-medium">
+                      Create Custom Assistant
+                    </span>
+                  </button>
+
+                  {/* Show selected assistant */}
+                  {selectedAssistantId && (
+                    <div className="mt-2 p-2 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-gray-300">
+                      ✓ Selected:{" "}
+                      {roles.find((a) => a.id === selectedAssistantId)?.name}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                // Custom Assistant Modal
+                <div className="bg-gray-700 rounded-lg p-4 border border-purple-500">
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-semibold text-gray-100">
+                      Create Custom Assistant
+                    </h5>
+                    <button
+                      onClick={() => {
+                        setShowAssistantModal(false);
+                        setCustomAssistantForm({ name: "", description: "" });
+                      }}
+                      className="text-gray-400 hover:text-gray-200"
+                    >
+                      <ArrowLeft size={16} />
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-300 mb-1">
+                        Assistant Name
+                      </label>
+                      <input
+                        type="text"
+                        value={customAssistantForm.name}
+                        onChange={(e) =>
+                          setCustomAssistantForm({
+                            ...customAssistantForm,
+                            name: e.target.value,
+                          })
+                        }
+                        className="w-full bg-gray-600 text-gray-100 rounded px-3 py-2 text-sm border border-gray-500 focus:outline-none focus:border-purple-500"
+                        placeholder="e.g., Business Analyst"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-300 mb-1">
+                        Instructions / System Prompt
+                      </label>
+                      <textarea
+                        value={customAssistantForm.description}
+                        onChange={(e) =>
+                          setCustomAssistantForm({
+                            ...customAssistantForm,
+                            description: e.target.value,
+                          })
+                        }
+                        className="w-full bg-gray-600 text-gray-100 rounded px-3 py-2 text-sm border border-gray-500 focus:outline-none focus:border-purple-500"
+                        placeholder="Describe the assistant's role and behavior..."
+                        rows={4}
+                      />
+                    </div>
+                    <button
+                      onClick={handleCreateCustomAssistant}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded transition-colors"
+                    >
+                      <Check size={14} />
+                      Create Assistant
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-2">
               <button
                 onClick={handleCreate}
-                className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors"
+                disabled={!selectedAssistantId}
+                className="flex items-center gap-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-sm rounded transition-colors"
               >
                 <Check size={14} />
-                Create
+                Create Project
               </button>
               <button
-                onClick={() => {
-                  setShowCreate(false);
-                  setCreateForm({ name: "", description: "" });
-                }}
-                className="flex items-center gap-1 px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white text-sm rounded transition-colors"
+                onClick={cancelCreate}
+                className="flex items-center gap-1 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm rounded transition-colors"
               >
                 <X size={14} />
                 Cancel

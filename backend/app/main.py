@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+
+
 # ───────────────────── .env & logging ─────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -28,9 +30,21 @@ async def lifespan(app: FastAPI):
     try:
         logger.info(f"Initializing database… URL={DATABASE_URL}")
         init_db()
+        
+        # Create superuser on startup if configured
+        await create_superuser()
+        
+        # 🌱 Seed database with default data
+        try:
+            from app.seed import run_seed
+            run_seed()
+        except Exception as e:
+            logger.error(f"❌ Failed to seed database: {e}")
+            import traceback
+            traceback.print_exc()
+        
         yield
     finally:
-        # No special shutdown needed; sessions are request-scoped
         pass
 
 
@@ -43,7 +57,7 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
-    redirect_slashes=False,  # Disable automatic trailing slash redirects for CORS
+    redirect_slashes=False,
 )
 
 # ──────────────────── CORS configuration ──────────────────
@@ -63,6 +77,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ─────────────── Global JSON error handlers ───────────────
 @app.exception_handler(StarletteHTTPException)
@@ -157,6 +172,9 @@ from app.routers import (  # noqa: E402
     balance,
     debate,
     init,
+    auth,
+    api_keys,
+    admin,
 )
 
 # Optional routers (guarded so startup doesn't crash if missing)
@@ -176,6 +194,9 @@ except Exception as e:
 
 # Single API prefix for everything
 app.include_router(init.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
+app.include_router(api_keys.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 app.include_router(ask.router, prefix="/api")
 app.include_router(ask_ai_to_ai.router, prefix="/api")
 app.include_router(ask_ai_to_ai_turn.router, prefix="/api")
@@ -259,3 +280,49 @@ def read_root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+# ──────────────── Superuser creation on startup ───────────
+async def create_superuser():
+    """Create superuser if configured and doesn't exist"""
+    if not settings.SUPERUSER_EMAIL or not settings.SUPERUSER_PASSWORD:
+        logger.info("⚠️ No SUPERUSER_EMAIL/SUPERUSER_PASSWORD configured - skipping superuser creation")
+        return
+    
+    from app.memory.db import SessionLocal
+    from app.memory.models import User
+    from passlib.hash import bcrypt
+    from datetime import datetime
+    
+    db = SessionLocal()
+    try:
+        # Check if superuser exists
+        existing = db.query(User).filter(User.email == settings.SUPERUSER_EMAIL).first()
+        if existing:
+            logger.info(f"✅ Superuser already exists: {settings.SUPERUSER_EMAIL}")
+            return
+        
+        # Create superuser
+        superuser = User(
+            email=settings.SUPERUSER_EMAIL,
+            username=settings.SUPERUSER_USERNAME,
+            password_hash=bcrypt.hash(settings.SUPERUSER_PASSWORD),
+            status="active",
+            is_superuser=True,
+            is_active=True,
+            trial_ends_at=None,  # Superuser doesn't need trial
+            subscription_ends_at=None
+        )
+        
+        db.add(superuser)
+        db.commit()
+        
+        logger.info(f"✅ Superuser created: {settings.SUPERUSER_EMAIL}")
+        logger.info(f"   Username: {settings.SUPERUSER_USERNAME}")
+        logger.info(f"   Password: *** (from SUPERUSER_PASSWORD env var)")
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating superuser: {e}")
+        db.rollback()
+    finally:
+        db.close()

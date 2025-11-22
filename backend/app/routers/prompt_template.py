@@ -31,7 +31,7 @@ def get_prompts_by_role(role_id: int, db: Session = Depends(get_db)):
     return rows
 
 
-@router.post("/", response_model=PromptTemplateRead, status_code=201)
+@router.post("", response_model=PromptTemplateRead, status_code=201)
 def create_prompt_template(payload: PromptTemplateCreate, db: Session = Depends(get_db)):
     # Ensure role exists
     if db.get(Role, payload.role_id) is None:
