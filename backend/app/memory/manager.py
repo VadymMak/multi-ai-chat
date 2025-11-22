@@ -573,6 +573,7 @@ class MemoryManager:
         include_summaries: bool = False,
         max_tokens: Optional[int] = 6000,
         for_display: bool = False,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Return recent chat messages (newest last).
@@ -580,19 +581,30 @@ class MemoryManager:
         Args:
             for_display: If True, return FULL messages without token trimming
                         If False, apply token budget for AI context
+            user_id: If provided, filter messages to only those belonging to this user's projects
 
         Returns dict with messages, token info, and metadata.
         
         CRITICAL: Always fetches MORE messages initially (FETCH_BUFFER), then trims by TOKEN BUDGET.
         This prevents context loss from premature SQL LIMIT application.
         """
-        print(f"[Retrieve Messages] role={role_id}, project={project_id}, session={chat_session_id}, limit={limit}, for_display={for_display}")
+        print(f"[Retrieve Messages] role={role_id}, project={project_id}, session={chat_session_id}, limit={limit}, for_display={for_display}, user_id={user_id}")
         
         # Step 1: Build query
         query = self.db.query(MemoryEntry).filter(
             MemoryEntry.project_id == str(project_id),
             MemoryEntry.role_id == role_id,
         )
+        
+        # Add user_id filtering via JOIN with Project table
+        if user_id is not None:
+            from app.memory.models import Project
+            query = query.join(
+                Project,
+                MemoryEntry.project_id_int == Project.id
+            ).filter(
+                Project.user_id == user_id
+            )
         if chat_session_id:
             query = query.filter(MemoryEntry.chat_session_id == chat_session_id)
         if not include_summaries:
@@ -725,8 +737,9 @@ class MemoryManager:
         self,
         role_id: Optional[int] = None,
         project_id: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> Optional[dict]:
-        print(f"[Get Last Session] role={role_id}, project={project_id}")
+        print(f"[Get Last Session] role={role_id}, project={project_id}, user_id={user_id}")
         query = (
             self.db.query(
                 MemoryEntry.project_id,
@@ -740,6 +753,16 @@ class MemoryManager:
             .filter(MemoryEntry.chat_session_id.isnot(None))
             .order_by(MemoryEntry.timestamp.desc())
         )
+
+        # Add user_id filtering via JOIN with Project table
+        if user_id is not None:
+            from app.memory.models import Project
+            query = query.join(
+                Project,
+                MemoryEntry.project_id_int == Project.id
+            ).filter(
+                Project.user_id == user_id
+            )
 
         if role_id is not None:
             query = query.filter(MemoryEntry.role_id == role_id)

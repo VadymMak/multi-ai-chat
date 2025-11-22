@@ -120,12 +120,24 @@ export async function runSessionFlow(
     ? `${lastSessionMarker.roleId}-${lastSessionMarker.projectId}`
     : null;
   const currentSid = lastSessionMarker?.chatSessionId || "";
+  const storeSid = chat.chatSessionId; // ← ДОБАВЬ ЭТО
 
-  // Already in the desired (role,project) and have a session id → nothing to do
-  if (currentKey === targetKey && currentSid) {
+  // ✅ НОВАЯ ПРОВЕРКА: Marker совпадает И store тоже имеет sessionId
+  if (currentKey === targetKey && currentSid && storeSid === currentSid) {
     console.debug(
       `[runSessionFlow][${sourceTag}] ✅ Already synced: ${targetKey}`
     );
+    return;
+  }
+
+  // ✅ НОВАЯ ЛОГИКА: Marker есть, но store пустой - просто восстанови!
+  if (currentKey === targetKey && currentSid && !storeSid) {
+    console.debug(
+      `[runSessionFlow][${sourceTag}] 🔄 Marker exists, restoring to store...`
+    );
+    setChatSessionId(currentSid);
+    setSessionReady(true);
+    console.debug(`[runSessionFlow][${sourceTag}] ✅ Restored: ${currentSid}`);
     return;
   }
 

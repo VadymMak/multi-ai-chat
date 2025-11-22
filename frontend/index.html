@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <!-- Browser detection и принудительная загрузка legacy для Edge -->
+    <script>
+      (function () {
+        var ua = navigator.userAgent;
+        var isEdgeLegacy = /Edge\//.test(ua) && !/Edg\//.test(ua);
+        var isIE = /MSIE|Trident/.test(ua);
+
+        if (isEdgeLegacy || isIE) {
+          // Для Edge Legacy - блокировать modern chunks
+          window.__vite_is_modern_browser = false;
+        }
+      })();
+    </script>
+
+    <!-- Promise.finally polyfill -->
+    <script>
+      (function () {
+        if (typeof Promise !== "undefined" && !Promise.prototype.finally) {
+          Promise.prototype.finally = function (onFinally) {
+            var constructor = this.constructor || Promise;
+            return this.then(
+              function (value) {
+                return constructor
+                  .resolve(onFinally && onFinally())
+                  .then(function () {
+                    return value;
+                  });
+              },
+              function (reason) {
+                return constructor
+                  .resolve(onFinally && onFinally())
+                  .then(function () {
+                    throw reason;
+                  });
+              }
+            );
+          };
+        }
+      })();
+    </script>
+
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="Multi-AI Chat - Chat with multiple AI models"
+    />
+    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <title>Multi-AI Chat</title>
+
+    <style>
+      #preloader {
+        background: #0a0b0d;
+        color: #e8e9ed;
+        font-family: sans-serif;
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        opacity: 1;
+        transition: opacity 0.5s ease;
+      }
+
+      #preloader.fade-out {
+        opacity: 0;
+      }
+
+      #preloader .spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid #2a2b2f;
+        border-top-color: #00d9a3;
+        border-radius: 4px;
+        animation: spin 0.8s linear infinite;
+        margin: auto;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <div id="preloader">
+      <div style="text-align: center">
+        <div class="spinner"></div>
+        <p style="margin-top: 10px">Loading...</p>
+      </div>
+    </div>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>

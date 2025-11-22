@@ -9,7 +9,7 @@ import { useChatStore } from "../store/chatStore";
 interface UseChatHandlerParams {
   input: string;
   setInput: (val: string) => void;
-  abortRef: React.RefObject<AbortController | null>;
+  abortRef: React.MutableRefObject<AbortController | null>;
   provider: string | null; // "boost" or null
   typedProvider: "openai" | "anthropic" | "all" | null;
   roleId: number | null;

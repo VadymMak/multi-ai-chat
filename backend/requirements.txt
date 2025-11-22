@@ -7,6 +7,7 @@ sse-starlette==1.6.5
 # Pydantic + typing
 pydantic==2.11.7
 pydantic_core==2.33.2
+email-validator==2.1.0
 annotated-types==0.7.0
 typing_extensions==4.14.1
 
@@ -54,9 +55,13 @@ openpyxl==3.1.2
 # Optional: Word documents
 python-docx==1.1.0
 
-# Optional: OCR support (if needed)
+# Optional: OCR support
 pillow==10.2.0
 pytesseract==0.3.10
 
-# Encryption for API keys
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
 cryptography==41.0.7
+bcrypt==4.1.2

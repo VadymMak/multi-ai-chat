@@ -4,6 +4,7 @@ import { useMemoryStore } from "../store/memoryStore";
 import { useProjectStore } from "../store/projectStore";
 import api from "../services/api";
 import { getChatHistory } from "../services/aiApi";
+import { useAuthStore } from "@/store/authStore";
 
 type Options = {
   nonBlocking?: boolean;
@@ -38,6 +39,11 @@ const logBackendError = (err: any, label: string) => {
 };
 
 export async function bootstrapApp(opts: Options = {}) {
+  const { isAuthenticated } = useAuthStore.getState();
+  if (!isAuthenticated) {
+    console.log("⏸️ [bootstrapApp] Not authenticated, skipping");
+    return;
+  }
   const { nonBlocking = false, maxTotalMs = 0 } = opts;
   const start = Date.now();
 

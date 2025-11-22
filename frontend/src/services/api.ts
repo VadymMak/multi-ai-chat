@@ -1,10 +1,15 @@
 // src/services/api.ts
-import axios, { AxiosError, AxiosResponse } from "axios";
+import axios, {
+  AxiosError,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from "axios";
+import { useAuthStore } from "../store/authStore";
 
-const ENV_BASE = process.env.REACT_APP_API_BASE_URL;
+const ENV_BASE = import.meta.env.VITE_API_BASE_URL;
 if (!ENV_BASE) {
   console.warn(
-    "⚠️ REACT_APP_API_BASE_URL is not defined. Falling back to localhost."
+    "⚠️ VITE_API_BASE_URL is not defined. Falling back to localhost."
   );
 }
 const baseURL = ENV_BASE || "http://localhost:8000/api";
@@ -53,8 +58,24 @@ function normalizeAxiosError(err: any): NormalizedAxiosError {
 }
 
 // ---------- Interceptors ----------
+
+// Request interceptor - добавляем Authorization header
+api.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    const token = useAuthStore.getState().token;
+
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
+    return config;
+  },
+  (error: AxiosError) => Promise.reject(error)
+);
+
+// Response interceptor - обработка ошибок + 401
 api.interceptors.response.use(
-  (res) => {
+  (res: AxiosResponse) => {
     if (looksLikeHtml(res)) {
       const preview =
         typeof res.data === "string"
@@ -70,7 +91,18 @@ api.interceptors.response.use(
     }
     return res;
   },
-  (err) => Promise.reject(normalizeAxiosError(err))
+  (err: AxiosError) => {
+    const normalized = normalizeAxiosError(err);
+
+    // Обработка 401 Unauthorized - logout и redirect
+    if (normalized.status === 401) {
+      console.error("[Auth] 401 Unauthorized - logging out");
+      useAuthStore.getState().logout();
+      window.location.href = "/login";
+    }
+
+    return Promise.reject(normalized);
+  }
 );
 
 // ===================================================================

@@ -120,6 +120,25 @@ class _Settings:
     )
     ANTHROPIC_API_KEY: Optional[str] = _getenv_str("ANTHROPIC_API_KEY", "") or _getenv_str("CLAUDE_API_KEY", "")
     YOUTUBE_API_KEY: Optional[str] = _getenv_str("YOUTUBE_API_KEY", "")
+    
+    # === Authentication & Security ===
+    JWT_SECRET_KEY: str = _getenv_str("JWT_SECRET_KEY", "change-this-secret-key-in-production")
+    JWT_ALGORITHM: str = _getenv_str("JWT_ALGORITHM", "HS256")
+    JWT_EXPIRATION_HOURS: int = _getenv_int("JWT_EXPIRATION_HOURS", 168)  # 7 days
+    
+    # Encryption key for API keys storage (Fernet)
+    ENCRYPTION_KEY: str = _getenv_str("ENCRYPTION_KEY", "")
+    
+    # Trial settings
+    TRIAL_DAYS: int = _getenv_int("TRIAL_DAYS", 14)
+    
+    # Superuser auto-creation
+    SUPERUSER_EMAIL: Optional[str] = _getenv_str("SUPERUSER_EMAIL", "")
+    SUPERUSER_PASSWORD: Optional[str] = _getenv_str("SUPERUSER_PASSWORD", "")
+    SUPERUSER_USERNAME: str = _getenv_str("SUPERUSER_USERNAME", "admin")
+    
+    # Password requirements
+    PASSWORD_MIN_LENGTH: int = _getenv_int("PASSWORD_MIN_LENGTH", 8)
 
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")

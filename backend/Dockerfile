@@ -20,12 +20,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY backend/app /app/app
 
+# Copy migration scripts
+COPY backend/scripts /app/backend/scripts
+COPY backend/migrations /app/backend/migrations
+
 # Create uploads directory
 RUN mkdir -p /app/uploads
 
 # Expose port (Railway will set PORT env var)
 EXPOSE 8000
 
-# Railway provides DATABASE_URL automatically
-# Run FastAPI with uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run check_users, then migrations, then start server
+CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && python backend/scripts/check_users.py && python backend/scripts/init_auth_tables.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

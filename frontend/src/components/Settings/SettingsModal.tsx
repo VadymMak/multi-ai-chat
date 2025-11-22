@@ -15,12 +15,10 @@ import {
   Upload,
   RotateCcw,
   Folder,
-  Bot,
 } from "lucide-react";
 import { useSettingsStore } from "../../store/settingsStore";
 import { toast } from "../../store/toastStore";
 import ProjectsTab from "./ProjectsTab";
-import AssistantsTab from "./AssistantsTab";
 import { APIKeysTab } from "./APIKeysTab";
 
 interface SettingsModalProps {
@@ -33,7 +31,6 @@ type TabType =
   | "appearance"
   | "apikeys"
   | "projects"
-  | "assistants"
   | "notifications"
   | "chat"
   | "advanced";
@@ -181,12 +178,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             label="Projects"
           />
           <TabButton
-            active={activeTab === "assistants"}
-            onClick={() => setActiveTab("assistants")}
-            icon={<Bot size={16} />}
-            label="Assistants"
-          />
-          <TabButton
             active={activeTab === "notifications"}
             onClick={() => setActiveTab("notifications")}
             icon={<Bell size={16} />}
@@ -285,9 +276,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* PROJECTS TAB */}
           {activeTab === "projects" && <ProjectsTab />}
-
-          {/* ASSISTANTS TAB */}
-          {activeTab === "assistants" && <AssistantsTab />}
 
           {/* NOTIFICATIONS TAB */}
           {activeTab === "notifications" && (

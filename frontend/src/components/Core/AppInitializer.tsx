@@ -15,6 +15,8 @@ import {
   rehydrateLastSessionFromStorage,
   queueSessionSync,
 } from "../../controllers/sessionController";
+import { useAuthStore } from "@/store/authStore";
+import { sessionManager } from "../../services/SessionManager";
 
 const AppInitializer = () => {
   const setLoading = useAppStore((s) => s.setLoading);
@@ -70,115 +72,51 @@ const AppInitializer = () => {
     [setChatSessionId]
   );
 
+  // Session restoration - delegated to SessionManager
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
+    const checkAndRestore = async () => {
+      // Wait for auth store to hydrate from localStorage
+      let attempts = 0;
+      const maxAttempts = 20; // 1 second max wait
 
-    let cancelled = false;
+      while (attempts < maxAttempts) {
+        const { isAuthenticated, user } = useAuthStore.getState();
 
-    const done = () => {
-      if (!cancelled) {
-        setLoading(false);
-        // Safety: if something bailed early without queueing, clear the flag.
-        setConsumeManualSessionSync(false);
+        // Check if hydration is complete (either authenticated with user, or not authenticated)
+        const isHydrated = isAuthenticated ? !!user : true;
+
+        if (isHydrated) {
+          console.log("✅ [AppInitializer] Auth store hydrated");
+
+          if (isAuthenticated) {
+            console.log("🔄 [AppInitializer] Delegating to SessionManager...");
+            await sessionManager.restoreSessionOnPageLoad();
+            navigateOnce("/chat");
+          } else {
+            console.log(
+              "⏸️ [AppInitializer] Not authenticated, redirecting to login"
+            );
+            navigateOnce("/login");
+          }
+          return;
+        }
+
+        console.log(
+          `⏳ [AppInitializer] Waiting for auth hydration... (${
+            attempts + 1
+          }/${maxAttempts})`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        attempts++;
       }
+
+      console.warn(
+        "⚠️ [AppInitializer] Auth hydration timeout, proceeding anyway"
+      );
     };
 
-    (async () => {
-      setLoading(true);
-      // 🚫 Block HeaderControls (or other places) from kicking their own sync during boot
-      setConsumeManualSessionSync(true);
-
-      try {
-        // 0) Initialize backend (create default roles/projects if needed)
-        try {
-          const res = await api.get("/init");
-          if (process.env.NODE_ENV !== "production") {
-            console.debug("✅ App initialized:", res.data);
-          }
-        } catch (err) {
-          console.error("❌ Init failed:", err);
-        }
-
-        // 1) Make sure roles are loading (safe to call repeatedly)
-        await Promise.resolve(initRoles?.());
-
-        // 2) Try ultra-fast local rehydrate (this may enqueue its own sync)
-        await rehydrateLastSessionFromStorage();
-
-        const marker = useChatStore.getState().lastSessionMarker;
-        if (marker?.projectId && marker?.roleId) {
-          // Use a fresh roles snapshot (not the one captured at render)
-          const rolesNow = useRoleStore.getState().roles;
-          const matchedRole = rolesNow.find((r) => r.id === marker.roleId);
-          if (matchedRole) {
-            const memoryRole: MemoryRole = {
-              id: matchedRole.id,
-              name: matchedRole.name,
-            };
-            // ✅ keep role → project → session ordering
-            safeSetRole(memoryRole);
-          }
-
-          safeSetProjectId(Number(marker.projectId));
-          safeSetChatSessionId(marker.chatSessionId || "");
-
-          // 👉 Kick a background sync specifically for this marker and
-          // release the manual-sync flag when it completes.
-          queueSessionSync(marker.roleId, marker.projectId)
-            .catch(() => {})
-            .finally(() => setConsumeManualSessionSync(false));
-
-          navigateOnce("/chat");
-          setLoading(false);
-          return; // all good
-        }
-      } catch {
-        // fall through to backend fallback
-      }
-
-      // 3) Backend fallback: last session (don’t block on sync)
-      try {
-        const data = await getLastSession();
-        if (
-          data?.project_id &&
-          data?.role_id !== undefined &&
-          (data?.chat_session_id || data?.chat_session_id === "")
-        ) {
-          const rolesNow = useRoleStore.getState().roles;
-          const matchedRole = rolesNow.find((r) => r.id === data.role_id);
-
-          if (matchedRole) {
-            // ✅ keep role → project → session ordering
-            safeSetRole({ id: matchedRole.id, name: matchedRole.name });
-          }
-          safeSetProjectId(Number(data.project_id));
-          safeSetChatSessionId(data.chat_session_id || "");
-
-          // 👉 Fire-and-forget & clear the manual flag when done
-          queueSessionSync(Number(data.role_id), Number(data.project_id))
-            .catch(() => {})
-            .finally(() => setConsumeManualSessionSync(false));
-
-          navigateOnce("/chat");
-        }
-      } finally {
-        done();
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    setLoading,
-    initRoles,
-    setConsumeManualSessionSync,
-    navigateOnce,
-    safeSetRole,
-    safeSetProjectId,
-    safeSetChatSessionId,
-  ]);
+    checkAndRestore();
+  }, [navigateOnce]);
 
   return null;
 };

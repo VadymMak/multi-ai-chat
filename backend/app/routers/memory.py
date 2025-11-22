@@ -39,7 +39,7 @@ class MemoryOut(BaseModel):
 
 # ---------- Create a memory record (long-term, is_summary=True) ----------
 
-@router.post("/", response_model=MemoryOut)
+@router.post("", response_model=MemoryOut)
 def save_memory(item: MemoryIn, db: Session = Depends(get_db)):
     # Validate role exists (clear 404 instead of silent FK-ish failure)
     role = db.get(Role, item.role_id)
