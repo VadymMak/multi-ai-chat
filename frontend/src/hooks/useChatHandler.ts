@@ -860,3 +860,4 @@ export const useChatHandler = ({
 
   return { handleSend };
 };
+
