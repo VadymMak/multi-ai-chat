@@ -38,7 +38,12 @@ type SendOverrides = {
 // ============================================================================
 
 const isCodeGenerationRequest = (query: string): boolean => {
-  const lower = query.toLowerCase();
+  const lower = query.toLowerCase().trim();
+
+  // ✅ ADD DEBUG
+  console.log("🔍 [DEBUG] isCodeGenerationRequest called");
+  console.log("🔍 [DEBUG] Original query:", query);
+  console.log("🔍 [DEBUG] Lowercased:", lower);
 
   // ✅ ENHANCED direct triggers - ADD THESE LINES
   const directTriggers = [
@@ -274,14 +279,14 @@ const handleStreamingRequest = async (
 
     const decoder = new TextDecoder();
     let accumulated = "";
+    let buffer = "";
     const streamingMsgId = `ai-${uuidv4()}`;
 
-    // ✅ Multi-file tracking
+    // Multi-file tracking
     const files = new Map<string, string>();
     let currentFile: string | null = null;
     let totalFiles = 0;
 
-    // ✅ Add message with BOTH flags
     addMessage({
       id: streamingMsgId,
       sender: provider,
@@ -295,14 +300,13 @@ const handleStreamingRequest = async (
 
     console.log("🌊 [Streaming] Started for message:", streamingMsgId);
 
-    // ✅ Throttled update mechanism
+    // Throttled update
     let lastUpdateTime = Date.now();
-    const UPDATE_INTERVAL = 100; // ms
+    const UPDATE_INTERVAL = 100;
 
     const scheduleUpdate = (text: string) => {
       const now = Date.now();
-
-      if (now - lastUpdateTime >= UPDATE_INTERVAL || text.length % 200 === 0) {
+      if (now - lastUpdateTime >= UPDATE_INTERVAL) {
         useChatStore.getState().updateMessageText(streamingMsgId, text);
         lastUpdateTime = now;
       }
@@ -313,24 +317,24 @@ const handleStreamingRequest = async (
 
       if (done) {
         console.log("✅ [Streaming] Done");
-        // Final update
-        useChatStore.getState().updateMessageText(streamingMsgId, accumulated);
         break;
       }
 
       const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split("\n");
+      buffer += chunk;
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
       for (const line of lines) {
         if (!line.trim() || !line.startsWith("data: ")) continue;
 
         const data = line.substring(6).trim();
-        if (data === "[DONE]") continue;
+        if (!data || data === "[DONE]") continue;
 
         try {
           const parsed = JSON.parse(data);
 
-          // ✅ Handle different event types
           if (parsed.event === "chunk") {
             accumulated += parsed.data.content;
             scheduleUpdate(accumulated);
@@ -338,39 +342,35 @@ const handleStreamingRequest = async (
             totalFiles = parsed.data.total_files;
             toast.info(`📁 Detected ${totalFiles} files...`);
           } else if (parsed.event === "file_start") {
-            const filename: string = parsed.data.filename || "unknown.txt";
-            currentFile = filename;
-            files.set(filename, "");
+            currentFile = parsed.data.filename || "unknown.txt";
+            if (currentFile) {
+              files.set(currentFile, "");
+            }
             toast.info(
-              `📝 Generating ${filename} (${parsed.data.index}/${parsed.data.total})`
+              `📝 Generating ${currentFile} (${parsed.data.index}/${parsed.data.total})`
             );
           } else if (parsed.event === "file_chunk") {
+            // ✅ Только накапливаем в Map
             if (currentFile) {
               const existing = files.get(currentFile) || "";
               files.set(currentFile, existing + parsed.data.content);
-
-              // Render all files
-              const allFiles = Array.from(files.entries())
-                .map(
-                  ([name, content]) =>
-                    `### 📄 ${name}\n\`\`\`\n${content}\n\`\`\``
-                )
-                .join("\n\n");
-
-              scheduleUpdate(allFiles);
             }
           } else if (parsed.event === "file_end") {
+            // ✅ Только toast, НЕ пересобираем
             toast.success(`✅ ${parsed.data.filename} complete!`);
           } else if (parsed.event === "done") {
-            console.log("✅ [Streaming] Complete event received");
+            console.log("✅ [Streaming] Complete event");
 
-            // Remove flags
+            // ✅ ИСПОЛЬЗУЕМ full_response ИЗ BACKEND
+            const finalText = parsed.data.full_response || accumulated;
+
+            // ✅ ФИНАЛЬНОЕ обновление БЕЗ throttling
             const messages = useChatStore.getState().messages;
             const updatedMessages = messages.map((msg) =>
               msg.id === streamingMsgId
                 ? {
                     ...msg,
-                    text: accumulated,
+                    text: finalText,
                     isStreaming: false,
                     isTyping: false,
                   }
@@ -379,7 +379,7 @@ const handleStreamingRequest = async (
             useChatStore.getState().setMessages(updatedMessages);
 
             toast.success(
-              `✅ Code generated successfully!${
+              `✅ Code generated!${
                 totalFiles > 1 ? ` (${totalFiles} files)` : ""
               }`
             );
@@ -387,13 +387,13 @@ const handleStreamingRequest = async (
             throw new Error(parsed.data?.error || "Streaming error");
           }
         } catch (parseError) {
-          console.error("❌ [Streaming] Parse error:", parseError);
+          console.error("❌ Parse error:", parseError);
         }
       }
     }
   } catch (error) {
-    console.error("❌ [Streaming] Error:", error);
-    toast.error("❌ Failed to generate code. Please try again.");
+    console.error("❌ Streaming error:", error);
+    toast.error("❌ Failed to generate code.");
     throw error;
   }
 };
@@ -860,4 +860,3 @@ export const useChatHandler = ({
 
   return { handleSend };
 };
-

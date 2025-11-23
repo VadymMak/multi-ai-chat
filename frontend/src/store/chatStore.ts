@@ -236,25 +236,29 @@ const useBaseChatStore = create<ChatState>()(
             return state;
           }
 
-          // ✅ Prevent duplicates by content (for messages without stable IDs)
-          const isDuplicate = state.messages.some((m) => {
-            const sameContent = m.sender === msg.sender && m.text === msg.text;
-            if (!sameContent) return false;
+          // ✅ ТОЛЬКО для AI messages проверяем duplicate content
+          // User messages всегда добавляются (они новые!)
+          if (msg.sender !== "user") {
+            const isDuplicate = state.messages.some((m) => {
+              const sameContent =
+                m.sender === msg.sender && m.text === msg.text;
+              if (!sameContent) return false;
 
-            // Check timestamp proximity (within 1 second)
-            const mTime = (m as any).timestamp;
-            const msgTime = (msg as any).timestamp;
-            if (mTime && msgTime) {
-              return Math.abs(mTime - msgTime) < 1000;
+              // Check timestamp proximity (within 1 second)
+              const mTime = (m as any).timestamp;
+              const msgTime = (msg as any).timestamp;
+              if (mTime && msgTime) {
+                return Math.abs(mTime - msgTime) < 1000;
+              }
+
+              // If no timestamps, consider it a duplicate if content matches
+              return true;
+            });
+
+            if (isDuplicate) {
+              console.warn(`[chatStore] Duplicate message blocked by content`);
+              return state;
             }
-
-            // If no timestamps, consider it a duplicate if content matches
-            return true;
-          });
-
-          if (isDuplicate) {
-            console.warn(`[chatStore] Duplicate message blocked by content`);
-            return state;
           }
 
           const next = state.messages.concat(msg);

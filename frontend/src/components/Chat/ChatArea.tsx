@@ -75,21 +75,7 @@ const ChatAreaBase: FC<ChatAreaProps> = ({ bottomPad = 84 }) => {
   // Only messages in active context
   // Only messages in active context
   const filteredMessages = useMemo(() => {
-    console.log("🔍 [ChatArea] useMemo", {
-      sessionReady,
-      chatSessionId,
-      roleId,
-      projectId,
-      allMessages: allMessages.length,
-    });
-
     if (!sessionReady || !chatSessionId || !roleId || !projectId) {
-      console.log("❌ [ChatArea] Blocked!", {
-        sessionReady,
-        chatSessionId,
-        roleId,
-        projectId,
-      });
       return [];
     }
 
@@ -107,31 +93,30 @@ const ChatAreaBase: FC<ChatAreaProps> = ({ bottomPad = 84 }) => {
         String(msg.role_id) === String(roleId) &&
         String(msg.chat_session_id) === String(chatSessionId);
 
-      console.log("🔍 Message:", {
-        id: msg.id?.substring(0, 8),
-        proj: `${msg.project_id}===${projectId}`,
-        role: `${msg.role_id}===${roleId}`,
-        session: `${msg.chat_session_id?.substring(
-          0,
-          8
-        )}===${chatSessionId?.substring(0, 8)}`,
-        match,
-      });
+      // console.log("🔍 Message:", {
+      //   id: msg.id?.substring(0, 8),
+      //   proj: `${msg.project_id}===${projectId}`,
+      //   role: `${msg.role_id}===${roleId}`,
+      //   session: `${msg.chat_session_id?.substring(
+      //     0,
+      //     8
+      //   )}===${chatSessionId?.substring(0, 8)}`,
+      //   match,
+      // });
 
       return match;
     });
 
-    console.log("✅ [ChatArea] Filtered:", filtered.length);
     return filtered;
   }, [allMessages, projectId, roleId, chatSessionId, sessionReady]);
 
   // const messagesToRender = useDeferredValue(filteredMessages);
   const messagesToRender = filteredMessages;
-  console.log(
-    "🎨 [ChatArea] messagesToRender:",
-    messagesToRender.length,
-    messagesToRender
-  );
+  // console.log(
+  //   "🎨 [ChatArea] messagesToRender:",
+  //   messagesToRender.length,
+  //   messagesToRender
+  // );
 
   const scrollToBottomNow = useCallback(() => {
     const el = containerRef.current;
@@ -269,12 +254,6 @@ const ChatAreaBase: FC<ChatAreaProps> = ({ bottomPad = 84 }) => {
 
         {sessionReady &&
           messagesToRender.map((msg: ChatMessage, idx) => {
-            console.log("🎨 [ChatArea] Rendering bubble:", {
-              idx,
-              id: msg.id?.substring(0, 20),
-              sender: msg.sender,
-              text: msg.text?.substring(0, 30),
-            });
             const key = msg.id || `${msg.sender}-${idx}`;
             const isLast = idx === messagesToRender.length - 1;
             const isAi = msg.sender !== "user";

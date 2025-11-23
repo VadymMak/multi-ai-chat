@@ -16,6 +16,7 @@ import { useStreamText } from "../hooks/useStreamText";
 import { useSessionCleanup } from "../hooks/useSessionCleanup";
 import { useAppStore } from "../store/appStore";
 import { useNetworkStatus } from "../hooks/useNetworkStatus";
+import { useChatHandler } from "../hooks/useChatHandler";
 import { toast } from "../store/toastStore";
 import Sidebar from "../components/Sidebar/Sidebar";
 import { WelcomeScreen } from "../components/Chat/WelcomeScreen";
@@ -140,6 +141,28 @@ const ChatPage: React.FC = () => {
 
   // Network status
   const { isOnline } = useNetworkStatus();
+
+  // ✅ Initialize useChatHandler for code detection
+  const typedProvider =
+    provider === "boost"
+      ? null
+      : (provider as "openai" | "anthropic" | "all" | null);
+
+  const chatHandler = useChatHandler({
+    input,
+    setInput,
+    abortRef,
+    provider,
+    typedProvider,
+    roleId,
+    projectId: projectId ?? "",
+    chatSessionId: chatSessionId ?? undefined,
+    setTyping,
+    addMessage,
+    streamText,
+    sendAiMessage,
+    sendAiToAiMessage,
+  });
 
   // State for first-time user and settings modal
   const [isFirstTimeUser, setIsFirstTimeUser] = useState(() => {
@@ -391,6 +414,20 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
 
       const wantsPdf = wantsSummaryPdf(messageToSend);
 
+      // ✅ DELEGATE TO chatHandler for code detection (works for openai/anthropic/all)
+      if (provider !== "boost") {
+        console.log(
+          "✅ [Detection] Delegating to chatHandler for code detection"
+        );
+        try {
+          await chatHandler.handleSend(messageToSend, overrides);
+        } catch (error) {
+          console.error("❌ chatHandler.handleSend failed:", error);
+        }
+        return;
+      }
+
+      // ✅ BOOST MODE ONLY - Handle manually
       setTyping(true);
       abortRef.current?.abort();
       abortRef.current = new AbortController();

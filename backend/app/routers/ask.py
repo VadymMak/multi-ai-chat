@@ -169,37 +169,178 @@ def _suggest_filename(lang: Optional[str]) -> Optional[str]:
 # ---------- Multi-file code detection helpers ----------
 def extract_code_blocks(text: str) -> List[Tuple[str, str, str]]:
     """
-    Extract multiple code blocks from AI response.
+    Extract multiple code blocks from AI response with smart filename generation.
     Returns: List of (filename, language, code) tuples
+    
+    Improvements:
+    - Skips empty or very short blocks (< 10 chars)
+    - Generates smart filenames based on content analysis
+    - Filters out command-only blocks
     """
     # Match: ```language [optional filename]
     pattern = r'```(\w+)(?:\s+([^\n]+))?\n(.*?)```'
     matches = re.finditer(pattern, text, re.DOTALL | re.MULTILINE)
     
     files = []
-    file_index = 1
+    language_counters = {}  # Track counts per language for smart naming
     
     for match in matches:
-        language = match.group(1) or "text"
+        language = (match.group(1) or "text").lower()
         filename = match.group(2)
-        code = match.group(3)
+        code = (match.group(3) or "").strip()
         
-        # Generate filename if not provided
+        # Skip empty or very short blocks
+        if len(code) < 10:
+            continue
+            
+        # Filter out command-only blocks (npm start, pip install, etc.)
+        lines = [line.strip() for line in code.split('\n') if line.strip()]
+        if len(lines) <= 2:
+            # Check if it's just commands
+            command_prefixes = ('npm', 'yarn', 'pip', 'python', 'node', 'cd', 'mkdir', 'touch', 'git', 'docker', 'curl', 'wget')
+            if all(any(line.startswith(prefix) for prefix in command_prefixes) for line in lines):
+                continue
+        
+        # Generate smart filename if not provided
         if not filename or filename.startswith('#'):
-            ext_map = {
-                'python': 'py', 'javascript': 'js', 'typescript': 'ts',
-                'jsx': 'jsx', 'tsx': 'tsx', 'java': 'java',
-                'cpp': 'cpp', 'c': 'c', 'go': 'go', 'rust': 'rs',
-                'html': 'html', 'css': 'css', 'sql': 'sql',
-                'bash': 'sh', 'shell': 'sh', 'json': 'json'
-            }
-            ext = ext_map.get(language.lower(), 'txt')
-            filename = f"file{file_index}.{ext}"
-            file_index += 1
+            filename = _generate_smart_filename(code, language, language_counters)
         
-        files.append((filename.strip(), language.strip(), code.strip()))
+        files.append((filename.strip(), language.strip(), code))
     
     return files
+
+def _generate_smart_filename(code: str, language: str, counters: Dict[str, int]) -> str:
+    """
+    Generate smart filename based on code content and language.
+    """
+    lang = language.lower()
+    
+    # Increment counter for this language
+    counters[lang] = counters.get(lang, 0) + 1
+    count = counters[lang]
+    
+    # Language-specific smart naming
+    if lang == 'sql':
+        # Check for common SQL patterns
+        code_lower = code.lower()
+        if 'create table' in code_lower or 'create database' in code_lower:
+            return 'database.sql'
+        elif 'create index' in code_lower:
+            return 'indexes.sql'
+        elif 'insert into' in code_lower:
+            return 'seed_data.sql'
+        elif 'select' in code_lower and 'from' in code_lower:
+            return 'queries.sql'
+        return 'schema.sql' if count == 1 else f'query{count}.sql'
+    
+    elif lang in ('php', 'python', 'javascript', 'typescript', 'tsx', 'jsx'):
+        # Extract class/component/function names
+        
+        # React component pattern (function/const ComponentName)
+        react_match = re.search(r'(?:function|const)\s+([A-Z][a-zA-Z0-9]+)\s*(?:\(|=)', code)
+        if react_match and lang in ('tsx', 'jsx', 'typescript', 'javascript'):
+            name = react_match.group(1)
+            ext = 'tsx' if lang == 'tsx' else 'jsx' if lang == 'jsx' else 'ts' if lang == 'typescript' else 'js'
+            return f'{name}.{ext}'
+        
+        # Class name pattern
+        class_match = re.search(r'class\s+([A-Z][a-zA-Z0-9]+)', code)
+        if class_match:
+            name = class_match.group(1)
+            ext_map = {'php': 'php', 'python': 'py', 'typescript': 'ts', 'javascript': 'js'}
+            ext = ext_map.get(lang, 'txt')
+            return f'{name}.{ext}'
+        
+        # PHP API patterns
+        if lang == 'php':
+            if 'api' in code.lower() or '$_POST' in code or '$_GET' in code:
+                return 'api.php' if count == 1 else f'api{count}.php'
+            elif 'database' in code.lower() or 'mysqli' in code or 'PDO' in code:
+                return 'database.php'
+            return 'index.php' if count == 1 else f'script{count}.php'
+        
+        # Python patterns
+        if lang == 'python':
+            if 'def main(' in code or 'if __name__' in code:
+                return 'main.py'
+            elif 'flask' in code.lower() or 'fastapi' in code.lower():
+                return 'app.py'
+            elif 'import unittest' in code or 'import pytest' in code:
+                return 'test.py' if count == 1 else f'test{count}.py'
+            return 'script.py' if count == 1 else f'module{count}.py'
+        
+        # JavaScript/TypeScript patterns
+        if lang in ('javascript', 'typescript'):
+            if 'express' in code.lower() or 'app.listen' in code:
+                return 'server.js' if lang == 'javascript' else 'server.ts'
+            elif 'export default' in code or 'module.exports' in code:
+                return 'index.js' if lang == 'javascript' else 'index.ts'
+            return 'app.js' if lang == 'javascript' else 'app.ts'
+    
+    elif lang == 'html':
+        return 'index.html' if count == 1 else f'page{count}.html'
+    
+    elif lang == 'css':
+        if 'root' in code or ':root' in code:
+            return 'theme.css'
+        return 'styles.css' if count == 1 else f'styles{count}.css'
+    
+    elif lang == 'json':
+        if 'package' in code.lower() or '"name"' in code:
+            return 'package.json'
+        elif 'tsconfig' in code.lower():
+            return 'tsconfig.json'
+        return 'config.json' if count == 1 else f'data{count}.json'
+    
+    elif lang in ('bash', 'shell', 'sh'):
+        if 'npm' in code or 'yarn' in code:
+            return 'build.sh'
+        return 'script.sh' if count == 1 else f'script{count}.sh'
+    
+    elif lang == 'dockerfile':
+        return 'Dockerfile'
+    
+    elif lang == 'yaml' or lang == 'yml':
+        if 'docker-compose' in code.lower():
+            return 'docker-compose.yml'
+        return 'config.yml' if count == 1 else f'config{count}.yml'
+    
+    elif lang in ('java', 'kotlin', 'swift'):
+        # Extract class name
+        class_match = re.search(r'(?:class|interface)\s+([A-Z][a-zA-Z0-9]+)', code)
+        if class_match:
+            name = class_match.group(1)
+            ext_map = {'java': 'java', 'kotlin': 'kt', 'swift': 'swift'}
+            return f'{name}.{ext_map.get(lang, "txt")}'
+    
+    elif lang in ('c', 'cpp', 'cc', 'cxx'):
+        if 'int main(' in code or 'void main(' in code:
+            return 'main.cpp' if lang in ('cpp', 'cc', 'cxx') else 'main.c'
+        return 'program.cpp' if lang in ('cpp', 'cc', 'cxx') else 'program.c'
+    
+    elif lang == 'rust':
+        if 'fn main(' in code:
+            return 'main.rs'
+        return 'lib.rs' if count == 1 else f'module{count}.rs'
+    
+    elif lang == 'go':
+        if 'func main(' in code:
+            return 'main.go'
+        return 'app.go' if count == 1 else f'module{count}.go'
+    
+    # Fallback: use generic naming with proper extensions
+    ext_map = {
+        'python': 'py', 'javascript': 'js', 'typescript': 'ts',
+        'jsx': 'jsx', 'tsx': 'tsx', 'java': 'java',
+        'cpp': 'cpp', 'c': 'c', 'go': 'go', 'rust': 'rs',
+        'html': 'html', 'css': 'css', 'sql': 'sql',
+        'bash': 'sh', 'shell': 'sh', 'json': 'json',
+        'php': 'php', 'ruby': 'rb', 'kotlin': 'kt',
+        'swift': 'swift', 'xml': 'xml', 'yaml': 'yml',
+        'markdown': 'md', 'text': 'txt'
+    }
+    ext = ext_map.get(lang, 'txt')
+    return f'file{count}.{ext}'
 
 def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
     """
@@ -751,10 +892,7 @@ async def ask_stream_route(
             memory.insert_audit_log(project_id, role_id, chat_session_id, data.provider, "ask_stream", query=data.query)
 
             # Send initial status
-            yield {
-                "event": "status",
-                "data": json.dumps({"status": "processing"})
-            }
+            yield f"{json.dumps({'event': 'status', 'data': {'status': 'processing'}})}\n\n"
 
             # 2) Token preflight and optional autosummary (same as /ask)
             messages_data = memory.retrieve_messages(
@@ -875,13 +1013,7 @@ async def ask_stream_route(
                     temperature=temperature
                 ):
                     full_response += chunk
-                    yield {
-                        "event": "chunk",
-                        "data": json.dumps({
-                            "content": chunk,
-                            "accumulated": full_response
-                        })
-                    }
+                    yield f"{json.dumps({'event': 'chunk', 'data': {'content': chunk, 'accumulated': full_response}})}\n\n"
 
             elif actual_provider == "anthropic":
                 async for chunk in stream_claude(
@@ -892,20 +1024,11 @@ async def ask_stream_route(
                     temperature=temperature
                 ):
                     full_response += chunk
-                    yield {
-                        "event": "chunk",
-                        "data": json.dumps({
-                            "content": chunk,
-                            "accumulated": full_response
-                        })
-                    }
+                    yield f"{json.dumps({'event': 'chunk', 'data': {'content': chunk, 'accumulated': full_response}})}\n\n"
             else:
                 error_msg = f"Unsupported provider for streaming: {actual_provider}"
                 print(f"❌ {error_msg}")
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"error": error_msg})
-                }
+                yield f"{json.dumps({'event': 'error', 'data': {'error': error_msg}})}\n\n"
                 return
 
             # 6a) Detect and stream multiple files separately
@@ -915,50 +1038,21 @@ async def ask_stream_route(
                 # Multiple files detected - stream each separately
                 print(f"📁 [Multi-File Detection] Found {len(code_blocks)} code files")
                 
-                yield {
-                    "event": "files_detected",
-                    "data": json.dumps({
-                        "total_files": len(code_blocks),
-                        "files": [
-                            {"filename": f[0], "language": f[1], "size": len(f[2])}
-                            for f in code_blocks
-                        ]
-                    })
-                }
+                yield f"{json.dumps({'event': 'files_detected', 'data': {'total_files': len(code_blocks), 'files': [{'filename': f[0], 'language': f[1], 'size': len(f[2])} for f in code_blocks]}})}\n\n"
                 
                 for idx, (filename, language, code) in enumerate(code_blocks, 1):
                     # File start event
-                    yield {
-                        "event": "file_start",
-                        "data": json.dumps({
-                            "filename": filename,
-                            "language": language,
-                            "index": idx,
-                            "total": len(code_blocks)
-                        })
-                    }
+                    yield f"{json.dumps({'event': 'file_start', 'data': {'filename': filename, 'language': language, 'index': idx, 'total': len(code_blocks)}})}\n\n"
                     
                     # Stream file content in chunks
                     chunks = chunk_text(code, chunk_size=500)
                     for chunk in chunks:
-                        yield {
-                            "event": "file_chunk",
-                            "data": json.dumps({
-                                "filename": filename,
-                                "content": chunk
-                            })
-                        }
+                        yield f"{json.dumps({'event': 'file_chunk', 'data': {'filename': filename, 'content': chunk}})}\n\n"
                         # Small delay to prevent overwhelming frontend
                         await asyncio.sleep(0.01)
                     
                     # File end event
-                    yield {
-                        "event": "file_end",
-                        "data": json.dumps({
-                            "filename": filename,
-                            "size": len(code)
-                        })
-                    }
+                    yield f"{json.dumps({'event': 'file_end', 'data': {'filename': filename, 'size': len(code)}})}\n\n"
                     
                     print(f"  ✅ File {idx}/{len(code_blocks)}: {filename} ({len(code)} chars)")
 
@@ -980,26 +1074,13 @@ async def ask_stream_route(
 
             # 8) Send completion event
             token_count = memory.count_tokens(full_response)
-            yield {
-                "event": "done",
-                "data": json.dumps({
-                    "status": "completed",
-                    "full_response": full_response,
-                    "tokens": token_count,
-                    "model": chosen_model,
-                    "provider": actual_provider,
-                    "chat_session_id": chat_session_id
-                })
-            }
+            yield f"{json.dumps({'event': 'done', 'data': {'status': 'completed', 'full_response': full_response, 'tokens': token_count, 'model': chosen_model, 'provider': actual_provider, 'chat_session_id': chat_session_id}})}\n\n"
 
             print(f"✅ [Stream Complete] provider={actual_provider} model={chosen_model} tokens={token_count}")
 
         except Exception as e:
             error_msg = str(e)
             print(f"❌ [Stream Error] {error_msg}")
-            yield {
-                "event": "error",
-                "data": json.dumps({"error": error_msg})
-            }
+            yield f"{json.dumps({'event': 'error', 'data': {'error': error_msg}})}\n\n"
 
     return EventSourceResponse(event_generator())
