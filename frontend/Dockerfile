@@ -13,6 +13,9 @@ COPY . .
 ARG VITE_API_URL=https://multi-ai-chat-production.up.railway.app
 ENV VITE_API_URL=$VITE_API_URL
 
+# ✅ ДОБАВЬ ЭТУ СТРОКУ - Очистка Vite кэша:
+RUN rm -rf node_modules/.vite
+
 # Build for production
 RUN npm run build:production
 
