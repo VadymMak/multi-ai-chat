@@ -26,6 +26,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
     useCallback((s) => (typeof s.role?.id === "number" ? s.role!.id : null), [])
   );
   const setRole = useMemoryStore((state) => state.setRole);
+  const isManualSwitchRef = useRef(false);
 
   // ✅ Memoize projects to prevent useEffect dependency warning
   const projects = useMemo(
@@ -61,13 +62,52 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
     };
   }, [roleId, forceRefreshProjects]);
 
-  // Auto-select first project if none selected
+  // ────────────────────────────────────────────────────────────────────────────
+  // Handlers
+  // ────────────────────────────────────────────────────────────────────────────
+  const handleProjectSelect = useCallback(
+    async (project: (typeof projects)[0]) => {
+      if (project.id === projectId) return;
+
+      // Mark as manual switch to prevent auto-select
+      isManualSwitchRef.current = true;
+
+      const newRoleId = project.assistant?.id ?? roleId;
+
+      setProjectId(project.id);
+
+      if (project.assistant) {
+        setRole({
+          id: project.assistant.id,
+          name: project.assistant.name,
+          description: project.assistant.description,
+        });
+      }
+
+      useChatStore.getState().clearMessages();
+
+      try {
+        await runSessionFlow(newRoleId!, project.id, "ProjectSelector");
+        toast.success(`Switched to ${project.name}`);
+      } catch (err) {
+        console.error("❌ [ProjectSelector] Session init failed:", err);
+        toast.error("Failed to switch project");
+      } finally {
+        // Reset flag after switch completes
+        isManualSwitchRef.current = false;
+      }
+    },
+    [roleId, projectId, setProjectId, setRole]
+  );
+
+  // Auto-select first project if none selected (but NOT during manual switch)
   useEffect(() => {
+    if (isManualSwitchRef.current) return; // Skip during manual switch
+
     if (roleId && projects.length > 0 && !projectId) {
       const firstProject = projects[0];
       setProjectId(firstProject.id);
 
-      // Auto-set assistant from project
       if (firstProject.assistant) {
         setRole({
           id: firstProject.assistant.id,
@@ -79,42 +119,6 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
       void runSessionFlow(roleId, firstProject.id, "ProjectSelector[Auto]");
     }
   }, [roleId, projects, projectId, setProjectId, setRole]);
-
-  // ────────────────────────────────────────────────────────────────────────────
-  // Handlers
-  // ────────────────────────────────────────────────────────────────────────────
-  const handleProjectSelect = useCallback(
-    async (project: (typeof projects)[0]) => {
-      if (project.id === projectId) return; // Already selected
-
-      // Get the new role ID from project's assistant
-      const newRoleId = project.assistant?.id ?? roleId;
-
-      // Update stores
-      setProjectId(project.id);
-
-      if (project.assistant) {
-        setRole({
-          id: project.assistant.id,
-          name: project.assistant.name,
-          description: project.assistant.description,
-        });
-      }
-
-      // Clear messages before loading new project's history
-      useChatStore.getState().clearMessages();
-
-      try {
-        // Use NEW role ID, not the old one from closure
-        await runSessionFlow(newRoleId!, project.id, "ProjectSelector");
-        toast.success(`Switched to ${project.name}`);
-      } catch (err) {
-        console.error("❌ [ProjectSelector] Session init failed:", err);
-        toast.error("Failed to switch project");
-      }
-    },
-    [roleId, projectId, setProjectId, setRole]
-  );
 
   // ────────────────────────────────────────────────────────────────────────────
   // UI
