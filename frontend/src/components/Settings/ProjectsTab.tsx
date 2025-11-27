@@ -79,8 +79,9 @@ const ProjectsTab: React.FC = () => {
       await addRole(template.name, template.systemPrompt);
       await fetchRoles();
 
-      // Find the newly created assistant
-      role = roles.find((r) => r.name === template.name);
+      // ✅ Get fresh roles from store after fetchRoles completes
+      const freshRoles = useRoleStore.getState().roles;
+      role = freshRoles.find((r) => r.name === template.name);
     } else {
       // Role exists, reuse it
       console.log(
@@ -91,6 +92,8 @@ const ProjectsTab: React.FC = () => {
     if (role) {
       setSelectedAssistantId(role.id);
       toast.success(`${template.name} template applied!`);
+    } else {
+      toast.error(`Failed to select ${template.name}`);
     }
   };
 
