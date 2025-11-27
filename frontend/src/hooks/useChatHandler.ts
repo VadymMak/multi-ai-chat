@@ -570,6 +570,16 @@ export const useChatHandler = ({
               initialSessionId
             );
 
+            console.log("🔍 [DEBUG] Boost result:", result);
+            console.log("🔍 [DEBUG] Messages count:", result.messages?.length);
+            result.messages?.forEach((msg, i) => {
+              console.log(`🔍 [DEBUG] Message ${i}:`, {
+                sender: msg.sender,
+                textLength: (msg as any).text?.length,
+                isSummary: (msg as any).isSummary,
+              });
+            });
+
             if (timeoutWarning1) clearTimeout(timeoutWarning1);
             if (timeoutWarning2) clearTimeout(timeoutWarning2);
             if (timeoutFinal) clearTimeout(timeoutFinal);
