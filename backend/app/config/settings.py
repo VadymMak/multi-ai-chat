@@ -61,7 +61,7 @@ class _Settings:
     """
 
     # === Core model defaults (must match keys in MODEL_REGISTRY) ===
-    DEFAULT_MODEL: str = _getenv_str("DEFAULT_MODEL", "gpt-5")
+    DEFAULT_MODEL: str = _getenv_str("DEFAULT_MODEL", "gpt-4o-mini")
     OPENAI_DEFAULT_MODEL: str = _getenv_str("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
     ANTHROPIC_DEFAULT_MODEL: str = _getenv_str("ANTHROPIC_DEFAULT_MODEL", "claude-sonnet-4-20250514")
 
