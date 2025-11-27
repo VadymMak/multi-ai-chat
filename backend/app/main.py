@@ -30,6 +30,17 @@ async def lifespan(app: FastAPI):
     try:
         logger.info(f"Initializing database… URL={DATABASE_URL}")
         init_db()
+
+        # 🔧 One-time migration: roles.description VARCHAR(255) -> TEXT
+        try:
+            from sqlalchemy import create_engine, text
+            engine = create_engine(DATABASE_URL)
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE roles ALTER COLUMN description TYPE TEXT;"))
+                conn.commit()
+                logger.info("✅ Migration: roles.description -> TEXT")
+        except Exception as e:
+            logger.info(f"ℹ️ Migration skipped (already done or not needed): {e}")
         
         # Create superuser on startup if configured
         await create_superuser()
