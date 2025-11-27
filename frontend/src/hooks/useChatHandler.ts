@@ -584,7 +584,10 @@ export const useChatHandler = ({
             const sessId =
               useChatStore.getState().chatSessionId || initialSessionId;
 
-            for (const { sender, text, isSummary } of result.messages ?? []) {
+            for (const msg of result.messages ?? []) {
+              const sender = msg.sender;
+              const text = (msg as any).text || (msg as any).answer || "";
+              const isSummary = (msg as any).isSummary;
               const id = `${sender}-${uuidv4()}`;
               addMessage({
                 id,
