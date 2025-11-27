@@ -76,7 +76,7 @@ export async function bootstrapApp(opts: Options = {}) {
       api.get("/chat/last-session-by-role", {
         params: { role_id: roleId, project_id: projectId },
       }),
-      Math.min(800, Math.max(300, timeLeft())),
+      Math.min(5000, Math.max(3000, timeLeft())),
       "/chat/last-session-by-role"
     );
     const data = res?.data;
@@ -88,7 +88,7 @@ export async function bootstrapApp(opts: Options = {}) {
       try {
         history = await withTimeout(
           getChatHistory(String(projectId), String(roleId), sid),
-          Math.min(600, Math.max(250, timeLeft())),
+          Math.min(5000, Math.max(3000, timeLeft())),
           "/chat/history"
         );
       } catch (e) {
