@@ -536,8 +536,11 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
         print(f"[Web Search Error] {e}")
 
     # ---- Write the synthetic "user" message that seeds the debate ----
+    # Store only the topic for user message (clean display in UI)
+    memory.store_chat_message(project_id, role_id, chat_session_id, "user", data.topic, is_ai_to_ai=True)
+
+    # Keep full message with YouTube context for AI processing
     user_message = f"{data.topic}\n\n{yt_block}"
-    memory.store_chat_message(project_id, role_id, chat_session_id, "user", user_message, is_ai_to_ai=True)
 
     # -------------------- Render policy --------------------
     base_system = (
