@@ -5,6 +5,7 @@ import { useProjectStore } from "../../store/projectStore";
 import { useMemoryStore } from "../../store/memoryStore";
 import { runSessionFlow } from "../../controllers/runSessionFlow";
 import { toast } from "../../store/toastStore";
+import { useChatStore } from "@/store/chatStore";
 
 interface ProjectSelectorProps {
   onOpenSettings?: () => void;
@@ -86,9 +87,12 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
     async (project: (typeof projects)[0]) => {
       if (project.id === projectId) return; // Already selected
 
+      // Get the new role ID from project's assistant
+      const newRoleId = project.assistant?.id ?? roleId;
+
+      // Update stores
       setProjectId(project.id);
 
-      // Auto-set assistant from project
       if (project.assistant) {
         setRole({
           id: project.assistant.id,
@@ -97,8 +101,12 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
         });
       }
 
+      // Clear messages before loading new project's history
+      useChatStore.getState().clearMessages();
+
       try {
-        await runSessionFlow(roleId!, project.id, "ProjectSelector");
+        // Use NEW role ID, not the old one from closure
+        await runSessionFlow(newRoleId!, project.id, "ProjectSelector");
         toast.success(`Switched to ${project.name}`);
       } catch (err) {
         console.error("❌ [ProjectSelector] Session init failed:", err);
