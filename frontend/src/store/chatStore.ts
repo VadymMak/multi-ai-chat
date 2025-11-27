@@ -702,7 +702,10 @@ const useBaseChatStore = create<ChatState>()(
     {
       name: "chat-storage",
       storage: createJSONStorage(() => localStorage),
-      partialize: () => ({}),
+      partialize: (state) => ({
+        chatSessionId: state.chatSessionId,
+        lastSessionMarker: state.lastSessionMarker,
+      }),
     }
   )
 );
