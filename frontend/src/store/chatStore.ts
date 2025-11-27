@@ -484,13 +484,32 @@ const useBaseChatStore = create<ChatState>()(
         const version = ++latestSessionVersion;
         set({ sessionReady: false });
 
-        const { lastSessionMarker } = get();
+        // ✅ Wait for Zustand hydration from localStorage
+        await new Promise<void>((resolve) => {
+          const unsub = useBaseChatStore.persist.onFinishHydration(() => {
+            unsub();
+            resolve();
+          });
+          // If already hydrated, resolve immediately
+          if (useBaseChatStore.persist.hasHydrated()) {
+            unsub();
+            resolve();
+          }
+        });
+
+        const { lastSessionMarker, chatSessionId: storedSessionId } = get();
+
+        // ✅ Use localStorage session if matches current role/project
         if (
           lastSessionMarker &&
           lastSessionMarker.projectId === projectId &&
           lastSessionMarker.roleId === roleId &&
           lastSessionMarker.chatSessionId
         ) {
+          console.log(
+            "✅ [initializeChatSession] Using stored session:",
+            lastSessionMarker.chatSessionId
+          );
           set({
             chatSessionId: lastSessionMarker.chatSessionId,
             sessionReady: true,
@@ -706,6 +725,19 @@ const useBaseChatStore = create<ChatState>()(
         chatSessionId: state.chatSessionId,
         lastSessionMarker: state.lastSessionMarker,
       }),
+      onRehydrateStorage: () => {
+        console.log("🔄 [chatStore] Hydration starting...");
+        return (state, error) => {
+          if (error) {
+            console.error("❌ [chatStore] Hydration failed:", error);
+          } else {
+            console.log("✅ [chatStore] Hydration finished:", {
+              chatSessionId: state?.chatSessionId,
+              lastSessionMarker: state?.lastSessionMarker,
+            });
+          }
+        };
+      },
     }
   )
 );
