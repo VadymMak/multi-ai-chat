@@ -348,12 +348,26 @@ class AiToAiRequest(BaseModel):
         return s
 
 # -------------------- Provider wrappers & utils --------------------
-async def claude_with_retry(messages: List[Dict[str, str]], retries: int = 2) -> str:
+async def claude_with_retry(
+    messages: List[Dict[str, str]], 
+    system: Optional[str] = None,
+    retries: int = 2
+) -> str:
     """Claude wrapper with simple retries/backoff (runs provider in a thread)."""
+    # Filter out system messages from the messages list
+    filtered_messages = [m for m in messages if m.get("role") != "system"]
+    
+    # Extract system content if not provided explicitly
+    if system is None:
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", "")
+                break
+    
     last = ""
     for attempt in range(retries + 1):
         try:
-            ans = await run_in_threadpool(ask_claude, messages)
+            ans = await run_in_threadpool(ask_claude, filtered_messages, system=system)
             last = ans or ""
             if ans and "[Claude Error]" not in ans and "overloaded" not in ans.lower():
                 return ans
@@ -567,7 +581,10 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
             first_reply_raw: str = await run_in_threadpool(ask_openai, starter_messages)
             starter_sender = "openai"
         else:
-            first_reply_raw = await claude_with_retry(starter_messages)
+            first_reply_raw = await claude_with_retry(
+                [m for m in starter_messages if m.get("role") != "system"],
+                system=base_system + render_policy
+            )
             starter_sender = "anthropic"
     except Exception as e:
         print(f"❌ Starter model error: {e}")
@@ -630,7 +647,10 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
             ),
         },
     ]
-    claude_review_raw = await claude_with_retry(review_messages)
+    claude_review_raw = await claude_with_retry(
+        [m for m in review_messages if m.get("role") != "system"],
+        system=base_system + render_policy
+    )
     claude_review, _review_render = _post_process(claude_review_raw)
 
     memory.store_chat_message(project_id, role_id, chat_session_id, "anthropic", claude_review, is_ai_to_ai=True)
