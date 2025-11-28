@@ -2,10 +2,10 @@
 import React from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { useChatStore } from "../../store/chatStore";
+import MarkdownMessage from "../Shared/MarkdownMessage"; // ← ДОБАВИТЬ
 
 type Props = {
   text: string;
-  /** Keep summary hidden (skeleton only) while the model is still typing */
   deferWhileTyping?: boolean;
   className?: string;
 };
@@ -30,17 +30,17 @@ const SummaryBubble: React.FC<Props> = ({
       className={`bg-purple-50 border-l-4 border-purple-500 px-4 py-3 rounded shadow-sm ${className}`}
     >
       {showText ? (
-        <motion.p
+        <motion.div
           key="summary-text"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: reduce ? 0 : 0.25 }}
-          className="italic font-serif text-purple-900 text-[15px] leading-relaxed whitespace-pre-line"
+          className="italic font-serif text-purple-900 text-[15px] leading-relaxed"
         >
-          {text}
-        </motion.p>
+          {/* ← БЫЛО: {text} — СТАЛО: */}
+          <MarkdownMessage text={text} isUser={false} kind="markdown" />
+        </motion.div>
       ) : (
-        // Skeleton while assistant is streaming
         <div className="animate-pulse space-y-2">
           <div className="h-3 w-11/12 rounded bg-purple-200/60" />
           <div className="h-3 w-10/12 rounded bg-purple-200/50" />
