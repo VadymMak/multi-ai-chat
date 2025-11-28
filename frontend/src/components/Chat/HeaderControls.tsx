@@ -23,11 +23,6 @@ const HeaderControls: React.FC = () => {
   );
   const projectId = useProjectStore((s) => s.projectId);
 
-  // NOTE: Some versions expose this as a boolean; others as () => boolean
-  const rawManualSync = useChatStore(
-    (s) => (s as any).consumeManualSessionSync
-  ) as boolean | (() => boolean) | undefined;
-
   const sessionReady = useChatStore((s) => s.sessionReady);
 
   // Token budget tracking
@@ -35,7 +30,6 @@ const HeaderControls: React.FC = () => {
   const maxTokens = useChatStore((state) => state.maxTokens);
 
   const lastKeyRef = useRef<string | null>(null);
-  const inFlightRef = useRef<Set<string>>(new Set());
 
   const key = useMemo(() => {
     if (!roleId || !projectId) return null;
@@ -43,96 +37,21 @@ const HeaderControls: React.FC = () => {
   }, [roleId, projectId]);
 
   useEffect(() => {
-    if (!roleId || !projectId) {
-      lastKeyRef.current = null;
-      inFlightRef.current.clear();
-    }
-  }, [roleId, projectId]);
+    // ✅ HeaderControls should NOT trigger runSessionFlow
+    // ProjectSelector is responsible for session management
+    // HeaderControls only reacts to already-established sessions
 
-  useEffect(() => {
     if (!roleId || !projectId || !key) {
-      DEBUG && console.debug("[HeaderControls] ⛔ Missing role or project");
-      return;
-    }
-    if (!sessionReady) {
-      DEBUG &&
-        console.debug("[HeaderControls] ⏳ Waiting for session readiness");
+      lastKeyRef.current = null;
       return;
     }
 
-    // Handle both boolean and function forms
-    const manualSkip =
-      typeof rawManualSync === "function"
-        ? rawManualSync()
-        : Boolean(rawManualSync);
+    // Just track the current key, don't initiate any session flow
+    lastKeyRef.current = key;
 
-    if (manualSkip) {
-      DEBUG &&
-        console.debug(
-          "[HeaderControls] 🛑 Manual session sync consumed/flagged — skipping this tick"
-        );
-      return;
-    }
-
-    if (lastKeyRef.current === key) {
-      DEBUG &&
-        console.debug("[HeaderControls] ⏭️ Already synced for key:", key);
-      return;
-    }
-    if (inFlightRef.current.has(key)) {
-      DEBUG &&
-        console.debug("[HeaderControls] ⏳ Sync already in-flight for", key);
-      return;
-    }
-
-    // ✅ ADD DELAY: Wait for ProjectSelector to finish first
-    const timeoutId = setTimeout(() => {
-      // Re-check key hasn't changed during delay
-      const currentKey = `${useMemoryStore.getState().role?.id}-${
-        useProjectStore.getState().projectId
-      }`;
-      if (currentKey !== key) {
-        DEBUG &&
-          console.debug(
-            "[HeaderControls] ⏭️ Key changed during delay, skipping:",
-            key,
-            "→",
-            currentKey
-          );
-        return;
-      }
-
-      if (lastKeyRef.current === key) {
-        DEBUG &&
-          console.debug(
-            "[HeaderControls] ⏭️ Already synced during delay for key:",
-            key
-          );
-        return;
-      }
-
-      DEBUG &&
-        console.debug("[runSessionFlow][HeaderControls] 🔄 Kickoff →", {
-          roleId,
-          projectId,
-        });
-      inFlightRef.current.add(key);
-
-      runSessionFlow(roleId, projectId, "HeaderControls")
-        .then(() => {
-          lastKeyRef.current = key;
-          DEBUG && console.debug("[runSessionFlow][HeaderControls] ✅ Synced");
-        })
-        .catch((e) =>
-          console.warn("[HeaderControls] ⚠️ runSessionFlow error:", e)
-        )
-        .finally(() => {
-          inFlightRef.current.delete(key);
-        });
-    }, 150); // ✅ 150ms delay to let ProjectSelector finish
-
-    return () => clearTimeout(timeoutId); // ✅ Cleanup on re-render
-  }, [roleId, projectId, key, sessionReady, rawManualSync]);
+    DEBUG &&
+      console.debug("[HeaderControls] 📍 Tracking key:", key, { sessionReady });
+  }, [roleId, projectId, key, sessionReady]);
 
   return (
     <div className="sticky top-0 z-10 bg-panel border-b border-border w-full">
