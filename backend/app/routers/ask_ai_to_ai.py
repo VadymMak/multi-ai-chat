@@ -18,7 +18,7 @@ from app.memory.models import Project
 from app.providers.openai_provider import ask_openai
 from app.providers.claude_provider import ask_claude
 from app.services.youtube_http import perform_youtube_search  # unchanged import
-from app.services.web_search_service import perform_web_search
+from app.services.web_search_service import perform_google_search
 from app.prompts.prompt_builder import build_full_prompt
 from app.config.settings import settings
 
@@ -553,7 +553,7 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
         print(f"[YouTube Error] {e}")
 
     try:
-        raw_web = await run_in_threadpool(perform_web_search, data.topic)
+        raw_web = await run_in_threadpool(perform_google_search, data.topic)
         web_hits = normalize_web_items(raw_web if isinstance(raw_web, (list, tuple)) else raw_web or [])
     except Exception as e:
         web_hits = []

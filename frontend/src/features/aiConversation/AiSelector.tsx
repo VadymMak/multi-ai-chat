@@ -9,8 +9,9 @@ import React, {
 } from "react";
 import { useModelStore } from "../../store/modelStore";
 import { useChatStore } from "../../store/chatStore";
+import { useBalanceStore } from "../../store/balanceStore";
 import { getModelIcon } from "../../utils/getModelIcons";
-import { FaHandshake, FaChevronDown, FaCheck } from "react-icons/fa";
+import { FaHandshake, FaChevronDown, FaCheck, FaLock } from "react-icons/fa";
 
 const HandshakeIcon = FaHandshake as React.ComponentType<{
   size?: number;
@@ -27,27 +28,60 @@ const CheckIcon = FaCheck as React.ComponentType<{
   className?: string;
 }>;
 
+const LockIcon = FaLock as React.ComponentType<{
+  size?: number;
+  className?: string;
+}>;
+
 const AiSelector: React.FC = () => {
   const current = useModelStore((state) => state.provider);
   const setProvider = useModelStore((state) => state.setProvider);
   const claudeModel = useChatStore((state) => state.claudeModel);
   const setClaudeModel = useChatStore((state) => state.setClaudeModel);
 
+  // Get balance/availability info
+  const openaiInfo = useBalanceStore((state) => state.openai);
+  const claudeInfo = useBalanceStore((state) => state.claude);
+
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Check availability
+  const isOpenAIAvailable = openaiInfo.available;
+  const isClaudeAvailable = claudeInfo.available;
+  const isDebateModeAvailable = isOpenAIAvailable && isClaudeAvailable;
+
+  // Get tooltip message for unavailable AI
+  const getUnavailableReason = (provider: string): string => {
+    if (provider === "openai" && !isOpenAIAvailable) {
+      return openaiInfo.error || "OpenAI API key not configured or no credits";
+    }
+    if (provider === "anthropic" && !isClaudeAvailable) {
+      return claudeInfo.error || "Claude API key not configured or no credits";
+    }
+    if (provider === "boost" && !isDebateModeAvailable) {
+      const reasons: string[] = [];
+      if (!isOpenAIAvailable) reasons.push("OpenAI unavailable");
+      if (!isClaudeAvailable) reasons.push("Claude unavailable");
+      return `Debate Mode requires both AIs. ${reasons.join(", ")}`;
+    }
+    return "";
+  };
 
   const models = useMemo(
     () =>
       [
-        { id: "openai", label: "OpenAI" },
-        { id: "anthropic", label: "Claude" },
-        { id: "boost", label: "Debate Mode" },
+        { id: "openai", label: "OpenAI", available: isOpenAIAvailable },
+        { id: "anthropic", label: "Claude", available: isClaudeAvailable },
+        { id: "boost", label: "Debate Mode", available: isDebateModeAvailable },
       ] as const,
-    []
+    [isOpenAIAvailable, isClaudeAvailable, isDebateModeAvailable]
   );
 
   const handleSelect = useCallback(
-    (id: (typeof models)[number]["id"]) => {
+    (id: (typeof models)[number]["id"], available: boolean) => {
+      if (!available) return; // Don't allow selection if unavailable
+
       setProvider(id);
       if (id === "anthropic") {
         setShowModelDropdown(true);
@@ -81,11 +115,17 @@ const AiSelector: React.FC = () => {
     <div className="flex flex-row gap-2 flex-wrap">
       {models.map((model) => {
         const isActive = current === model.id;
+        const isAvailable = model.available;
+        const unavailableReason = getUnavailableReason(model.id);
 
         // Define color schemes for each model
         let buttonClasses = "";
 
-        if (model.id === "openai") {
+        if (!isAvailable) {
+          // Disabled state - gray and muted
+          buttonClasses =
+            "bg-surface/50 text-text-secondary/50 border border-border/50 cursor-not-allowed opacity-60";
+        } else if (model.id === "openai") {
           buttonClasses = isActive
             ? "bg-primary text-white shadow-lg shadow-primary/20"
             : "bg-surface text-primary border border-primary hover:bg-primary/10";
@@ -104,16 +144,26 @@ const AiSelector: React.FC = () => {
           return (
             <div key={model.id} className="relative" ref={dropdownRef}>
               <button
-                onClick={() => handleSelect(model.id)}
-                className={`flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition-all duration-200 cursor-pointer hover:scale-105 justify-center ${buttonClasses}`}
+                onClick={() => handleSelect(model.id, isAvailable)}
+                disabled={!isAvailable}
+                title={!isAvailable ? unavailableReason : undefined}
+                className={`flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition-all duration-200 ${
+                  isAvailable
+                    ? "cursor-pointer hover:scale-105"
+                    : "cursor-not-allowed"
+                } justify-center ${buttonClasses}`}
               >
-                {getModelIcon(model.id)}
+                {!isAvailable ? (
+                  <LockIcon size={14} className="text-text-secondary/50" />
+                ) : (
+                  getModelIcon(model.id)
+                )}
                 <span>{model.label}</span>
-                <ChevronDownIcon size={12} />
+                {isAvailable && <ChevronDownIcon size={12} />}
               </button>
 
               {/* Dropdown menu */}
-              {isActive && showModelDropdown && (
+              {isActive && showModelDropdown && isAvailable && (
                 <div className="absolute top-full mt-1 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 z-50 min-w-[220px]">
                   <button
                     onClick={() => {
@@ -179,10 +229,18 @@ const AiSelector: React.FC = () => {
         return (
           <button
             key={model.id}
-            onClick={() => handleSelect(model.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition-all duration-200 cursor-pointer hover:scale-105 justify-center ${buttonClasses}`}
+            onClick={() => handleSelect(model.id, isAvailable)}
+            disabled={!isAvailable}
+            title={!isAvailable ? unavailableReason : undefined}
+            className={`flex items-center gap-2 px-4 py-2 rounded text-sm font-medium transition-all duration-200 ${
+              isAvailable
+                ? "cursor-pointer hover:scale-105"
+                : "cursor-not-allowed"
+            } justify-center ${buttonClasses}`}
           >
-            {model.id === "boost" ? (
+            {!isAvailable ? (
+              <LockIcon size={14} className="text-text-secondary/50" />
+            ) : model.id === "boost" ? (
               <HandshakeIcon size={16} />
             ) : (
               getModelIcon(model.id)

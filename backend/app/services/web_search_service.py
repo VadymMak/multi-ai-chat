@@ -89,7 +89,7 @@ def _search_wikipedia_titles(q: str, max_results: int) -> List[str]:
 
 def _get_page_info(title: str) -> Dict[str, str]:
     """
-    Fetch a single page’s title/url/summary with defensive error handling.
+    Fetch a single page's title/url/summary with defensive error handling.
     Returns {} on failure.
     """
     if not _HAVE_WIKIPEDIA or wikipedia is None:
@@ -203,17 +203,16 @@ def perform_google_search(
     """
     Use Google Custom Search API (100 free queries/day)
     
-    Setup:
-    1. Get API key: https://console.developers.google.com/
-    2. Create Custom Search Engine: https://programmablesearchengine.google.com/
-    3. Set env vars:
-       GOOGLE_SEARCH_API_KEY=your_key
-       GOOGLE_SEARCH_CX=your_cx_id
+    Environment variables:
+    - GOOGLE_API_KEY: Your Google API key
+    - GOOGLE_CSE_ID: Your Custom Search Engine ID
     """
-    api_key = os.getenv('GOOGLE_SEARCH_API_KEY', '').strip()
-    cx = os.getenv('GOOGLE_SEARCH_CX', '').strip()
+    # ✅ FIXED: Use correct environment variable names
+    api_key = os.getenv('GOOGLE_API_KEY', '').strip()
+    cx = os.getenv('GOOGLE_CSE_ID', '').strip()
     
     if not api_key or not cx:
+        print(f"[Google Search] Not configured: api_key={bool(api_key)}, cx={bool(cx)}")
         _log("Google Search API not configured, using Wikipedia fallback")
         return perform_web_search(query, max_results)
     
@@ -228,10 +227,18 @@ def perform_google_search(
             'num': min(max_results, 10)  # Max 10 per request
         }
         
-        _log(f"Google Search: '{query}' (max={max_results})")
+        print(f"[Google Search] Searching: '{query}' (max={max_results})")
         
         response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        
+        # Log response status
+        print(f"[Google Search] Response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            error_data = response.json() if response.text else {}
+            error_msg = error_data.get('error', {}).get('message', response.text[:200])
+            print(f"[Google Search] Error: {error_msg}")
+            return perform_web_search(query, max_results)
         
         data = response.json()
         items = data.get('items', [])
@@ -244,11 +251,17 @@ def perform_google_search(
                 'snippet': item.get('snippet', '')[:300]
             })
         
-        _log(f"Google Search returned {len(results)} results")
+        print(f"[Google Search] ✅ Returned {len(results)} results")
+        
+        # If no results from Google, fallback to Wikipedia
+        if not results:
+            print(f"[Google Search] No results, falling back to Wikipedia")
+            return perform_web_search(query, max_results)
+        
         return results
         
     except Exception as e:
-        _log(f"Google Search failed: {e}, falling back to Wikipedia")
+        print(f"[Google Search] ❌ Failed: {e}, falling back to Wikipedia")
         return perform_web_search(query, max_results)
 
 
@@ -257,11 +270,11 @@ def perform_web_search_enhanced(
     max_results: int = _DEFAULT_MAX_RESULTS
 ) -> List[Dict[str, str]]:
     """
-    Try Google Search first, fallback to Wikipedia
+    Try Google Search first, fallback to Wikipedia.
     
     This is the recommended entry point when Google Search is configured.
     """
-    api_key = os.getenv('GOOGLE_SEARCH_API_KEY', '').strip()
+    api_key = os.getenv('GOOGLE_API_KEY', '').strip()
     
     if api_key:
         return perform_google_search(query, max_results)
