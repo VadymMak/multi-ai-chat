@@ -34,7 +34,7 @@ class Role(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(50), unique=True, nullable=False, index=True)
-    description = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
 
     # Relationships (no cascading deletes to MemoryEntry/CanonItem; DB handles SET NULL)
     memories = relationship(
