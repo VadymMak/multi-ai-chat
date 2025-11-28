@@ -13,8 +13,6 @@ import React, {
 import ChatMessageBubble from "./ChatMessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import SummaryBubble from "./SummaryBubble";
-import YouTubeMessages from "./YouTubeMessages";
-import WebSearchResults from "./WebSearchResults";
 import { useChatStore } from "../../store/chatStore";
 import { useMemoryStore } from "../../store/memoryStore";
 import { useProjectStore } from "../../store/projectStore";
@@ -258,50 +256,14 @@ const ChatAreaBase: FC<ChatAreaProps> = ({ bottomPad = 84 }) => {
             const isLast = idx === messagesToRender.length - 1;
             const isAi = msg.sender !== "user";
 
-            const nextMsg = messagesToRender[idx + 1];
-            const nextIsDedicatedYt = nextMsg?.sender === "youtube";
-            const nextIsDedicatedWeb = nextMsg?.sender === "web";
-
-            // Sidecars on normal assistant messages (hide if a dedicated card follows)
-            const hasYtSidecar = Boolean((msg as any).sources?.youtube?.length);
-            const hasWebSidecar = Boolean((msg as any).sources?.web?.length);
-            const canShowSidecars =
-              !msg.isTyping && !(nextIsDedicatedYt || nextIsDedicatedWeb);
-
-            // Dedicated "youtube" message
+            // Dedicated "youtube" message - hide completely (links are now in AI response)
             if (msg.sender === "youtube") {
-              const hasStructured = Boolean(
-                (msg as any).sources?.youtube?.length
-              );
-              return (
-                <React.Fragment key={key}>
-                  {!msg.isTyping && hasStructured ? (
-                    <YouTubeMessages message={msg} />
-                  ) : (
-                    <ChatMessageBubble
-                      message={msg}
-                      isLatestAiMessage={isLast && isAi}
-                    />
-                  )}
-                </React.Fragment>
-              );
+              return null;
             }
 
-            // Dedicated "web" message
+            // Dedicated "web" message - hide completely (links are now in AI response)
             if (msg.sender === "web") {
-              const hasStructured = Boolean((msg as any).sources?.web?.length);
-              return (
-                <React.Fragment key={key}>
-                  {!msg.isTyping && hasStructured ? (
-                    <WebSearchResults message={msg} />
-                  ) : (
-                    <ChatMessageBubble
-                      message={msg}
-                      isLatestAiMessage={isLast && isAi}
-                    />
-                  )}
-                </React.Fragment>
-              );
+              return null;
             }
 
             // Divider marker
@@ -325,19 +287,13 @@ const ChatAreaBase: FC<ChatAreaProps> = ({ bottomPad = 84 }) => {
               );
             }
 
-            // Default assistant/user message with optional sidecars
+            // Default assistant/user message (no separate sidecars - links are in text)
             return (
               <React.Fragment key={key}>
                 <ChatMessageBubble
                   message={msg}
                   isLatestAiMessage={isLast && isAi}
                 />
-                {hasYtSidecar && canShowSidecars && (
-                  <YouTubeMessages message={msg} />
-                )}
-                {hasWebSidecar && canShowSidecars && (
-                  <WebSearchResults message={msg} />
-                )}
               </React.Fragment>
             );
           })}

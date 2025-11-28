@@ -240,6 +240,30 @@ def _merge_yt(primary: List[Dict[str, Any]], extra: List[Dict[str, Any]], cap: i
                 return merged
     return merged
 
+def _format_sources_as_markdown(youtube: List[Dict[str, Any]], web: List[Dict[str, Any]]) -> str:
+    """Format YouTube and Web sources as markdown links to append to response."""
+    lines: List[str] = []
+    
+    # YouTube links
+    if youtube:
+        lines.append("\n\n---\n\n**📺 Related Videos:**")
+        for v in youtube[:5]:
+            title = (v.get("title") or "YouTube").strip()
+            url = (v.get("url") or "").strip()
+            if url:
+                lines.append(f"- [{title}]({url})")
+    
+    # Web links
+    if web:
+        lines.append("\n\n**🔗 Related Articles:**")
+        for w in web[:5]:
+            title = (w.get("title") or w.get("url") or "Link").strip()
+            url = (w.get("url") or "").strip()
+            if url:
+                lines.append(f"- [{title}]({url})")
+    
+    return "\n".join(lines) if lines else ""
+
 # -------------------- Rendering helpers --------------------
 def _detect_output_mode(
     q: str,
@@ -713,6 +737,11 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=502, detail="Final summary model failed")
 
     final_reply, _final_render = _post_process(final_reply_raw)
+
+    # ✅ Append sources as markdown links to final reply
+    sources_markdown = _format_sources_as_markdown(yt_hits_final, web_hits)
+    if sources_markdown:
+        final_reply = final_reply.rstrip() + sources_markdown
 
     memory.store_chat_message(project_id, role_id, chat_session_id, "final", final_reply, is_ai_to_ai=True)
     memory.insert_audit_log(project_id, role_id, chat_session_id, "anthropic", "boost_summary", final_reply[:300])
