@@ -85,24 +85,53 @@ const HeaderControls: React.FC = () => {
       return;
     }
 
-    DEBUG &&
-      console.debug("[runSessionFlow][HeaderControls] 🔄 Kickoff →", {
-        roleId,
-        projectId,
-      });
-    inFlightRef.current.add(key);
+    // ✅ ADD DELAY: Wait for ProjectSelector to finish first
+    const timeoutId = setTimeout(() => {
+      // Re-check key hasn't changed during delay
+      const currentKey = `${useMemoryStore.getState().role?.id}-${
+        useProjectStore.getState().projectId
+      }`;
+      if (currentKey !== key) {
+        DEBUG &&
+          console.debug(
+            "[HeaderControls] ⏭️ Key changed during delay, skipping:",
+            key,
+            "→",
+            currentKey
+          );
+        return;
+      }
 
-    runSessionFlow(roleId, projectId, "HeaderControls")
-      .then(() => {
-        lastKeyRef.current = key;
-        DEBUG && console.debug("[runSessionFlow][HeaderControls] ✅ Synced");
-      })
-      .catch((e) =>
-        console.warn("[HeaderControls] ⚠️ runSessionFlow error:", e)
-      )
-      .finally(() => {
-        inFlightRef.current.delete(key);
-      });
+      if (lastKeyRef.current === key) {
+        DEBUG &&
+          console.debug(
+            "[HeaderControls] ⏭️ Already synced during delay for key:",
+            key
+          );
+        return;
+      }
+
+      DEBUG &&
+        console.debug("[runSessionFlow][HeaderControls] 🔄 Kickoff →", {
+          roleId,
+          projectId,
+        });
+      inFlightRef.current.add(key);
+
+      runSessionFlow(roleId, projectId, "HeaderControls")
+        .then(() => {
+          lastKeyRef.current = key;
+          DEBUG && console.debug("[runSessionFlow][HeaderControls] ✅ Synced");
+        })
+        .catch((e) =>
+          console.warn("[HeaderControls] ⚠️ runSessionFlow error:", e)
+        )
+        .finally(() => {
+          inFlightRef.current.delete(key);
+        });
+    }, 150); // ✅ 150ms delay to let ProjectSelector finish
+
+    return () => clearTimeout(timeoutId); // ✅ Cleanup on re-render
   }, [roleId, projectId, key, sessionReady, rawManualSync]);
 
   return (
