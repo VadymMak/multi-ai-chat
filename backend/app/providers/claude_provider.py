@@ -104,6 +104,53 @@ def _get_client() -> Any:
     return _client
 
 
+def _get_client_with_key(api_key: str) -> Any:
+    """Create a NEW Anthropic client with a specific API key (for user BYOK)."""
+    if not _HAVE_ANTHROPIC:
+        raise RuntimeError(
+            "[Claude Error] anthropic package not installed; cannot create client"
+        )
+
+    if not api_key:
+        raise RuntimeError("[Claude Error] API key not provided")
+
+    base_url = os.getenv("ANTHROPIC_BASE_URL") or None
+
+    try:
+        import httpx
+        
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(
+                timeout=120.0,
+                connect=30.0,
+                read=90.0,
+                write=30.0
+            ),
+            limits=httpx.Limits(
+                max_keepalive_connections=5,
+                max_connections=10,
+                keepalive_expiry=30.0
+            )
+        )
+        
+        return Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=http_client,
+            max_retries=3,
+        )  # type: ignore[call-arg]
+        
+    except Exception as e:
+        print(f"⚠️ [Claude] Failed to create custom http_client: {e}")
+        print(f"⚠️ [Claude] Falling back to default client")
+        client = Anthropic(api_key=api_key, base_url=base_url)  # type: ignore[call-arg]
+        
+        try:
+            return client.with_options(timeout=TIMEOUT_SECS)  # type: ignore[attr-defined]
+        except Exception:
+            return client
+
+
 def _normalize_messages(messages: List[dict]) -> List[dict]:
     """Ensure each message has {role, content} and drop empties."""
     out: List[dict] = []
@@ -139,12 +186,14 @@ def ask_claude(
     temperature: float = TEMPERATURE,
     max_tokens: int = MAX_TOKENS,
     system: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> str:
     """
     Chat wrapper with robust fallbacks and retry logic.
     """
     try:
-        client = _get_client()
+        # Use user-provided API key if available, otherwise use env/cached client
+        client = _get_client_with_key(api_key) if api_key else _get_client()
         normalized = _normalize_messages(messages)
         
         # Clamp params

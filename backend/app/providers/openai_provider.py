@@ -104,6 +104,40 @@ def _get_client() -> Any:
         raise
 
 
+def _get_client_with_key(api_key: str) -> Any:
+    """Create a NEW OpenAI client with a specific API key (for user BYOK)."""
+    if not _HAVE_OPENAI:
+        raise RuntimeError("[OpenAI Error] openai package not installed; cannot create client")
+
+    if not api_key:
+        raise RuntimeError("[OpenAI Error] API key not provided")
+
+    base_url = os.getenv("OPENAI_BASE_URL") or None
+    organization = os.getenv("OPENAI_ORG") or None
+    
+    try:
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(TIMEOUT_SECS, connect=10.0),
+            trust_env=False
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    try:
+        return _RuntimeOpenAIClient(
+            api_key=api_key,
+            base_url=base_url,
+            organization=organization,
+            http_client=http_client
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 def _normalize_messages(messages: List[dict]) -> List[Dict[str, str]]:
     """Ensure each message has {role, content} and drop empties."""
     out: List[Dict[str, str]] = []
@@ -321,6 +355,7 @@ def ask_openai(
     *,
     json_mode: Optional[bool] = None,
     force_text_only: Optional[bool] = None,
+    api_key: Optional[str] = None,
 ) -> str:
     """
     Chat Completions wrapper with adaptors & robust fallbacks:
@@ -331,7 +366,8 @@ def ask_openai(
       • If still empty, retry once on FALLBACK_MODEL with a text-only nudge and JSON mode OFF.
     """
     try:
-        client = _get_client()
+        # Use user-provided API key if available, otherwise use env/cached client
+        client = _get_client_with_key(api_key) if api_key else _get_client()
         final_messages = _build_messages(messages, system_prompt, force_text_only=bool(force_text_only))
 
         # Clamp params

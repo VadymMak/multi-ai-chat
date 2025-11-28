@@ -14,13 +14,15 @@ from sqlalchemy.orm import Session
 
 from app.memory.db import get_db
 from app.memory.manager import MemoryManager
-from app.memory.models import Project
+from app.memory.models import Project, User
 from app.providers.openai_provider import ask_openai
 from app.providers.claude_provider import ask_claude
 from app.services.youtube_http import perform_youtube_search  # unchanged import
 from app.services.web_search_service import perform_google_search
 from app.prompts.prompt_builder import build_full_prompt
 from app.config.settings import settings
+from app.deps import get_current_active_user
+from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
 
 router = APIRouter(tags=["Chat"])
 
@@ -375,7 +377,8 @@ class AiToAiRequest(BaseModel):
 async def claude_with_retry(
     messages: List[Dict[str, str]], 
     system: Optional[str] = None,
-    retries: int = 2
+    retries: int = 2,
+    api_key: Optional[str] = None
 ) -> str:
     """Claude wrapper with simple retries/backoff (runs provider in a thread)."""
     # Filter out system messages from the messages list
@@ -391,7 +394,7 @@ async def claude_with_retry(
     last = ""
     for attempt in range(retries + 1):
         try:
-            ans = await run_in_threadpool(ask_claude, filtered_messages, system=system)
+            ans = await run_in_threadpool(ask_claude, filtered_messages, system=system, api_key=api_key)
             last = ans or ""
             if ans and "[Claude Error]" not in ans and "overloaded" not in ans.lower():
                 return ans
@@ -456,7 +459,11 @@ def _extract_terms_from_topic(topic: str) -> List[str]:
 
 # -------------------- Main route --------------------
 @router.post("/ask-ai-to-ai")
-async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db)):
+async def ask_ai_to_ai_route(
+    data: AiToAiRequest, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
     """
     Boost mode: one model answers, Claude reviews, then a final summary is produced.
     Returns:
@@ -477,9 +484,14 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
     project_id = data.project_id
     chat_session_id = _get_or_create_session_id(memory, role_id, project_id, data.chat_session_id)
 
+    # Get user API keys (required for non-superusers, fallback to .env for superusers)
+    openai_key = get_openai_key(current_user, db, required=True)
+    anthropic_key = get_anthropic_key(current_user, db, required=True)
+
     print(
         f"⚙️ Boost Mode: topic='{data.topic}' | starter={data.starter} | "
-        f"role={role_id} | project_id={project_id} | session={chat_session_id}"
+        f"role={role_id} | project_id={project_id} | session={chat_session_id} | "
+        f"user_id={current_user.id} | using_user_keys={not current_user.is_superuser}"
     )
 
     # ---- History for context (trim) ----
@@ -605,12 +617,13 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
     starter_messages: List[Dict[str, str]] = history + [policy_system_msg, {"role": "user", "content": user_message}]
     try:
         if data.starter == "openai":
-            first_reply_raw: str = await run_in_threadpool(ask_openai, starter_messages)
+            first_reply_raw: str = await run_in_threadpool(ask_openai, starter_messages, api_key=openai_key)
             starter_sender = "openai"
         else:
             first_reply_raw = await claude_with_retry(
                 [m for m in starter_messages if m.get("role") != "system"],
-                system=base_system + render_policy
+                system=base_system + render_policy,
+                api_key=anthropic_key
             )
             starter_sender = "anthropic"
     except Exception as e:
@@ -676,7 +689,8 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
     ]
     claude_review_raw = await claude_with_retry(
         [m for m in review_messages if m.get("role") != "system"],
-        system=base_system + render_policy
+        system=base_system + render_policy,
+        api_key=anthropic_key
     )
     claude_review, _review_render = _post_process(claude_review_raw)
 
@@ -731,7 +745,7 @@ async def ask_ai_to_ai_route(data: AiToAiRequest, db: Session = Depends(get_db))
     )
 
     try:
-        final_reply_raw = await claude_with_retry([{"role": "user", "content": full_prompt}])
+        final_reply_raw = await claude_with_retry([{"role": "user", "content": full_prompt}], api_key=anthropic_key)
     except Exception as e:
         print(f"❌ Final summary error: {e}")
         raise HTTPException(status_code=502, detail="Final summary model failed")

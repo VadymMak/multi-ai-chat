@@ -14,13 +14,15 @@ from app.providers.factory import ask_model
 from app.providers.streaming import stream_openai, stream_claude
 from app.memory.manager import MemoryManager
 from app.memory.db import get_db
-from app.memory.models import Role, Project
+from app.memory.models import Role, Project, User
 from app.prompts.prompt_builder import generate_prompt_from_db
 from app.config.settings import settings
 from app.config.model_registry import MODEL_REGISTRY
 from app.services.vector_service import store_message_with_embedding, get_relevant_context
 from sse_starlette.sse import EventSourceResponse
 import json
+from app.deps import get_current_active_user
+from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
 
 # ✅ Deterministic YouTube path
 from app.services.youtube_service import search_videos
@@ -534,6 +536,7 @@ async def _auto_summarize_if_needed(memory: MemoryManager, role_id: int, project
 async def ask_route(
     data: AskRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
     debug: Optional[bool] = Query(default=False, description="Include token thresholds and preflight info"),
 ):
     # ---- Validate FK existence
@@ -553,6 +556,13 @@ async def ask_route(
 
     memory = MemoryManager(db)
 
+    # Get user API keys based on provider
+    user_api_key: Optional[str] = None
+    if data.provider == "openai" or data.provider == "all":
+        user_api_key = get_openai_key(current_user, db, required=True)
+    elif data.provider == "anthropic":
+        user_api_key = get_anthropic_key(current_user, db, required=True)
+
     # Stable session id
     if data.chat_session_id:
         chat_session_id = data.chat_session_id.strip()
@@ -563,7 +573,7 @@ async def ask_route(
 
     print(
         f"\n📅 /ask role={role_id} project={project_id} session={chat_session_id} "
-        f"provider={data.provider} model_key={data.model_key}"
+        f"provider={data.provider} model_key={data.model_key} user_id={current_user.id}"
     )
     print(f"📥 User: {data.query[:120]}")
 
@@ -786,8 +796,11 @@ async def ask_route(
             else:
                 anthropic_key = _registry_key_for_model_name(getattr(settings, "ANTHROPIC_DEFAULT_MODEL", None)) or "claude-3-5-sonnet"
 
-            openai_reply = ask_model(history, model_key=openai_key, system_prompt=full_prompt)
-            claude_reply = ask_model(history, model_key=anthropic_key, system_prompt=full_prompt)
+            openai_api_key = get_openai_key(current_user, db, required=True)
+            anthropic_api_key = get_anthropic_key(current_user, db, required=True)
+            
+            openai_reply = ask_model(history, model_key=openai_key, system_prompt=full_prompt, api_key=openai_api_key)
+            claude_reply = ask_model(history, model_key=anthropic_key, system_prompt=full_prompt, api_key=anthropic_api_key)
 
             openai_reply, openai_render = _post_process(openai_reply)
             claude_reply, claude_render = _post_process(claude_reply)
@@ -797,7 +810,7 @@ async def ask_route(
                 "Avoid any fenced code unless explicitly asked for code.\n\n"
                 f"OpenAI:\n{openai_reply}\n\nClaude:\n{claude_reply}\n"
             )
-            final_summary = ask_model([{"role": "user", "content": summary_prompt}], model_key=openai_key, system_prompt=full_prompt)
+            final_summary = ask_model([{"role": "user", "content": summary_prompt}], model_key=openai_key, system_prompt=full_prompt, api_key=openai_api_key)
 
             openai_entry = memory.store_chat_message(project_id, role_id, chat_session_id, "openai", openai_reply)
             claude_entry = memory.store_chat_message(project_id, role_id, chat_session_id, "anthropic", claude_reply)
@@ -831,7 +844,7 @@ async def ask_route(
         if reg and data.provider in {"openai", "anthropic"} and reg["provider"] != data.provider:
             chosen_key = _default_key_for_provider(data.provider)
 
-        answer_raw = ask_model(history, model_key=chosen_key, system_prompt=full_prompt)
+        answer_raw = ask_model(history, model_key=chosen_key, system_prompt=full_prompt, api_key=user_api_key)
         answer, render_meta = _post_process(answer_raw)
 
         info = MODEL_REGISTRY.get(chosen_key)

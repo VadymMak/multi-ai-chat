@@ -131,6 +131,7 @@ def ask_model(
     system_prompt: Optional[str] = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    api_key: Optional[str] = None,
 ) -> str:
     """
     Unified LLM caller. Picks provider+model via registry key and adds resilience:
@@ -182,15 +183,20 @@ def ask_model(
             openai_kwargs["temperature"] = temp  # include temp normally
         if getattr(settings, "JSON_MODE_DEFAULT", False):
             openai_kwargs["json_mode"] = True  # harmless if wrapper ignores
+        if api_key:
+            openai_kwargs["api_key"] = api_key
         answer = ask_openai(**openai_kwargs)
     elif provider == "anthropic":
-        answer = ask_claude(
-            messages=norm_messages,
-            model=model,
-            system=sys_prompt,
-            temperature=temp,
-            max_tokens=out_tokens,
-        )
+        claude_kwargs: Dict[str, Any] = {
+            "messages": norm_messages,
+            "model": model,
+            "system": sys_prompt,
+            "temperature": temp,
+            "max_tokens": out_tokens,
+        }
+        if api_key:
+            claude_kwargs["api_key"] = api_key
+        answer = ask_claude(**claude_kwargs)
         # AFTER:
      
     else:
@@ -227,28 +233,36 @@ def ask_model(
             openai_kwargs2["temperature"] = temp
         if getattr(settings, "JSON_MODE_DEFAULT", False):
             openai_kwargs2["json_mode"] = True
+        if api_key:
+            openai_kwargs2["api_key"] = api_key
         answer2 = ask_openai(**openai_kwargs2)
     else:
-        answer2 = ask_claude(
-            messages=repaired,
-            model=model,
-            system=sys_prompt,
-            temperature=temp,
-            max_tokens=out_tokens,
-        )
+        claude_kwargs2: Dict[str, Any] = {
+            "messages": repaired,
+            "model": model,
+            "system": sys_prompt,
+            "temperature": temp,
+            "max_tokens": out_tokens,
+        }
+        if api_key:
+            claude_kwargs2["api_key"] = api_key
+        answer2 = ask_claude(**claude_kwargs2)
 
     if provider == "anthropic" and getattr(settings, "CLAUDE_OVERLOAD_SHORTCIRCUIT", True) and _is_overloaded(answer2):
         fb_key = _fallback_key_for_provider(provider)
         if fb_key and fb_key in MODEL_REGISTRY:
             fb = MODEL_REGISTRY[fb_key]
             print(f"🛟 Anthropic overloaded (retry) → switching to fallback '{fb_key}' ({fb['model']})")
-            return ask_claude(
-                messages=repaired,
-                model=fb["model"],
-                system=sys_prompt,
-                temperature=float(fb.get("temperature", temp)),
-                max_tokens=int(fb.get("max_tokens", out_tokens)),
-            )
+            claude_fb_kwargs: Dict[str, Any] = {
+                "messages": repaired,
+                "model": fb["model"],
+                "system": sys_prompt,
+                "temperature": float(fb.get("temperature", temp)),
+                "max_tokens": int(fb.get("max_tokens", out_tokens)),
+            }
+            if api_key:
+                claude_fb_kwargs["api_key"] = api_key
+            return ask_claude(**claude_fb_kwargs)
 
     if not _is_bad(answer2):
         return str(answer2).strip()
@@ -269,15 +283,20 @@ def ask_model(
                 openai_kwargs3["temperature"] = float(fb.get("temperature", temp))
             if getattr(settings, "JSON_MODE_DEFAULT", False):
                 openai_kwargs3["json_mode"] = True
+            if api_key:
+                openai_kwargs3["api_key"] = api_key
             answer3 = ask_openai(**openai_kwargs3)
         else:
-            answer3 = ask_claude(
-                messages=repaired,
-                model=fb["model"],
-                system=sys_prompt,
-                temperature=float(fb.get("temperature", temp)),
-                max_tokens=int(fb.get("max_tokens", out_tokens)),
-            )
+            claude_kwargs3: Dict[str, Any] = {
+                "messages": repaired,
+                "model": fb["model"],
+                "system": sys_prompt,
+                "temperature": float(fb.get("temperature", temp)),
+                "max_tokens": int(fb.get("max_tokens", out_tokens)),
+            }
+            if api_key:
+                claude_kwargs3["api_key"] = api_key
+            answer3 = ask_claude(**claude_kwargs3)
         if not _is_bad(answer3):
             return str(answer3).strip()
 
