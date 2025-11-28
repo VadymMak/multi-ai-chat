@@ -74,8 +74,10 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
 
       const newRoleId = project.assistant?.id ?? roleId;
 
-      setProjectId(project.id);
+      // ✅ Clear messages FIRST, before changing projectId
+      useChatStore.getState().clearMessages();
 
+      // ✅ Update role BEFORE projectId to prevent race conditions
       if (project.assistant) {
         setRole({
           id: project.assistant.id,
@@ -84,7 +86,8 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
         });
       }
 
-      useChatStore.getState().clearMessages();
+      // ✅ Set projectId AFTER clearing and role update
+      setProjectId(project.id);
 
       try {
         await runSessionFlow(newRoleId!, project.id, "ProjectSelector");
@@ -93,8 +96,10 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
         console.error("❌ [ProjectSelector] Session init failed:", err);
         toast.error("Failed to switch project");
       } finally {
-        // Reset flag after switch completes
-        isManualSwitchRef.current = false;
+        // ✅ Delay reset to ensure all effects have processed
+        setTimeout(() => {
+          isManualSwitchRef.current = false;
+        }, 300);
       }
     },
     [roleId, projectId, setProjectId, setRole]
