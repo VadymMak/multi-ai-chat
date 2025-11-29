@@ -1,11 +1,27 @@
 import React, { useState } from "react";
 import { Zap, Info } from "lucide-react";
 import { useChatSettingsStore } from "../../store/chatSettingsStore";
+import { calculateCost } from "../../utils/calculateCost";
 
-export const TokenLimitBadge: React.FC = () => {
+interface TokenLimitBadgeProps {
+  model?: string;
+}
+
+export const TokenLimitBadge: React.FC<TokenLimitBadgeProps> = ({
+  model = "gpt-4o-mini",
+}) => {
   const [showTooltip, setShowTooltip] = useState(false);
   const maxTokens = useChatSettingsStore((state) => state.maxTokens);
   const tokenSource = useChatSettingsStore((state) => state.tokenSource);
+
+  // Calculate cost - assume 50/50 split between input/output tokens for estimate
+  const estimatedInputTokens = Math.floor(maxTokens * 0.5);
+  const estimatedOutputTokens = Math.floor(maxTokens * 0.5);
+  const cost = calculateCost(
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    model
+  );
 
   // Format tokens same as budget (e.g., 8192 → "8.2K")
   const formatTokens = (tokens: number): string => {
@@ -75,20 +91,10 @@ export const TokenLimitBadge: React.FC = () => {
         {/* Icon */}
         {getIcon()}
 
-        {/* Text - format like budget: "8.2K (Std)" */}
+        {/* Text - format like budget: "8.2K | ~$0.02" */}
         <span className="whitespace-nowrap">
           {formatTokens(maxTokens)}
-          <span className="opacity-70 ml-1">
-            (
-            {maxTokens >= 16000
-              ? "Max"
-              : maxTokens >= 12000
-              ? "High"
-              : maxTokens >= 10000
-              ? "Med"
-              : "Std"}
-            )
-          </span>
+          <span className="text-gray-400 ml-1">| ~{cost}</span>
         </span>
 
         {/* Underline indicator - SAME as budget! */}

@@ -1,19 +1,31 @@
 import React from "react";
 import { AlertCircle } from "lucide-react";
+import { calculateCost } from "../../utils/calculateCost";
 
 interface TokenBudgetIndicatorProps {
   usedTokens: number;
   maxTokens: number;
+  model?: string;
   onSummarize?: () => void;
 }
 
 export const TokenBudgetIndicator: React.FC<TokenBudgetIndicatorProps> = ({
   usedTokens,
   maxTokens,
+  model = "gpt-4o-mini",
   onSummarize,
 }) => {
   const percentage = (usedTokens / maxTokens) * 100;
   const showButton = percentage > 50;
+
+  // Calculate cost - assume 50/50 split between input/output tokens for estimate
+  const estimatedInputTokens = Math.floor(usedTokens * 0.5);
+  const estimatedOutputTokens = Math.floor(usedTokens * 0.5);
+  const cost = calculateCost(
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    model
+  );
 
   const getColor = () => {
     if (percentage < 60)
@@ -49,7 +61,8 @@ export const TokenBudgetIndicator: React.FC<TokenBudgetIndicatorProps> = ({
 
       <div className="flex flex-col gap-1 flex-1 min-w-[90px]">
         <div className="text-xs font-medium whitespace-nowrap">
-          {formatTokens(usedTokens)} / {formatTokens(maxTokens)}
+          {formatTokens(usedTokens)} tokens |{" "}
+          <span className="text-gray-400">~{cost}</span>
         </div>
 
         <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden">

@@ -13,7 +13,6 @@ if (!ENV_BASE) {
   );
 }
 const baseURL = ENV_BASE || "http://localhost:8000/api";
-console.debug("🌍 Axios baseURL:", baseURL);
 
 const api = axios.create({
   baseURL,

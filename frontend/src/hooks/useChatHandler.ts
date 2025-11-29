@@ -46,11 +46,6 @@ type SearchOptions = {
 const isCodeGenerationRequest = (query: string): boolean => {
   const lower = query.toLowerCase().trim();
 
-  // ✅ ADD DEBUG
-  console.log("🔍 [DEBUG] isCodeGenerationRequest called");
-  console.log("🔍 [DEBUG] Original query:", query);
-  console.log("🔍 [DEBUG] Lowercased:", lower);
-
   // ✅ ENHANCED direct triggers - ADD THESE LINES
   const directTriggers = [
     "create app",
@@ -451,14 +446,6 @@ export const useChatHandler = ({
 
       // ✅ AUTO-DETECT CODE GENERATION AND USE STREAMING
       if (isCodeGenerationRequest(messageToSend)) {
-        console.log("=".repeat(60));
-        console.log("🌊 [Code Generation] Detected - using streaming");
-        console.log("📝 [DEBUG] Query:", messageToSend);
-        console.log("📝 [DEBUG] Role ID:", roleId);
-        console.log("📝 [DEBUG] Project ID:", projectId);
-        console.log("📝 [DEBUG] Session ID:", initialSessionId);
-        console.log("=".repeat(60));
-
         setTyping(true);
         abortRef.current?.abort();
         abortRef.current = new AbortController();
@@ -473,9 +460,8 @@ export const useChatHandler = ({
           project_id: String(projectId),
         };
 
-        console.log("📤 [DEBUG] User message object:");
         console.log(JSON.stringify(userMessage, null, 2));
-        console.log("📤 [DEBUG] Store BEFORE addMessage:");
+
         console.log(
           "  - Messages count:",
           useChatStore.getState().messages.length
@@ -494,7 +480,6 @@ export const useChatHandler = ({
 
         addMessage(userMessage);
 
-        console.log("✅ [DEBUG] Store AFTER addMessage:");
         console.log(
           "  - Messages count:",
           useChatStore.getState().messages.length
@@ -598,8 +583,6 @@ export const useChatHandler = ({
               searchOptions?.youtubeSearchEnabled
             );
 
-            console.log("🔍 [DEBUG] Boost result:", result);
-            console.log("🔍 [DEBUG] Messages count:", result.messages?.length);
             result.messages?.forEach((msg, i) => {
               console.log(`🔍 [DEBUG] Message ${i}:`, {
                 sender: msg.sender,

@@ -123,13 +123,6 @@ const InputBar: React.FC<InputBarProps> = ({
       youtubeSearchEnabled: isYouTubeSearchEnabled,
     };
 
-    console.log("🔍 [InputBar] Search options:", searchOpts);
-    console.log("🔍 [InputBar] isWebSearchEnabled:", isWebSearchEnabled);
-    console.log(
-      "🔍 [InputBar] isYouTubeSearchEnabled:",
-      isYouTubeSearchEnabled
-    );
-
     try {
       await handleSend(value, currentOverrides, filesToSend, searchOpts);
 
