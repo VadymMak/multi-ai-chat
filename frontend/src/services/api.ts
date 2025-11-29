@@ -16,7 +16,7 @@ const baseURL = ENV_BASE || "http://localhost:8000/api";
 
 const api = axios.create({
   baseURL,
-  timeout: 120000, // ✅ 2 minute timeout (reduced from 300000 for better error handling)
+  timeout: 180000, // ✅ 2 minute timeout (reduced from 300000 for better error handling)
   withCredentials: false,
   headers: { Accept: "application/json" },
 });
