@@ -353,6 +353,10 @@ class AiToAiRequest(BaseModel):
 
     # Presentation switch for poems / printing workflows
     presentation: Optional[Literal["default", "poem_plain", "poem_code"]] = "default"
+    
+    # Search toggles - default False to avoid automatic searches
+    web_search: bool = False
+    youtube_search: bool = False
 
     @field_validator("role", mode="before")
     @classmethod
@@ -533,43 +537,52 @@ async def ask_ai_to_ai_route(
             print(f"[Canon digest error] {e}")
 
     # ---- Context gathering (safe, shape-agnostic) ----
+    # Only perform searches if explicitly requested via toggles
     yt_block: str = "📋 YOUTUBE: None."
     yt_hits: List[Dict[str, Any]] = []
-    try:
-        raw_yt = await run_in_threadpool(
-            lambda: perform_youtube_search(
-                data.topic,
-                max_results=5,
-                mem=memory,
-                role_id=role_id,
-                project_id=project_id,
+    
+    if data.youtube_search:
+        try:
+            raw_yt = await run_in_threadpool(
+                lambda: perform_youtube_search(
+                    data.topic,
+                    max_results=5,
+                    mem=memory,
+                    role_id=role_id,
+                    project_id=project_id,
+                )
             )
-        )
-        if isinstance(raw_yt, tuple) and len(raw_yt) == 2:
-            raw_block, raw_items = raw_yt
-            yt_hits = normalize_youtube_items(raw_items)
-            yt_block = str(raw_block or "").strip() or build_youtube_block(yt_hits)
-        elif isinstance(raw_yt, list):
-            yt_hits = normalize_youtube_items(raw_yt)
-            yt_block = build_youtube_block(yt_hits)
-        elif isinstance(raw_yt, dict):
-            items = raw_yt.get("items") or raw_yt.get("results") or []
-            yt_hits = normalize_youtube_items(items)
-            yt_block = str(raw_yt.get("block") or "").strip() or build_youtube_block(yt_hits)
-        elif isinstance(raw_yt, str):
-            yt_block = raw_yt
-        else:
-            yt_block = "📋 YOUTUBE: None."
-    except Exception as e:
-        yt_block, yt_hits = "📋 YOUTUBE: None.", []
-        print(f"[YouTube Error] {e}")
-
-    try:
-        raw_web = await run_in_threadpool(perform_google_search, data.topic)
-        web_hits = normalize_web_items(raw_web if isinstance(raw_web, (list, tuple)) else raw_web or [])
-    except Exception as e:
-        web_hits = []
-        print(f"[Web Search Error] {e}")
+            if isinstance(raw_yt, tuple) and len(raw_yt) == 2:
+                raw_block, raw_items = raw_yt
+                yt_hits = normalize_youtube_items(raw_items)
+                yt_block = str(raw_block or "").strip() or build_youtube_block(yt_hits)
+            elif isinstance(raw_yt, list):
+                yt_hits = normalize_youtube_items(raw_yt)
+                yt_block = build_youtube_block(yt_hits)
+            elif isinstance(raw_yt, dict):
+                items = raw_yt.get("items") or raw_yt.get("results") or []
+                yt_hits = normalize_youtube_items(items)
+                yt_block = str(raw_yt.get("block") or "").strip() or build_youtube_block(yt_hits)
+            elif isinstance(raw_yt, str):
+                yt_block = raw_yt
+            else:
+                yt_block = "📋 YOUTUBE: None."
+        except Exception as e:
+            yt_block, yt_hits = "📋 YOUTUBE: None.", []
+            print(f"[YouTube Error] {e}")
+    else:
+        print(f"[YouTube Search] Skipped (youtube_search={data.youtube_search})")
+    
+    web_hits: List[Dict[str, Any]] = []
+    if data.web_search:
+        try:
+            raw_web = await run_in_threadpool(perform_google_search, data.topic)
+            web_hits = normalize_web_items(raw_web if isinstance(raw_web, (list, tuple)) else raw_web or [])
+        except Exception as e:
+            web_hits = []
+            print(f"[Web Search Error] {e}")
+    else:
+        print(f"[Web Search] Skipped (web_search={data.web_search})")
 
     # ---- Write the synthetic "user" message that seeds the debate ----
     # Store only the topic for user message (clean display in UI)
@@ -712,25 +725,59 @@ async def ask_ai_to_ai_route(
         print(f"[Project lookup error] {e}")
         project_structure = ""
 
+    # Only prepare context lists if searches were actually performed
     youtube_context: List[str] = []
-    for v in yt_hits_final:
-        t = (v.get("title") or "YouTube").strip()
-        u = (v.get("url") or "").strip()
-        if u:
-            youtube_context.append(f"{t} - {u}")
+    if data.youtube_search and yt_hits_final:
+        for v in yt_hits_final:
+            t = (v.get("title") or "YouTube").strip()
+            u = (v.get("url") or "").strip()
+            if u:
+                youtube_context.append(f"{t} - {u}")
 
     web_context: List[str] = []
-    for v in web_hits:
-        t = (v.get("title") or "").strip()
-        s = (v.get("snippet") or "").strip()
-        if t or s:
-            web_context.append(f"{t} - {s}".strip(" -"))
+    if data.web_search and web_hits:
+        for v in web_hits:
+            t = (v.get("title") or "").strip()
+            s = (v.get("snippet") or "").strip()
+            if t or s:
+                web_context.append(f"{t} - {s}".strip(" -"))
 
-    system_prompt = (
-        "You are a thoughtful assistant summarizing and enhancing user research. "
-        "You DO have access to the trimmed chat history provided; use it to stay consistent."
-        + render_policy  # append the same render policy
-    )
+    # Build dynamic system prompt based on what sources are available
+    system_prompt_parts = [
+        "You are a thoughtful assistant synthesizing responses from two AI models."
+    ]
+    
+    if youtube_context or web_context:
+        system_prompt_parts.append("You have access to external research sources that were requested by the user.")
+    
+    system_prompt_parts.extend([
+        "You DO have access to the trimmed chat history provided; use it to stay consistent.",
+        "",
+        "**Output Format Requirements:**",
+        "- Use proper GitHub-flavored Markdown",
+        "- Start with a clear ## heading if appropriate",
+        "- Use **bold** for key terms and important concepts",
+        "- Use bullet points (- or *) for lists",
+        "- Keep formatting clean and professional",
+        "",
+        "**Code Block Guidelines:**",
+        "- Do NOT create code blocks for simple terms or single words like function names",
+        "- Only use code blocks (```) for actual code snippets (multiple lines of code)",
+        "- For technical terms, use **bold** for emphasis, NOT code blocks",
+        "- Example: Use **useState** instead of `useState` in regular text",
+        "",
+        "**Your Task:**",
+        "Synthesize the two model responses into a cohesive, well-formatted answer."
+    ])
+    
+    if youtube_context:
+        system_prompt_parts.append("- Integrate insights from YouTube videos where relevant")
+    if web_context:
+        system_prompt_parts.append("- Integrate insights from web articles where relevant")
+    
+    system_prompt_parts.append("- Do NOT mention sources that weren't provided")
+    
+    system_prompt = "\n".join(system_prompt_parts) + render_policy
 
     full_prompt = build_full_prompt(
         system_prompt=system_prompt,
