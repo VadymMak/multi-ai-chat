@@ -293,7 +293,11 @@ const ChatPage: React.FC = () => {
         language?: string | null;
         filename?: string | null;
       },
-      attachments?: File[]
+      attachments?: File[],
+      searchOptions?: {
+        webSearchEnabled?: boolean;
+        youtubeSearchEnabled?: boolean;
+      }
     ) => {
       const raw = (text ?? input).trim();
       if (!raw || !roleId || !projectId) return;
@@ -420,7 +424,12 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
           "✅ [Detection] Delegating to chatHandler for code detection"
         );
         try {
-          await chatHandler.handleSend(messageToSend, overrides);
+          await chatHandler.handleSend(
+            messageToSend,
+            overrides,
+            attachments,
+            searchOptions
+          );
         } catch (error) {
           console.error("❌ chatHandler.handleSend failed:", error);
         }
@@ -451,7 +460,9 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
             "openai",
             roleId,
             projectId,
-            sid
+            sid,
+            searchOptions?.webSearchEnabled,
+            searchOptions?.youtubeSearchEnabled
           );
 
           // ... остальной код boost mode без изменений ...

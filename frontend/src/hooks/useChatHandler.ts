@@ -33,6 +33,12 @@ type SendOverrides = {
   filename?: string | null;
 };
 
+/** Search Options for external search toggles */
+type SearchOptions = {
+  webSearchEnabled?: boolean;
+  youtubeSearchEnabled?: boolean;
+};
+
 // ============================================================================
 // CODE GENERATION DETECTION
 // ============================================================================
@@ -418,7 +424,17 @@ export const useChatHandler = ({
   sendAiToAiMessage,
 }: UseChatHandlerParams) => {
   const handleSend = useCallback(
-    async (text?: string, overrides?: SendOverrides) => {
+    async (
+      text?: string,
+      overrides?: SendOverrides,
+      attachments?: File[],
+      searchOptions?: SearchOptions
+    ) => {
+      console.log(
+        "🔍 [handleSend] START - searchOptions received:",
+        searchOptions
+      );
+
       const messageToSend = (text ?? input).trim();
       if (!messageToSend) return;
       if (!roleId || roleId <= 0) return;
@@ -562,12 +578,24 @@ export const useChatHandler = ({
       const attemptSend = async (): Promise<void> => {
         try {
           if (provider === "boost") {
+            console.log("🔍 [useChatHandler] searchOptions:", searchOptions);
+            console.log(
+              "🔍 [useChatHandler] webSearchEnabled:",
+              searchOptions?.webSearchEnabled
+            );
+            console.log(
+              "🔍 [useChatHandler] youtubeSearchEnabled:",
+              searchOptions?.youtubeSearchEnabled
+            );
+
             const result = await sendAiToAiMessage(
               messageToSend,
               "openai",
               roleId,
               projectId,
-              initialSessionId
+              initialSessionId,
+              searchOptions?.webSearchEnabled,
+              searchOptions?.youtubeSearchEnabled
             );
 
             console.log("🔍 [DEBUG] Boost result:", result);

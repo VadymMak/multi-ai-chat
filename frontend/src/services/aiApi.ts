@@ -469,7 +469,9 @@ export const sendAiToAiMessage = async (
   starter: AiStarter,
   roleId: number,
   projectId: string | number,
-  chatSessionId?: string
+  chatSessionId?: string,
+  webSearch?: boolean,
+  youtubeSearch?: boolean
 ): Promise<AiToAiResponse> => {
   const projectIdNum = toProjectIdNumber(projectId);
 
@@ -491,7 +493,13 @@ export const sendAiToAiMessage = async (
     role: String(roleId),
     project_id: String(projectIdNum),
     chat_session_id: finalSessionId ?? "",
+    ...(webSearch !== undefined ? { web_search: webSearch } : {}),
+    ...(youtubeSearch !== undefined ? { youtube_search: youtubeSearch } : {}),
   };
+
+  console.log("🔍 [aiApi] webSearch param:", webSearch);
+  console.log("🔍 [aiApi] youtubeSearch param:", youtubeSearch);
+  console.log("🔍 [aiApi] Final payload:", payload);
 
   try {
     const res = await api.post("/ask-ai-to-ai", payload);

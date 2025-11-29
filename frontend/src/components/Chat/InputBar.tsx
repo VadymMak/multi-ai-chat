@@ -12,6 +12,7 @@ import { Paperclip } from "lucide-react";
 import { useMemoryStore } from "../../store/memoryStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useChatStore } from "../../store/chatStore";
+import { useModelStore } from "../../store/modelStore";
 import FilePreviews from "./FilePreviews";
 import type { RenderKind } from "../../types/chat";
 
@@ -21,13 +22,20 @@ interface InputOverrides {
   filename?: string | null;
 }
 
+// Define Search Options structure
+interface SearchOptions {
+  webSearchEnabled?: boolean;
+  youtubeSearchEnabled?: boolean;
+}
+
 interface InputBarProps {
   input: string;
   setInput: (val: string) => void;
   handleSend: (
     text?: string,
     overrides?: InputOverrides,
-    attachments?: File[]
+    attachments?: File[],
+    searchOptions?: SearchOptions
   ) => void | Promise<void>;
   handleKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onAbortTyping?: () => void;
@@ -47,7 +55,15 @@ const InputBar: React.FC<InputBarProps> = ({
   const roleId = useMemoryStore((s) => s.role?.id ?? null);
   const projectId = useProjectStore((s) => s.projectId);
   const sessionReady = useChatStore((s) => s.sessionReady);
+  const provider = useModelStore((s) => s.provider);
   const waitingSession = !sessionReady;
+
+  // Search toggles only available in Debate Mode (boost)
+  const isDebateMode = provider === "boost";
+
+  // Search toggle state
+  const [isWebSearchEnabled, setIsWebSearchEnabled] = useState(false);
+  const [isYouTubeSearchEnabled, setIsYouTubeSearchEnabled] = useState(false);
 
   // Local composer state
   const [text, setText] = useState<string>(input ?? "");
@@ -82,7 +98,7 @@ const InputBar: React.FC<InputBarProps> = ({
     []
   );
 
-  // Common send action - now includes pending files
+  // Common send action - now includes pending files and search options
   const sendCurrent = useCallback(async () => {
     if (sendingRef.current) return;
     if (composingRef.current) return;
@@ -101,8 +117,25 @@ const InputBar: React.FC<InputBarProps> = ({
     setPendingFiles([]);
     requestAnimationFrame(() => autosize());
 
+    // Prepare search options
+    const searchOpts: SearchOptions = {
+      webSearchEnabled: isWebSearchEnabled,
+      youtubeSearchEnabled: isYouTubeSearchEnabled,
+    };
+
+    console.log("🔍 [InputBar] Search options:", searchOpts);
+    console.log("🔍 [InputBar] isWebSearchEnabled:", isWebSearchEnabled);
+    console.log(
+      "🔍 [InputBar] isYouTubeSearchEnabled:",
+      isYouTubeSearchEnabled
+    );
+
     try {
-      await handleSend(value, currentOverrides, filesToSend);
+      await handleSend(value, currentOverrides, filesToSend, searchOpts);
+
+      // Clear search toggles after sending
+      setIsWebSearchEnabled(false);
+      setIsYouTubeSearchEnabled(false);
     } finally {
       sendingRef.current = false;
       setIsSending(false);
@@ -117,6 +150,8 @@ const InputBar: React.FC<InputBarProps> = ({
     currentOverrides,
     setInput,
     autosize,
+    isWebSearchEnabled,
+    isYouTubeSearchEnabled,
   ]);
 
   // File drop - now adds to pending files instead of uploading immediately
@@ -264,6 +299,45 @@ const InputBar: React.FC<InputBarProps> = ({
 
           {/* Actions - right aligned */}
           <div className="flex items-center gap-2 ml-auto">
+            {/* Search Toggles - Only visible in Debate Mode */}
+            {isDebateMode && (
+              <div className="flex items-center gap-1">
+                {/* Web Search Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setIsWebSearchEnabled((prev) => !prev)}
+                  className={`p-1.5 rounded-lg transition-colors text-xl leading-none ${
+                    isWebSearchEnabled
+                      ? "text-blue-500 bg-blue-500/20 hover:bg-blue-500/30"
+                      : "text-text-secondary hover:bg-surface hover:text-primary"
+                  }`}
+                  title="Toggle Web Search (🌐)"
+                  aria-label="Toggle Web Search"
+                  disabled={waitingSession || isSending}
+                  aria-disabled={waitingSession || isSending}
+                >
+                  🌐
+                </button>
+
+                {/* YouTube Search Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setIsYouTubeSearchEnabled((prev) => !prev)}
+                  className={`p-1.5 rounded-lg transition-colors text-xl leading-none ${
+                    isYouTubeSearchEnabled
+                      ? "text-red-500 bg-red-500/20 hover:bg-red-500/30"
+                      : "text-text-secondary hover:bg-surface hover:text-primary"
+                  }`}
+                  title="Toggle YouTube Search (▶️)"
+                  aria-label="Toggle YouTube Search"
+                  disabled={waitingSession || isSending}
+                  aria-disabled={waitingSession || isSending}
+                >
+                  ▶️
+                </button>
+              </div>
+            )}
+
             {/* Attach button */}
             <button
               type="button"
