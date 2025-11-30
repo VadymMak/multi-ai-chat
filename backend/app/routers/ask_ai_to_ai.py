@@ -24,6 +24,9 @@ from app.config.settings import settings
 from app.deps import get_current_active_user
 from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
 
+# В начале файла, после существующих imports добавить:
+from app.config.debate_prompts import get_round_config, get_mode_info
+
 router = APIRouter(tags=["Chat"])
 
 # ---- Tunables (overridable via settings) ----
@@ -347,6 +350,9 @@ class AiToAiRequest(BaseModel):
     project_id: Union[int, str]
     chat_session_id: Optional[str] = None
 
+    # NEW: Mode selection
+    mode: Literal["debate", "project-builder"] = "debate"
+
     # Optional explicit rendering overrides
     output_mode: Optional[Literal["code", "doc", "plain"]] = None
     language: Optional[str] = None
@@ -461,133 +467,148 @@ def _extract_terms_from_topic(topic: str) -> List[str]:
     toks = re.findall(r"[A-Za-z0-9_]+", topic or "")
     return [t for t in toks if len(t) >= 3][:8]
 
-# -------------------- Main route --------------------
-@router.post("/ask-ai-to-ai")
-async def ask_ai_to_ai_route(
-    data: AiToAiRequest, 
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
-):
+# -------------------- Project Builder Mode Handler --------------------
+async def _handle_project_builder_mode(
+    data: AiToAiRequest,
+    memory: MemoryManager,
+    db: Session,
+    history: List[Dict[str, str]],
+    role_id: int,
+    project_id: str,
+    chat_session_id: str,
+    openai_key: str,
+    anthropic_key: str,
+    round1_config: dict,
+    round2_config: dict,
+    final_config: dict,
+    canon_digest: str,
+    canon_items_struct: List[Dict[str, Any]],
+) -> JSONResponse:
     """
-    Boost mode: one model answers, Claude reviews, then a final summary is produced.
-    Returns:
-    {
-      "messages": [
-        {"sender": "<starter>", "answer": "..."},
-        {"sender": "anthropic", "answer": "<review>"}
-      ],
-      "summary": "<final_reply>",
-      "youtube": [...],
-      "web": [...],
-      "chat_session_id": "<id>",
-      "canon"?: { "hits": int, "items": [...] }   # optional
+    Project Builder mode: Generate structure → Review → Merge final
+    """
+    
+    # ---- Round 1: Generate Structure (GPT-4o) ----
+    print(f"🏗️ Round 1: Generating project structure...")
+    
+    generator_prompt = round1_config["prompt_template"].format(topic=data.topic)
+    
+    generator_messages = history + [{"role": "user", "content": generator_prompt}]
+    
+    try:
+        first_reply_raw = await run_in_threadpool(
+            ask_openai, 
+            generator_messages, 
+            api_key=openai_key
+        )
+    except Exception as e:
+        print(f"❌ Generator error: {e}")
+        raise HTTPException(status_code=502, detail="Project structure generation failed")
+    
+    first_reply = first_reply_raw.strip()
+    memory.store_chat_message(project_id, role_id, chat_session_id, "openai", first_reply, is_ai_to_ai=True)
+    memory.insert_audit_log(project_id, role_id, chat_session_id, "openai", "project_builder_generate", first_reply[:300])
+    
+    print(f"✅ Round 1 complete: {len(first_reply)} chars")
+
+    # ---- Round 2: Review & Enhance (Claude Sonnet) ----
+    print(f"🔍 Round 2: Reviewing structure...")
+    
+    reviewer_prompt = round2_config["prompt_template"].format(previous_solution=first_reply)
+    
+    try:
+        claude_review_raw = await claude_with_retry(
+            [{"role": "user", "content": reviewer_prompt}],
+            system="You are a thorough code reviewer. Be constructive and helpful.",
+            api_key=anthropic_key
+        )
+    except Exception as e:
+        print(f"❌ Reviewer error: {e}")
+        raise HTTPException(status_code=502, detail="Project structure review failed")
+    
+    claude_review = claude_review_raw.strip()
+    memory.store_chat_message(project_id, role_id, chat_session_id, "anthropic", claude_review, is_ai_to_ai=True)
+    memory.insert_audit_log(project_id, role_id, chat_session_id, "anthropic", "project_builder_review", claude_review[:300])
+    
+    print(f"✅ Round 2 complete: {len(claude_review)} chars")
+
+    # ---- Final: Merge (Claude Opus) ----
+    print(f"🎯 Final: Merging into final structure...")
+    
+    merger_prompt = final_config["prompt_template"].format(
+        topic=data.topic,
+        round1=first_reply,
+        round2=claude_review
+    )
+    
+    try:
+        final_reply_raw = await claude_with_retry(
+            [{"role": "user", "content": merger_prompt}],
+            system="You are a project architecture expert. Create the best possible final structure.",
+            api_key=anthropic_key
+        )
+    except Exception as e:
+        print(f"❌ Merger error: {e}")
+        raise HTTPException(status_code=502, detail="Final structure merge failed")
+    
+    final_reply = final_reply_raw.strip()
+    memory.store_chat_message(project_id, role_id, chat_session_id, "final", final_reply, is_ai_to_ai=True)
+    memory.insert_audit_log(project_id, role_id, chat_session_id, "anthropic", "project_builder_final", final_reply[:300])
+    
+    print(f"✅ Project Builder completed!")
+
+    # ---- Persist Memory ----
+    try:
+        transcript = (
+            history
+            + [{"role": "assistant", "content": first_reply}]
+            + [{"role": "assistant", "content": claude_review}]
+            + [{"role": "assistant", "content": final_reply}]
+        )
+        raw_text = "\n".join([f"{m['role']}: {m['content']}" for m in transcript])
+        summary = memory.summarize_messages([raw_text])
+        memory.store_memory(project_id, role_id, summary, raw_text, chat_session_id, is_ai_to_ai=True)
+    except Exception as e:
+        print(f"[Project Builder memory error] {e}")
+
+    resp: Dict[str, Any] = {
+        "mode": "project-builder",
+        "messages": [
+            {"sender": "openai", "answer": first_reply, "role": "generator"},
+            {"sender": "anthropic", "answer": claude_review, "role": "reviewer"},
+        ],
+        "summary": final_reply,
+        "chat_session_id": chat_session_id,
     }
+    
+    if canon_items_struct:
+        resp["canon"] = {"hits": len(canon_items_struct), "items": canon_items_struct}
+
+    return JSONResponse(content=resp)
+
+
+# -------------------- Debate Mode Handler --------------------
+async def _handle_debate_mode(
+    data: AiToAiRequest,
+    memory: MemoryManager,
+    db: Session,
+    history: List[Dict[str, str]],
+    role_id: int,
+    project_id: str,
+    chat_session_id: str,
+    openai_key: str,
+    anthropic_key: str,
+    yt_block: str,
+    yt_hits: List[Dict[str, Any]],
+    web_hits: List[Dict[str, Any]],
+    canon_digest: str,
+    canon_items_struct: List[Dict[str, Any]],
+) -> JSONResponse:
     """
-    memory = MemoryManager(db)
-    role_id = data.role
-    project_id = data.project_id
-    chat_session_id = _get_or_create_session_id(memory, role_id, project_id, data.chat_session_id)
-
-    # Get user API keys (required for non-superusers, fallback to .env for superusers)
-    openai_key = get_openai_key(current_user, db, required=True)
-    anthropic_key = get_anthropic_key(current_user, db, required=True)
-
-    print(
-        f"⚙️ Boost Mode: topic='{data.topic}' | starter={data.starter} | "
-        f"role={role_id} | project_id={project_id} | session={chat_session_id} | "
-        f"user_id={current_user.id} | using_user_keys={not current_user.is_superuser}"
-    )
-
-    # ---- History for context (trim) ----
-    messages_data = memory.retrieve_messages(
-        role_id=role_id,
-        project_id=project_id,
-        chat_session_id=chat_session_id,
-        limit=HISTORY_FETCH_LIMIT,
-        for_display=False,  # ← USE SUMMARIES FOR AI!
-    )
-    rows = messages_data.get("messages", [])
-    history = _rows_to_messages(rows)
-    history = _clip_by_tokens(memory, history, HISTORY_MAX_TOKENS)
-    if history:
-        print(f"🧩 Context included → {len(history)} turns")
-    else:
-        print("🧩 No prior turns available for boost session.")
-
-    # ---- Canonical Context (optional) ----
-    canon_digest = ""
-    canon_items_struct: List[Dict[str, Any]] = []
-    if ENABLE_CANON and hasattr(memory, "retrieve_context_digest"):
-        try:
-            query_terms = _extract_terms_from_topic(data.topic)
-            canon_digest, canon_items_struct = memory.retrieve_context_digest(
-                project_id=project_id,
-                role_id=role_id,
-                query_terms=query_terms,
-                top_k=CANON_TOPK,
-            )
-            try:
-                memory.insert_audit_log(
-                    project_id, role_id, chat_session_id, "internal", "canon_fetch",
-                    f"hits={len(canon_items_struct)} terms={','.join(query_terms)[:120]}"
-                )
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[Canon digest error] {e}")
-
-    # ---- Context gathering (safe, shape-agnostic) ----
-    # Only perform searches if explicitly requested via toggles
-    yt_block: str = "📋 YOUTUBE: None."
-    yt_hits: List[Dict[str, Any]] = []
+    Standard Debate mode: Starter replies → Claude reviews → Final summary
+    This is the ORIGINAL logic, moved to a separate function.
+    """
     
-    if data.youtube_search:
-        try:
-            raw_yt = await run_in_threadpool(
-                lambda: perform_youtube_search(
-                    data.topic,
-                    max_results=5,
-                    mem=memory,
-                    role_id=role_id,
-                    project_id=project_id,
-                )
-            )
-            if isinstance(raw_yt, tuple) and len(raw_yt) == 2:
-                raw_block, raw_items = raw_yt
-                yt_hits = normalize_youtube_items(raw_items)
-                yt_block = str(raw_block or "").strip() or build_youtube_block(yt_hits)
-            elif isinstance(raw_yt, list):
-                yt_hits = normalize_youtube_items(raw_yt)
-                yt_block = build_youtube_block(yt_hits)
-            elif isinstance(raw_yt, dict):
-                items = raw_yt.get("items") or raw_yt.get("results") or []
-                yt_hits = normalize_youtube_items(items)
-                yt_block = str(raw_yt.get("block") or "").strip() or build_youtube_block(yt_hits)
-            elif isinstance(raw_yt, str):
-                yt_block = raw_yt
-            else:
-                yt_block = "📋 YOUTUBE: None."
-        except Exception as e:
-            yt_block, yt_hits = "📋 YOUTUBE: None.", []
-            print(f"[YouTube Error] {e}")
-    else:
-        print(f"[YouTube Search] Skipped (youtube_search={data.youtube_search})")
-    
-    web_hits: List[Dict[str, Any]] = []
-    if data.web_search:
-        try:
-            raw_web = await run_in_threadpool(perform_google_search, data.topic)
-            web_hits = normalize_web_items(raw_web if isinstance(raw_web, (list, tuple)) else raw_web or [])
-        except Exception as e:
-            web_hits = []
-            print(f"[Web Search Error] {e}")
-    else:
-        print(f"[Web Search] Skipped (web_search={data.web_search})")
-
-    # ---- Write the synthetic "user" message that seeds the debate ----
-    # Store only the topic for user message (clean display in UI)
-    memory.store_chat_message(project_id, role_id, chat_session_id, "user", data.topic, is_ai_to_ai=True)
-
     # Keep full message with YouTube context for AI processing
     user_message = f"{data.topic}\n\n{yt_block}"
 
@@ -644,7 +665,6 @@ async def ask_ai_to_ai_route(
         raise HTTPException(status_code=502, detail="Starter model failed")
 
     def _post_process(answer: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-        # Enforce presentation overrides
         if force_code:
             answer2 = _enforce_code_block(answer or "", "text")
             render_meta = {"type": "code", "language": "text", "filename": _suggest_filename("text")}
@@ -654,7 +674,6 @@ async def ask_ai_to_ai_route(
                 answer = _CODE_FENCE_RE.sub(lambda m: (m.group(2) or "").strip(), answer or "")
             return answer, None
 
-        # Normal post-process
         render_meta: Optional[Dict[str, Any]] = None
         if mode == "code":
             answer2 = _enforce_code_block(answer, lang)
@@ -664,7 +683,6 @@ async def ask_ai_to_ai_route(
             answer2 = _ensure_markdown(answer)
             render_meta = {"type": "markdown"}
             return answer2, render_meta
-        # plain
         if _CODE_FENCE_RE.search(answer or ""):
             answer = _CODE_FENCE_RE.sub(lambda m: (m.group(2) or "").strip(), answer or "")
         if _looks_like_markdown_list(answer) or answer.lstrip().startswith("# "):
@@ -676,13 +694,11 @@ async def ask_ai_to_ai_route(
     memory.store_chat_message(project_id, role_id, chat_session_id, starter_sender, first_reply, is_ai_to_ai=True)
     memory.insert_audit_log(project_id, role_id, chat_session_id, starter_sender, "boost_reply", first_reply[:300])
 
-    # ---- NEW: extract YouTube links from the starter reply & override/merge ----
+    # ---- Extract YouTube links from the starter reply ----
     extracted_from_text = normalize_youtube_items(_extract_youtube_from_text(first_reply))
     if extracted_from_text and len(extracted_from_text) >= 3:
-        # Prefer exactly what the model recommended
         yt_hits_final = extracted_from_text[:5]
     elif extracted_from_text:
-        # Merge with search results (dedupe)
         yt_hits_final = _merge_yt(yt_hits, extracted_from_text, cap=8)
     else:
         yt_hits_final = yt_hits
@@ -695,7 +711,7 @@ async def ask_ai_to_ai_route(
             "content": (
                 f'Here is the assistant\'s reply to the topic "{data.topic}":\n\n'
                 f"{first_reply}\n\n"
-                "Please review and reflect on this reply. Highlight what’s good, what could be improved, "
+                "Please review and reflect on this reply. Highlight what's good, what could be improved, "
                 "and what additional context might help the user. Be objective and constructive."
             ),
         },
@@ -725,7 +741,6 @@ async def ask_ai_to_ai_route(
         print(f"[Project lookup error] {e}")
         project_structure = ""
 
-    # Only prepare context lists if searches were actually performed
     youtube_context: List[str] = []
     if data.youtube_search and yt_hits_final:
         for v in yt_hits_final:
@@ -742,7 +757,6 @@ async def ask_ai_to_ai_route(
             if t or s:
                 web_context.append(f"{t} - {s}".strip(" -"))
 
-    # Build dynamic system prompt based on what sources are available
     system_prompt_parts = [
         "You are a thoughtful assistant synthesizing responses from two AI models."
     ]
@@ -799,7 +813,6 @@ async def ask_ai_to_ai_route(
 
     final_reply, _final_render = _post_process(final_reply_raw)
 
-    # ✅ Append sources as markdown links to final reply
     sources_markdown = _format_sources_as_markdown(yt_hits_final, web_hits)
     if sources_markdown:
         final_reply = final_reply.rstrip() + sources_markdown
@@ -807,7 +820,7 @@ async def ask_ai_to_ai_route(
     memory.store_chat_message(project_id, role_id, chat_session_id, "final", final_reply, is_ai_to_ai=True)
     memory.insert_audit_log(project_id, role_id, chat_session_id, "anthropic", "boost_summary", final_reply[:300])
 
-    # ---- Persist Boost Memory ----
+    # ---- Persist Memory ----
     try:
         transcript = (
             history
@@ -821,15 +834,16 @@ async def ask_ai_to_ai_route(
     except Exception as e:
         print(f"[Boost memory summary error] {e}")
 
-    print("✅ Boost Mode completed.")
+    print("✅ Debate Mode completed.")
 
     resp: Dict[str, Any] = {
+        "mode": "debate",
         "messages": [
             {"sender": starter_sender, "answer": first_reply},
             {"sender": "anthropic", "answer": claude_review},
         ],
         "summary": final_reply,
-        "youtube": yt_hits_final,   # <<==== use the extracted/merged list
+        "youtube": yt_hits_final,
         "web": web_hits,
         "chat_session_id": chat_session_id,
     }
@@ -837,3 +851,148 @@ async def ask_ai_to_ai_route(
         resp["canon"] = {"hits": len(canon_items_struct), "items": canon_items_struct}
 
     return JSONResponse(content=resp)
+
+# -------------------- Main route --------------------
+@router.post("/ask-ai-to-ai")
+async def ask_ai_to_ai_route(
+    data: AiToAiRequest, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Boost mode: one model answers, another reviews, then a final summary is produced.
+    Supports modes: "debate" (default) and "project-builder"
+    """
+    memory = MemoryManager(db)
+    role_id = data.role
+    project_id = data.project_id
+    chat_session_id = _get_or_create_session_id(memory, role_id, project_id, data.chat_session_id)
+
+    # Get user API keys
+    openai_key = get_openai_key(current_user, db, required=True)
+    anthropic_key = get_anthropic_key(current_user, db, required=True)
+
+    # Get mode configuration
+    mode_info = get_mode_info(data.mode)
+    round1_config = get_round_config(1, data.mode)
+    round2_config = get_round_config(2, data.mode)
+    final_config = get_round_config("final", data.mode)
+
+    print(
+        f"⚙️ {mode_info['name']}: topic='{data.topic[:80]}...' | "
+        f"role={role_id} | project_id={project_id} | session={chat_session_id} | "
+        f"user_id={current_user.id}"
+    )
+
+    # ---- History for context (trim) ----
+    messages_data = memory.retrieve_messages(
+        role_id=role_id,
+        project_id=project_id,
+        chat_session_id=chat_session_id,
+        limit=HISTORY_FETCH_LIMIT,
+        for_display=False,
+    )
+    rows = messages_data.get("messages", [])
+    history = _rows_to_messages(rows)
+    history = _clip_by_tokens(memory, history, HISTORY_MAX_TOKENS)
+    if history:
+        print(f"🧩 Context included → {len(history)} turns")
+
+    # ---- Canonical Context (optional) ----
+    canon_digest = ""
+    canon_items_struct: List[Dict[str, Any]] = []
+    if ENABLE_CANON and hasattr(memory, "retrieve_context_digest"):
+        try:
+            query_terms = _extract_terms_from_topic(data.topic)
+            canon_digest, canon_items_struct = memory.retrieve_context_digest(
+                project_id=project_id,
+                role_id=role_id,
+                query_terms=query_terms,
+                top_k=CANON_TOPK,
+            )
+        except Exception as e:
+            print(f"[Canon digest error] {e}")
+
+    # ---- Context gathering (YouTube & Web) - only for debate mode ----
+    yt_block: str = "📋 YOUTUBE: None."
+    yt_hits: List[Dict[str, Any]] = []
+    web_hits: List[Dict[str, Any]] = []
+    
+    # Skip search for project-builder mode
+    if data.mode == "debate":
+        if data.youtube_search:
+            try:
+                raw_yt = await run_in_threadpool(
+                    lambda: perform_youtube_search(
+                        data.topic,
+                        max_results=5,
+                        mem=memory,
+                        role_id=role_id,
+                        project_id=project_id,
+                    )
+                )
+                if isinstance(raw_yt, tuple) and len(raw_yt) == 2:
+                    raw_block, raw_items = raw_yt
+                    yt_hits = normalize_youtube_items(raw_items)
+                    yt_block = str(raw_block or "").strip() or build_youtube_block(yt_hits)
+                elif isinstance(raw_yt, list):
+                    yt_hits = normalize_youtube_items(raw_yt)
+                    yt_block = build_youtube_block(yt_hits)
+                elif isinstance(raw_yt, dict):
+                    items = raw_yt.get("items") or raw_yt.get("results") or []
+                    yt_hits = normalize_youtube_items(items)
+                    yt_block = str(raw_yt.get("block") or "").strip() or build_youtube_block(yt_hits)
+                elif isinstance(raw_yt, str):
+                    yt_block = raw_yt
+            except Exception as e:
+                print(f"[YouTube Error] {e}")
+
+        if data.web_search:
+            try:
+                raw_web = await run_in_threadpool(perform_google_search, data.topic)
+                web_hits = normalize_web_items(raw_web if isinstance(raw_web, (list, tuple)) else raw_web or [])
+            except Exception as e:
+                print(f"[Web Search Error] {e}")
+
+    # ---- Store user message ----
+    memory.store_chat_message(project_id, role_id, chat_session_id, "user", data.topic, is_ai_to_ai=True)
+
+    # ================== MODE-SPECIFIC LOGIC ==================
+    
+    if data.mode == "project-builder":
+        # ---- PROJECT BUILDER MODE ----
+        return await _handle_project_builder_mode(
+            data=data,
+            memory=memory,
+            db=db,
+            history=history,
+            role_id=role_id,
+            project_id=project_id,
+            chat_session_id=chat_session_id,
+            openai_key=openai_key,
+            anthropic_key=anthropic_key,
+            round1_config=round1_config,
+            round2_config=round2_config,
+            final_config=final_config,
+            canon_digest=canon_digest,
+            canon_items_struct=canon_items_struct,
+        )
+    
+    else:
+        # ---- STANDARD DEBATE MODE ----
+        return await _handle_debate_mode(
+            data=data,
+            memory=memory,
+            db=db,
+            history=history,
+            role_id=role_id,
+            project_id=project_id,
+            chat_session_id=chat_session_id,
+            openai_key=openai_key,
+            anthropic_key=anthropic_key,
+            yt_block=yt_block,
+            yt_hits=yt_hits,
+            web_hits=web_hits,
+            canon_digest=canon_digest,
+            canon_items_struct=canon_items_struct,
+        )

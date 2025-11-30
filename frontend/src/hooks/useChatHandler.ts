@@ -37,6 +37,7 @@ type SendOverrides = {
 type SearchOptions = {
   webSearchEnabled?: boolean;
   youtubeSearchEnabled?: boolean;
+  mode?: "debate" | "project-builder"; // ← NEW
 };
 
 // ============================================================================
@@ -572,6 +573,7 @@ export const useChatHandler = ({
               "🔍 [useChatHandler] youtubeSearchEnabled:",
               searchOptions?.youtubeSearchEnabled
             );
+            console.log("🔍 [useChatHandler] mode:", searchOptions?.mode);
 
             const result = await sendAiToAiMessage(
               messageToSend,
@@ -580,7 +582,8 @@ export const useChatHandler = ({
               projectId,
               initialSessionId,
               searchOptions?.webSearchEnabled,
-              searchOptions?.youtubeSearchEnabled
+              searchOptions?.youtubeSearchEnabled,
+              searchOptions?.mode ?? "debate" // ← NEW
             );
 
             result.messages?.forEach((msg, i) => {

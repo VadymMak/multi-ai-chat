@@ -25,6 +25,11 @@ const TEMPLATES = [
     description:
       "You are a creative assistant. You help brainstorm ideas, develop concepts, and think outside the box. You encourage innovative thinking and creative problem-solving.",
   },
+  {
+    name: "Project Builder",
+    description:
+      "You are a project structure generator. You help create complete project structures with all necessary files, configurations, and dependencies. You generate code step-by-step, file by file.",
+  },
 ];
 
 const AssistantsTab: React.FC = () => {

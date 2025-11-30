@@ -471,7 +471,8 @@ export const sendAiToAiMessage = async (
   projectId: string | number,
   chatSessionId?: string,
   webSearch?: boolean,
-  youtubeSearch?: boolean
+  youtubeSearch?: boolean,
+  mode: "debate" | "project-builder" = "debate" // ← NEW
 ): Promise<AiToAiResponse> => {
   const projectIdNum = toProjectIdNumber(projectId);
 
@@ -493,12 +494,14 @@ export const sendAiToAiMessage = async (
     role: String(roleId),
     project_id: String(projectIdNum),
     chat_session_id: finalSessionId ?? "",
+    mode, // ← NEW
     ...(webSearch !== undefined ? { web_search: webSearch } : {}),
     ...(youtubeSearch !== undefined ? { youtube_search: youtubeSearch } : {}),
   };
 
   console.log("🔍 [aiApi] webSearch param:", webSearch);
   console.log("🔍 [aiApi] youtubeSearch param:", youtubeSearch);
+  console.log("🔍 [aiApi] mode param:", mode); // ← NEW log
   console.log("🔍 [aiApi] Final payload:", payload);
 
   try {
@@ -758,4 +761,34 @@ export const getLastSession = async () => {
     );
     throw err;
   }
+};
+// ===================================================================
+//                    PROJECT BUILDER API
+// ===================================================================
+
+export interface GenerateFileRequest {
+  project_structure: string;
+  file_number: number;
+  file_path: string;
+  project_name?: string;
+  tech_stack?: string;
+}
+
+export interface GenerateFileResponse {
+  file_number: number;
+  file_path: string;
+  code: string;
+  language: string;
+  tokens_used: number;
+}
+
+/** POST /api/project-builder/generate-file */
+export const generateProjectFile = async (
+  request: GenerateFileRequest
+): Promise<GenerateFileResponse> => {
+  const res = await api.post<GenerateFileResponse>(
+    "/project-builder/generate-file",
+    request
+  );
+  return res.data;
 };

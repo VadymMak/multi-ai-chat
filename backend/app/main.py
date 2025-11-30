@@ -186,6 +186,7 @@ from app.routers import (  # noqa: E402
     auth,
     api_keys,
     admin,
+    project_builder
 )
 
 # Optional routers (guarded so startup doesn't crash if missing)
@@ -222,6 +223,7 @@ app.include_router(audit.router, prefix="/api")
 app.include_router(roles.router, prefix="/api")
 app.include_router(balance.router, prefix="/api")
 app.include_router(debate.router, prefix="/api")
+app.include_router(project_builder.router, prefix="/api")
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402

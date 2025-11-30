@@ -26,6 +26,7 @@ interface InputOverrides {
 interface SearchOptions {
   webSearchEnabled?: boolean;
   youtubeSearchEnabled?: boolean;
+  mode?: "debate" | "project-builder";
 }
 
 interface InputBarProps {
@@ -54,6 +55,15 @@ const InputBar: React.FC<InputBarProps> = ({
 }) => {
   const roleId = useMemoryStore((s) => s.role?.id ?? null);
   const projectId = useProjectStore((s) => s.projectId);
+  // ✅ ADD THESE LINES:
+  const currentProject = useProjectStore((s) => {
+    if (!s.projectId) return null;
+    return s.allProjects.find((p) => p.id === s.projectId) ?? null;
+  });
+  const isProjectBuilderMode = currentProject?.assistant?.name
+    ?.toLowerCase()
+    .includes("project builder");
+
   const sessionReady = useChatStore((s) => s.sessionReady);
   const provider = useModelStore((s) => s.provider);
   const waitingSession = !sessionReady;
@@ -121,7 +131,15 @@ const InputBar: React.FC<InputBarProps> = ({
     const searchOpts: SearchOptions = {
       webSearchEnabled: isWebSearchEnabled,
       youtubeSearchEnabled: isYouTubeSearchEnabled,
+      mode: isProjectBuilderMode ? "project-builder" : "debate",
     };
+
+    console.log(
+      "🔍 [InputBar] mode:",
+      searchOpts.mode,
+      "assistant:",
+      currentProject?.assistant?.name
+    );
 
     try {
       await handleSend(value, currentOverrides, filesToSend, searchOpts);
@@ -145,6 +163,8 @@ const InputBar: React.FC<InputBarProps> = ({
     autosize,
     isWebSearchEnabled,
     isYouTubeSearchEnabled,
+    isProjectBuilderMode,
+    currentProject,
   ]);
 
   // File drop - now adds to pending files instead of uploading immediately

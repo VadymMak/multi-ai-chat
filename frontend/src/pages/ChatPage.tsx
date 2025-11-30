@@ -297,6 +297,7 @@ const ChatPage: React.FC = () => {
       searchOptions?: {
         webSearchEnabled?: boolean;
         youtubeSearchEnabled?: boolean;
+        mode?: "debate" | "project-builder"; // ← NEW
       }
     ) => {
       const raw = (text ?? input).trim();
@@ -456,13 +457,14 @@ ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
       try {
         if (provider === "boost") {
           const result = await sendAiToAiMessage(
-            messageToSend, // ВАЖНО: отправляем messageToSend с контекстом
+            messageToSend,
             "openai",
             roleId,
             projectId,
             sid,
             searchOptions?.webSearchEnabled,
-            searchOptions?.youtubeSearchEnabled
+            searchOptions?.youtubeSearchEnabled,
+            searchOptions?.mode ?? "debate" // ← NEW
           );
 
           // ... остальной код boost mode без изменений ...
