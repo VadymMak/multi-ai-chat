@@ -414,6 +414,24 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
             { git_url: gitUrl }
           );
 
+          // Update cache: set git_url
+          const state = get();
+          state.allProjects = state.allProjects.map((p) =>
+            p.id === projectId
+              ? { ...p, git_url: res.data.git_url, git_sync_status: null }
+              : p
+          );
+
+          // Update projectsByRole cache
+          Object.keys(state.projectsByRole).forEach((roleId) => {
+            const role = parseInt(roleId);
+            state.projectsByRole[role] = state.projectsByRole[role].map((p) =>
+              p.id === projectId
+                ? { ...p, git_url: res.data.git_url, git_sync_status: null }
+                : p
+            );
+          });
+
           if (process.env.NODE_ENV !== "production") {
             console.debug(
               `✅ [projectStore] Git linked to project ${projectId}:`,
@@ -437,6 +455,34 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
             `/projects/${projectId}/sync-git`
           );
 
+          // Update cache with sync status
+          const state = get();
+          state.allProjects = state.allProjects.map((p) =>
+            p.id === projectId
+              ? {
+                  ...p,
+                  git_sync_status: "synced",
+                  git_updated_at: res.data.synced_at,
+                  git_files_count: res.data.files_count,
+                }
+              : p
+          );
+
+          // Update projectsByRole cache
+          Object.keys(state.projectsByRole).forEach((roleId) => {
+            const role = parseInt(roleId);
+            state.projectsByRole[role] = state.projectsByRole[role].map((p) =>
+              p.id === projectId
+                ? {
+                    ...p,
+                    git_sync_status: "synced",
+                    git_updated_at: res.data.synced_at,
+                    git_files_count: res.data.files_count,
+                  }
+                : p
+            );
+          });
+
           if (process.env.NODE_ENV !== "production") {
             console.debug(
               `✅ [projectStore] Git synced for project ${projectId}:`,
@@ -458,6 +504,37 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
       unlinkGitRepository: async (projectId: number) => {
         try {
           await api.delete(`/projects/${projectId}/git`);
+
+          // ⬇️ ДОБАВЬ ЭТИ СТРОКИ ЗДЕСЬ (после delete, перед if)
+          // Update cache: remove git fields
+          const state = get();
+          state.allProjects = state.allProjects.map((p) =>
+            p.id === projectId
+              ? {
+                  ...p,
+                  git_url: null,
+                  git_sync_status: null,
+                  git_updated_at: null,
+                  git_files_count: null,
+                }
+              : p
+          );
+
+          // Update projectsByRole cache
+          Object.keys(state.projectsByRole).forEach((roleId) => {
+            const role = parseInt(roleId);
+            state.projectsByRole[role] = state.projectsByRole[role].map((p) =>
+              p.id === projectId
+                ? {
+                    ...p,
+                    git_url: null,
+                    git_sync_status: null,
+                    git_updated_at: null,
+                    git_files_count: null,
+                  }
+                : p
+            );
+          });
 
           if (process.env.NODE_ENV !== "production") {
             console.debug(
