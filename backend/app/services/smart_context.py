@@ -83,6 +83,7 @@ def build_smart_context(
         print(f"⚠️ [Smart Context] pgvector search failed: {e}")
     
     # 2. Recent 5 messages (EXISTING!)
+    # 2. Recent 5 messages (EXISTING!)
     try:
         recent_data = memory.retrieve_messages(
             project_id=str(project_id),
@@ -91,7 +92,9 @@ def build_smart_context(
             chat_session_id=session_id,
             for_display=False 
         )
-        recent_messages = recent_data.get("messages", [])[-5]
+        # ✅ FIX: Handle list slicing properly
+        all_messages = recent_data.get("messages", [])
+        recent_messages = all_messages[-5:] if len(all_messages) > 5 else all_messages
         recent_text = format_recent(recent_messages)
         parts.append(f"📌 RECENT CONVERSATION:\n{recent_text}")
         print(f"✅ [Smart Context] Added {len(recent_messages)} recent messages")

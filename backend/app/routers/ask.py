@@ -601,7 +601,7 @@ async def ask_route(
         )
         
         # Smart Context as system message
-        hist_now = [{"role": "system", "content": smart_context_text}]
+        hist_now = []
         print(f"✅ [Smart Context] Context ready (~4K tokens)")
 
         # 3) YouTube intent (force plain output when present)
@@ -666,7 +666,7 @@ async def ask_route(
             db=db,
             project_id=project_id,
             role_id=role_id,
-            system_prompt=base_system + render_policy,
+            system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
             youtube_context=youtube_context_blocks,
             web_context=[],
             starter_reply="",
@@ -876,7 +876,7 @@ async def ask_stream_route(
             )
             
             # Smart Context as system message
-            hist_now = [{"role": "system", "content": smart_context_text}]
+            hist_now = []
             print(f"✅ [Smart Context] Context ready for streaming (~4K tokens)")
 
             # 3) Build prompt (same as /ask)
@@ -919,7 +919,7 @@ async def ask_stream_route(
                 db=db,
                 project_id=project_id,
                 role_id=role_id,
-                system_prompt=base_system + render_policy,
+                system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
                 youtube_context=[],
                 web_context=[],
                 starter_reply="",
