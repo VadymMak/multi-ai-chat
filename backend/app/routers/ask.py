@@ -664,7 +664,7 @@ async def ask_route(
 
         full_prompt = generate_prompt_from_db(
             db=db,
-            project_id=project_id,
+            project_id=None,
             role_id=role_id,
             system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
             youtube_context=youtube_context_blocks,
@@ -917,7 +917,7 @@ async def ask_stream_route(
 
             full_prompt = generate_prompt_from_db(
                 db=db,
-                project_id=project_id,
+                project_id=None,
                 role_id=role_id,
                 system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
                 youtube_context=[],
