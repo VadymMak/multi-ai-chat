@@ -1,4 +1,4 @@
-// src/types/project.ts
+// src/types/projects.ts
 export interface ProjectOption {
   id: number;
   name: string;
@@ -19,6 +19,11 @@ export interface Project {
   assistant_id?: number;
   created_at?: string;
   updated_at?: string;
+
+  // ✅ Git Integration fields (Phase 1)
+  git_url?: string | null;
+  git_updated_at?: string | null;
+  git_sync_status?: "syncing" | "synced" | "error" | null;
 }
 
 export interface ProjectCreate {
@@ -30,4 +35,24 @@ export interface ProjectCreate {
 export interface ProjectUpdate {
   name?: string;
   description?: string;
+}
+
+// ✅ Git Integration API types
+export interface GitLinkRequest {
+  git_url: string;
+}
+
+export interface GitLinkResponse {
+  success: boolean;
+  git_url: string;
+  normalized: boolean;
+  message?: string;
+}
+
+export interface GitSyncResponse {
+  success: boolean;
+  files_count: number;
+  synced_at: string;
+  files_preview?: Array<{ path: string }>;
+  message?: string;
 }

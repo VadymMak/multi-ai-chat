@@ -1,11 +1,19 @@
 // File: src/features/aiConversation/ProjectSelector.tsx
-import React, { useEffect, useCallback, useRef, useMemo } from "react";
-import { Folder, Plus } from "lucide-react";
+import React, {
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  useState,
+} from "react";
+import { Folder, Plus, MoreVertical, Link2 } from "lucide-react";
 import { useProjectStore } from "../../store/projectStore";
 import { useMemoryStore } from "../../store/memoryStore";
 import { runSessionFlow } from "../../controllers/runSessionFlow";
 import { toast } from "../../store/toastStore";
 import { useChatStore } from "@/store/chatStore";
+import ProjectContextMenu from "../../components/Settings/ProjectContextMenu";
+import ProjectSettingsModal from "../../components/Settings/ProjectSettingsModal";
 
 interface ProjectSelectorProps {
   onOpenSettings?: () => void;
@@ -22,11 +30,26 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
     (state) => state.forceRefreshProjects
   );
 
+  const deleteProject = useProjectStore((state) => state.deleteProject); // ❌ УДАЛИ ЭТУ СТРОКУ
+
   const roleId = useMemoryStore(
     useCallback((s) => (typeof s.role?.id === "number" ? s.role!.id : null), [])
   );
   const setRole = useMemoryStore((state) => state.setRole);
   const isManualSwitchRef = useRef(false);
+  // ✅ Context Menu State
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [contextMenuAnchor, setContextMenuAnchor] =
+    useState<HTMLElement | null>(null);
+  const [selectedProjectForMenu, setSelectedProjectForMenu] = useState<
+    number | null
+  >(null);
+
+  // ✅ Settings Modal State
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [projectIdForSettings, setProjectIdForSettings] = useState<
+    number | null
+  >(null);
 
   // ✅ Memoize projects to prevent useEffect dependency warning
   const projects = useMemo(
@@ -125,6 +148,64 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
     }
   }, [roleId, projects, projectId, setProjectId, setRole]);
 
+  // ✅ Context Menu Handlers
+  const handleMoreClick = (e: React.MouseEvent, projectId: number) => {
+    e.stopPropagation();
+    setContextMenuAnchor(e.currentTarget as HTMLElement);
+    setSelectedProjectForMenu(projectId);
+    setContextMenuOpen(true);
+  };
+
+  const handleOpenProjectSettings = () => {
+    if (selectedProjectForMenu) {
+      setProjectIdForSettings(selectedProjectForMenu);
+      setSettingsModalOpen(true);
+    }
+  };
+
+  const handleRenameProject = () => {
+    // For now, just open settings modal (rename in General tab)
+    handleOpenProjectSettings();
+  };
+
+  const handleDuplicateProject = async () => {
+    if (!selectedProjectForMenu) return;
+    const project = projects.find((p) => p.id === selectedProjectForMenu);
+    if (!project) return;
+
+    // TODO: Implement duplicate logic
+    toast.info("Duplicate feature coming soon!");
+  };
+
+  const handleDeleteProject = async () => {
+    if (!selectedProjectForMenu) return;
+    const project = projects.find((p) => p.id === selectedProjectForMenu);
+    if (!project) return;
+
+    if (!confirm(`Are you sure you want to delete "${project.name}"?`)) {
+      return;
+    }
+
+    try {
+      await deleteProject(selectedProjectForMenu);
+      toast.success(`Project "${project.name}" deleted`);
+
+      if (roleId) {
+        await forceRefreshProjects(roleId);
+      }
+
+      // If deleted project was active, clear it
+      if (projectId === selectedProjectForMenu) {
+        setProjectId(null);
+      }
+
+      window.dispatchEvent(new Event("projectsUpdated"));
+    } catch (error) {
+      console.error("Failed to delete project:", error);
+      toast.error("Failed to delete project");
+    }
+  };
+
   // ────────────────────────────────────────────────────────────────────────────
   // UI
   // ────────────────────────────────────────────────────────────────────────────
@@ -156,57 +237,107 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
   }
 
   return (
-    <div className="space-y-2">
-      {projects.map((project) => {
-        const isActive = project.id === projectId;
-        return (
-          <button
-            key={project.id}
-            onClick={() => handleProjectSelect(project)}
-            className={`w-full text-left p-3 rounded-lg border transition-all ${
-              isActive
-                ? "bg-primary/10 border-primary shadow-sm"
-                : "bg-surface border-border hover:border-primary/50 hover:bg-surface/80"
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <Folder
-                size={14}
-                className={isActive ? "text-primary" : "text-text-secondary"}
-              />
-              <span
-                className={`text-sm font-medium ${
-                  isActive ? "text-primary" : "text-text-primary"
+    <>
+      <div className="space-y-2">
+        {projects.map((project) => {
+          const isActive = project.id === projectId;
+          const hasGit = !!project.git_url;
+
+          return (
+            <div key={project.id} className="relative group">
+              <button
+                onClick={() => handleProjectSelect(project)}
+                className={`w-full text-left p-3 rounded-lg border transition-all ${
+                  isActive
+                    ? "bg-primary/10 border-primary shadow-sm"
+                    : "bg-surface border-border hover:border-primary/50 hover:bg-surface/80"
                 }`}
               >
-                {project.name}
-              </span>
-            </div>
-            {project.assistant && (
-              <div className="flex items-center gap-2 text-xs text-text-secondary ml-5">
-                <span>🤖</span>
-                <span>{project.assistant.name}</span>
-              </div>
-            )}
-            {project.description && (
-              <div className="text-xs text-text-secondary mt-1 ml-5 line-clamp-1">
-                {project.description}
-              </div>
-            )}
-          </button>
-        );
-      })}
+                <div className="flex items-center gap-2 mb-1">
+                  <Folder
+                    size={14}
+                    className={
+                      isActive ? "text-primary" : "text-text-secondary"
+                    }
+                  />
+                  <span
+                    className={`text-sm font-medium flex-1 ${
+                      isActive ? "text-primary" : "text-text-primary"
+                    }`}
+                  >
+                    {project.name}
+                  </span>
 
-      {onOpenSettings && (
-        <button
-          onClick={onOpenSettings}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm bg-surface hover:bg-surface/80 text-primary rounded-lg border border-border hover:border-primary/50 transition-colors"
-        >
-          <Plus size={16} />
-          New Project
-        </button>
+                  {/* Git Badge */}
+                  {hasGit && (
+                    <span
+                      className="flex items-center gap-1 text-xs text-primary"
+                      title={`Linked to ${project.git_url}`}
+                    >
+                      <Link2 size={12} />
+                    </span>
+                  )}
+
+                  {/* More Button (shows on hover) */}
+                  <button
+                    onClick={(e) => handleMoreClick(e, project.id)}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-surface rounded transition-opacity"
+                    title="Project options"
+                  >
+                    <MoreVertical size={14} className="text-text-secondary" />
+                  </button>
+                </div>
+
+                {project.assistant && (
+                  <div className="flex items-center gap-2 text-xs text-text-secondary ml-5">
+                    <span>🤖</span>
+                    <span>{project.assistant.name}</span>
+                  </div>
+                )}
+                {project.description && (
+                  <div className="text-xs text-text-secondary mt-1 ml-5 line-clamp-1">
+                    {project.description}
+                  </div>
+                )}
+              </button>
+            </div>
+          );
+        })}
+
+        {onOpenSettings && (
+          <button
+            onClick={onOpenSettings}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm bg-surface hover:bg-surface/80 text-primary rounded-lg border border-border hover:border-primary/50 transition-colors"
+          >
+            <Plus size={16} />
+            New Project
+          </button>
+        )}
+      </div>
+
+      {/* Context Menu */}
+      <ProjectContextMenu
+        isOpen={contextMenuOpen}
+        onClose={() => setContextMenuOpen(false)}
+        onOpenSettings={handleOpenProjectSettings}
+        onRename={handleRenameProject}
+        onDuplicate={handleDuplicateProject}
+        onDelete={handleDeleteProject}
+        anchorEl={contextMenuAnchor}
+      />
+
+      {/* Project Settings Modal */}
+      {projectIdForSettings && (
+        <ProjectSettingsModal
+          isOpen={settingsModalOpen}
+          onClose={() => {
+            setSettingsModalOpen(false);
+            setProjectIdForSettings(null);
+          }}
+          projectId={projectIdForSettings}
+        />
       )}
-    </div>
+    </>
   );
 };
 

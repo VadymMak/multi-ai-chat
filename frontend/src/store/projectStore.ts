@@ -2,7 +2,12 @@
 import { create, StateCreator, StoreApi, UseBoundStore } from "zustand";
 import { persist, PersistOptions, createJSONStorage } from "zustand/middleware";
 import api from "../services/api";
-import type { Project } from "../types/projects";
+import type {
+  Project,
+  GitLinkRequest,
+  GitLinkResponse,
+  GitSyncResponse,
+} from "../types/projects";
 
 type ProjectId = number;
 
@@ -39,6 +44,12 @@ export interface ProjectStore {
     data: { name?: string; description?: string }
   ) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
+  linkGitRepository: (
+    projectId: number,
+    gitUrl: string
+  ) => Promise<GitLinkResponse>;
+  syncGitStructure: (projectId: number) => Promise<GitSyncResponse>;
+  unlinkGitRepository: (projectId: number) => Promise<void>;
 }
 
 type MyPersist = PersistOptions<ProjectStore, Partial<ProjectStore>>;
@@ -390,6 +401,72 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
         } catch (err) {
           console.error(
             `❌ [projectStore] Failed to delete project ${id}:`,
+            err
+          );
+          throw err;
+        }
+      },
+      // ✅ Git Integration methods (Phase 3)
+      linkGitRepository: async (projectId: number, gitUrl: string) => {
+        try {
+          const res = await api.patch<GitLinkResponse>(
+            `/projects/${projectId}/git`,
+            { git_url: gitUrl }
+          );
+
+          if (process.env.NODE_ENV !== "production") {
+            console.debug(
+              `✅ [projectStore] Git linked to project ${projectId}:`,
+              res.data.git_url
+            );
+          }
+
+          return res.data;
+        } catch (err) {
+          console.error(
+            `❌ [projectStore] Failed to link Git to project ${projectId}:`,
+            err
+          );
+          throw err;
+        }
+      },
+
+      syncGitStructure: async (projectId: number) => {
+        try {
+          const res = await api.post<GitSyncResponse>(
+            `/projects/${projectId}/sync-git`
+          );
+
+          if (process.env.NODE_ENV !== "production") {
+            console.debug(
+              `✅ [projectStore] Git synced for project ${projectId}:`,
+              res.data.files_count,
+              "files"
+            );
+          }
+
+          return res.data;
+        } catch (err) {
+          console.error(
+            `❌ [projectStore] Failed to sync Git for project ${projectId}:`,
+            err
+          );
+          throw err;
+        }
+      },
+
+      unlinkGitRepository: async (projectId: number) => {
+        try {
+          await api.delete(`/projects/${projectId}/git`);
+
+          if (process.env.NODE_ENV !== "production") {
+            console.debug(
+              `✅ [projectStore] Git unlinked from project ${projectId}`
+            );
+          }
+        } catch (err) {
+          console.error(
+            `❌ [projectStore] Failed to unlink Git from project ${projectId}:`,
             err
           );
           throw err;
