@@ -8,6 +8,7 @@ from typing import Literal, Optional, Union, List, Dict, Any, Tuple, Iterable
 from uuid import uuid4
 import asyncio
 import re
+import json
 
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
@@ -467,6 +468,125 @@ def _extract_terms_from_topic(topic: str) -> List[str]:
     toks = re.findall(r"[A-Za-z0-9_]+", topic or "")
     return [t for t in toks if len(t) >= 3][:8]
 
+def _build_smart_context_from_git(
+    project: Optional[Project],
+    memory: MemoryManager,
+    role_id: int,
+    project_id: str,
+    query: str,
+    max_tokens: int = 4000
+) -> str:
+    """
+    Build smart context using Git structure instead of full history.
+    
+    Returns:
+        Formatted context string with:
+        - Git file structure (~2K tokens)
+        - Recent messages (~500 tokens)
+        - Semantic search results (~800 tokens)
+        - Memory summaries (~700 tokens)
+    """
+    parts = []
+    
+    # 1. Git Structure (if available)
+    if project and project.git_url and project.project_structure:
+        try:
+            structure = json.loads(project.project_structure)
+            files = structure.get("files", [])
+            
+            if files:
+                git_info = f"""
+## 📁 Project Structure
+
+Repository: {project.git_url}
+Last synced: {project.git_updated_at or 'Never'}
+Files: {len(files)}
+
+### File List:
+"""
+                # List first 100 files to stay within token budget
+                for f in files[:100]:
+                    git_info += f"\n- {f.get('path', 'unknown')}"
+                
+                if len(files) > 100:
+                    git_info += f"\n... and {len(files) - 100} more files"
+                
+                parts.append(git_info)
+                print(f"✅ Git structure loaded: {len(files)} files")
+        except Exception as e:
+            print(f"⚠️ Failed to load Git structure: {e}")
+    
+    # 2. Recent messages (last 5 only)
+    try:
+        messages_data = memory.retrieve_messages(
+            role_id=role_id,
+            project_id=project_id,
+            limit=5,  # Only last 5!
+            for_display=False,
+        )
+        rows = messages_data.get("messages", [])
+        if rows:
+            recent = "\n\n## 💬 Recent Conversation:\n\n"
+            for r in rows[-5:]:
+                sender = r.get("sender", "unknown")
+                text = r.get("text", "")[:200]  # Max 200 chars per message
+                recent += f"**{sender}:** {text}\n"
+            parts.append(recent)
+            print(f"✅ Recent messages: {len(rows)} included")
+    except Exception as e:
+        print(f"⚠️ Failed to load recent messages: {e}")
+    
+    # 3. Semantic search (pgvector)
+    try:
+        if hasattr(memory, 'search_similar_memories'):
+            similar = memory.search_similar_memories(
+                query=query,
+                role_id=role_id,
+                project_id=project_id,
+                top_k=3
+            )
+            if similar:
+                semantic = "\n\n## 🔍 Relevant Past Context:\n\n"
+                for idx, item in enumerate(similar, 1):
+                    summary = item.get("summary", "")[:300]
+                    semantic += f"{idx}. {summary}\n"
+                parts.append(semantic)
+                print(f"✅ Semantic search: {len(similar)} results")
+    except Exception as e:
+        print(f"⚠️ Semantic search failed: {e}")
+    
+    # 4. Memory summaries
+    try:
+        summaries = memory.load_recent_summaries(
+            role_id=role_id,
+            project_id=project_id,
+            limit=3
+        )
+        if summaries:
+            summary_text = "\n\n## 📝 Previous Summaries:\n\n"
+            for idx, s in enumerate(summaries, 1):
+                summary_text += f"{idx}. {s[:300]}\n"
+            parts.append(summary_text)
+            print(f"✅ Summaries: {len(summaries)} included")
+    except Exception as e:
+        print(f"⚠️ Failed to load summaries: {e}")
+    
+    context = "\n".join(parts)
+    
+    # Token check
+    try:
+        token_count = memory.count_tokens(context)
+        print(f"📊 Smart context size: {token_count} tokens (target: {max_tokens})")
+        
+        if token_count > max_tokens:
+            print(f"⚠️ Context too large, truncating...")
+            # Simple truncation - keep first 80%
+            context = context[:int(len(context) * 0.8)]
+    except Exception as e:
+        print(f"⚠️ Token counting failed: {e}")
+    
+    return context
+
 # -------------------- Project Builder Mode Handler --------------------
 async def _handle_project_builder_mode(
     data: AiToAiRequest,
@@ -603,6 +723,7 @@ async def _handle_debate_mode(
     web_hits: List[Dict[str, Any]],
     canon_digest: str,
     canon_items_struct: List[Dict[str, Any]],
+    project: Optional[Project] = None,  # ← ДОБАВЬ ЭТУ СТРОКУ
 ) -> JSONResponse:
     """
     Standard Debate mode: Starter replies → Claude reviews → Final summary
@@ -733,13 +854,7 @@ async def _handle_debate_mode(
         print(f"[Memory summaries error] {e}")
         memory_summaries = []
 
-    try:
-        proj_id_int = int(project_id) if str(project_id).isdigit() else None
-        project: Optional[Project] = db.query(Project).filter_by(id=proj_id_int).first() if proj_id_int else None
-        project_structure = project.project_structure if project else ""
-    except Exception as e:
-        print(f"[Project lookup error] {e}")
-        project_structure = ""
+    project_structure = project.project_structure if project else ""
 
     youtube_context: List[str] = []
     if data.youtube_search and yt_hits_final:
@@ -892,19 +1007,43 @@ async def ask_ai_to_ai_route(
         f"user_id={current_user.id}"
     )
 
-    # ---- History for context (trim) ----
-    messages_data = memory.retrieve_messages(
-        role_id=role_id,
-        project_id=project_id,
-        chat_session_id=chat_session_id,
-        limit=HISTORY_FETCH_LIMIT,
-        for_display=False,
-    )
-    rows = messages_data.get("messages", [])
-    history = _rows_to_messages(rows)
-    history = _clip_by_tokens(memory, history, HISTORY_MAX_TOKENS)
-    if history:
-        print(f"🧩 Context included → {len(history)} turns")
+    # ---- Smart Context: Use Git structure instead of full history ----
+    try:
+        proj_id_int = int(project_id) if str(project_id).isdigit() else None
+        project: Optional[Project] = db.query(Project).filter_by(id=proj_id_int).first() if proj_id_int else None
+    except Exception as e:
+        print(f"[Project lookup error] {e}")
+        project = None
+    
+    # Build smart context if Git is linked
+    if project and project.git_url:
+        print("🚀 Using Smart Context (Git structure)")
+        smart_context = _build_smart_context_from_git(
+            project=project,
+            memory=memory,
+            role_id=role_id,
+            project_id=project_id,
+            query=data.topic,
+            max_tokens=4000
+        )
+        # Use smart context as "history" for the AI
+        history = [{"role": "system", "content": smart_context}]
+        print(f"✅ Smart context ready (~4K tokens)")
+    else:
+        # Fallback to old method if no Git linked
+        print("⚠️ No Git linked, using traditional history")
+        messages_data = memory.retrieve_messages(
+            role_id=role_id,
+            project_id=project_id,
+            chat_session_id=chat_session_id,
+            limit=HISTORY_FETCH_LIMIT,
+            for_display=False,
+        )
+        rows = messages_data.get("messages", [])
+        history = _rows_to_messages(rows)
+        history = _clip_by_tokens(memory, history, HISTORY_MAX_TOKENS)
+        if history:
+            print(f"🧩 Context included → {len(history)} turns")
 
     # ---- Canonical Context (optional) ----
     canon_digest = ""
