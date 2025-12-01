@@ -68,6 +68,11 @@ class Project(Base):
     # ✅ Assistant link
     assistant_id = Column(Integer, ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
     
+    # ✅ Git Integration (Phase 1)
+    git_url = Column(String(500), nullable=True)
+    git_updated_at = Column(DateTime, nullable=True)
+    git_sync_status = Column(String(20), nullable=True)  # null | "syncing" | "synced" | "error"
+    
     # ✅ Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
