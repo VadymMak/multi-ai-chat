@@ -671,7 +671,7 @@ async def ask_route(
             web_context=[],
             starter_reply="",
             user_input=data.query,
-            max_memory_tokens=600,
+            max_memory_tokens=0,
             canonical_context=None,
         )
 
@@ -924,7 +924,7 @@ async def ask_stream_route(
                 web_context=[],
                 starter_reply="",
                 user_input=data.query,
-                max_memory_tokens=600,
+                max_memory_tokens=0,
                 canonical_context=None,
             )
 
