@@ -863,6 +863,14 @@ async def ask_ai_to_ai_route(
     Boost mode: one model answers, another reviews, then a final summary is produced.
     Supports modes: "debate" (default) and "project-builder"
     """
+
+    # 🔧 ФИКС: Если role_id=9 (Project Builder) → форсировать project-builder mode
+    if data.role == 9:
+        data.mode = "project-builder"
+        print(f"🔧 Forced mode='project-builder' for role_id=9")
+    
+    print(f"⚙️ {data.mode.title()} Mode: topic='{data.topic[:80]}...'")
+
     memory = MemoryManager(db)
     role_id = data.role
     project_id = data.project_id

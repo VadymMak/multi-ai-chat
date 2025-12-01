@@ -93,165 +93,391 @@ Round 3 (GPT-4o):
 
 
 # =============================================================================
-# PROJECT BUILDER PROMPTS
+# PROJECT BUILDER PROMPTS - IMPROVED VERSION
 # =============================================================================
 
-PROJECT_BUILDER_GENERATOR_PROMPT = """You are a Project Structure Generator. Your ONLY job is to generate complete project structures.
+PROJECT_BUILDER_GENERATOR_PROMPT = """You are a Project Structure Generator. Generate complete project structures with LOGICAL file ordering.
 
-## RULES:
-- Generate structure IMMEDIATELY (no questions unless absolutely necessary)
-- Include ALL config files (package.json, tsconfig.json, webpack.config.js, etc.)
-- Use EXACT format with markers
-- Be comprehensive - include every file needed
-- Number files in creation order
+## 🎯 CRITICAL: FILE ORDERING RULES
+Files MUST be numbered in DEPENDENCY ORDER, grouped by purpose!
 
-## OUTPUT FORMAT (USE EXACTLY):
+## 📦 MANDATORY GROUP STRUCTURE:
+
+**GROUP 1: FOUNDATION** (Files with ZERO dependencies)
+- Types/Interfaces (*.types.ts, interfaces.ts)
+- Constants (constants.ts, config.ts)
+- Base utilities (logger.ts, helpers.ts)
+
+**GROUP 2: CORE LOGIC** (Uses Foundation)
+- Authentication (auth/, authManager.ts)
+- API clients (api.ts, apiClient.ts)
+- Services (services/)
+- Data models (models/)
+
+**GROUP 3: INTEGRATION** (Connects Core to UI)
+- Controllers (controllers/)
+- Panels (panels/, providers/)
+- Middleware (middleware/)
+- State management (store/, context/)
+
+**GROUP 4: UI LAYER** (Uses everything above)
+- React/Vue components (components/)
+- Hooks (hooks/, composables/)
+- Views/Pages (views/, pages/)
+
+**GROUP 5: STYLING** (Visual presentation)
+- Global styles (globals.css, theme.css)
+- Component styles (components.css)
+- Assets (images/, fonts/)
+
+**GROUP 6: CONFIGURATION** (References project files)
+- Build configs (webpack.config.js, vite.config.ts)
+- TypeScript configs (tsconfig.json)
+- Package files (package.json)
+- Linting configs (.eslintrc, .prettierrc)
+
+**GROUP 7: TOOLING** (Development environment)
+- IDE configs (.vscode/, .idea/)
+- Test setup (jest.config.js, test/)
+- CI/CD (.github/, .gitlab-ci.yml)
+
+**GROUP 8: DOCUMENTATION** (Project meta)
+- README.md
+- CHANGELOG.md
+- LICENSE
+- .gitignore
+
+## 📋 OUTPUT FORMAT (USE EXACTLY):
 
 ===PROJECT_STRUCTURE_START===
-📁 [PROJECT_NAME]
-Tech: [tech stack]
+📁 [project-name] ✅ STRUCTURED
+Tech: [list technologies]
 ====================
 
+## 📦 GROUP 1: FOUNDATION (Independent files)
 [folder]/
-├── [file.ext]          [1] - [short description]
-├── [subfolder]/
-│   └── [file.ext]      [2] - [short description]
-└── [file.ext]          [3] - [short description]
+├── types.ts                [1] - Core TypeScript interfaces (no dependencies)
+├── constants.ts            [2] - Application constants (uses types)
+└── utils/
+    ├── logger.ts           [3] - Logging utility (uses types)
+    └── helpers.ts          [4] - Helper functions (uses types, constants)
+
+## 📦 GROUP 2: CORE LOGIC (Business logic)
+[folder]/
+├── auth/
+│   └── authManager.ts      [5] - Authentication management (uses 1-4)
+├── api.ts                  [6] - API client (uses 1-2, 5)
+└── services/
+    └── dataService.ts      [7] - Data service (uses 1-2, 6)
+
+## 📦 GROUP 3: INTEGRATION (Connecting layers)
+[folder]/
+├── panels/
+│   └── mainPanel.ts        [8] - Main panel (uses 1-7)
+└── controllers/
+    └── appController.ts    [9] - App controller (uses 1-8)
+
+## 📦 GROUP 4: UI LAYER (User interface)
+[folder]/
+├── components/
+│   ├── auth/
+│   │   └── LoginForm.tsx   [10] - Login component (uses 5, 7)
+│   └── chat/
+│       └── ChatView.tsx    [11] - Chat component (uses 7-9)
+└── hooks/
+    └── useAuth.ts          [12] - Auth hook (uses 5, 7)
+
+## 📦 GROUP 5: STYLING (Visual design)
+[folder]/
+├── styles/
+│   ├── globals.css         [13] - Global styles
+│   └── components.css      [14] - Component styles
+└── assets/
+    └── logo.svg            [15] - Assets
+
+## 📦 GROUP 6: CONFIGURATION (Project setup)
+├── tsconfig.json           [16] - TypeScript config (references all .ts files)
+├── package.json            [17] - Dependencies (lists all packages)
+├── webpack.config.js       [18] - Build config (references source files)
+└── .eslintrc.js            [19] - Linting rules
+
+## 📦 GROUP 7: TOOLING (Development)
+├── .vscode/
+│   ├── launch.json         [20] - Debug config
+│   └── tasks.json          [21] - Build tasks
+└── test/
+    └── setup.ts            [22] - Test setup
+
+## 📦 GROUP 8: DOCUMENTATION (Meta files)
+├── README.md               [23] - Project documentation
+├── CHANGELOG.md            [24] - Version history
+└── .gitignore              [25] - Git ignore rules
 
 📋 SETUP COMMANDS:
 ```bash
-[specific command with package names]
-[another command]
+npm install
+npm run build
+npm run dev
+npm test
 ```
 
 📦 DEPENDENCIES:
-Production: [pkg1], [pkg2]
-Dev: [pkg1], [pkg2]
+Production: [@types/node], [express], [typescript]
+Dev: [webpack], [jest], [@types/jest]
 
-🔗 FILE ORDER:
-[1] [path/file.ext] - [why first]
-[2] [path/file.ext] - [depends on 1]
-[3] [path/file.ext] - [depends on 1,2]
+🔗 FILE GENERATION ORDER & DEPENDENCIES:
+
+**Start here (no dependencies):**
+[1] types.ts → Defines all interfaces
+[2] constants.ts → Uses [1]
+[3] logger.ts → Uses [1]
+[4] helpers.ts → Uses [1,2]
+
+**Then core logic:**
+[5] authManager.ts → Uses [1,2,3,4]
+[6] api.ts → Uses [1,2,5]
+[7] dataService.ts → Uses [1,2,6]
+
+**Then integration:**
+[8] mainPanel.ts → Uses [1-7]
+[9] appController.ts → Uses [1-8]
+
+**Then UI (can work in parallel):**
+[10] LoginForm.tsx → Uses [5,7]
+[11] ChatView.tsx → Uses [7,8,9]
+[12] useAuth.ts → Uses [5,7]
+
+**Then styling:**
+[13-15] CSS and assets → No code dependencies
+
+**Then config (last!):**
+[16-19] Config files → Reference all source files
+
+**Then tooling:**
+[20-22] Dev tools → Use config files
+
+**Finally documentation:**
+[23-25] Docs → Describe everything above
+
 ===PROJECT_STRUCTURE_END===
 
-## IMPORTANT:
-- Always use the markers ===PROJECT_STRUCTURE_START=== and ===PROJECT_STRUCTURE_END===
-- Include ALL necessary config files
-- Commands must be specific (not just "npm install")
-- Number EVERY file in order of creation
+## ✅ VALIDATION CHECKLIST:
+Before outputting, verify:
+- [ ] All files are grouped by purpose
+- [ ] Groups follow dependency order (Foundation → Core → UI → Config → Docs)
+- [ ] File numbers increase within each group
+- [ ] Each file lists what it depends on
+- [ ] Foundation group (1-5) has NO external dependencies
+- [ ] Config files (package.json, tsconfig) come LATE
+- [ ] No file uses code from higher-numbered files
 
 User request: {topic}
 
-Generate the complete project structure now."""
+Generate the PROPERLY GROUPED structure now."""
 
 
-PROJECT_BUILDER_REVIEWER_PROMPT = """You are a Project Structure Reviewer. Your job is to REVIEW and ENHANCE the generated structure.
+PROJECT_BUILDER_REVIEWER_PROMPT = """You are a Project Structure Reviewer. Verify GROUPING and ORDERING are correct.
 
-## ORIGINAL STRUCTURE TO REVIEW:
+## STRUCTURE TO REVIEW:
 {previous_solution}
 
-## YOUR TASKS:
-1. Check for MISSING files (especially config files)
-2. Verify dependency completeness (missing packages?)
-3. Improve commands with version numbers if needed
-4. Add any missing utility files
-5. Suggest better alternatives if applicable
+## YOUR REVIEW TASKS:
+
+### 1. ✅ GROUP STRUCTURE CHECK:
+- Are all 8 groups present? (Foundation, Core, Integration, UI, Styling, Config, Tooling, Docs)
+- Are groups in correct order?
+- Are files in the right groups?
+
+### 2. ✅ FILE ORDERING CHECK:
+- Do Foundation files come first (1-5ish)?
+- Do Config files come late (near end)?
+- Does each file come AFTER its dependencies?
+- Are group numbers consecutive?
+
+### 3. ✅ DEPENDENCY CHECK:
+- Does each file list what it depends on?
+- Are dependencies only from lower numbers?
+- Are there circular dependencies?
+
+### 4. ✅ COMPLETENESS CHECK:
+- Missing files in any group?
+- Missing essential configs (package.json, tsconfig)?
+- Missing utilities (logger, helpers)?
 
 ## OUTPUT FORMAT (USE EXACTLY):
 
 ===REVIEW_START===
-## ✅ CORRECT:
-- [what's good about the structure]
-- [another good point]
+## ✅ CORRECT GROUPING:
+- GROUP 1 (Foundation): [list files] ✓
+- GROUP 2 (Core): [list files] ✓
+- [continue for all groups]
+
+## ⚠️ GROUPING ISSUES:
+- [file.ts] is in GROUP X but should be in GROUP Y because [reason]
+- GROUP [N] should come before GROUP [M] because [reason]
+
+## ⚠️ ORDERING ISSUES:
+- [file.ts] numbered [N] but uses [file2.ts] numbered [M where M>N] ❌
+- Suggested fix: Move [file.ts] to position [new_N]
 
 ## ⚠️ MISSING FILES:
-- [path/file.ext] - [why needed]
-- [path/file.ext] - [why needed]
+**In GROUP 1 (Foundation):**
+- [path/file.ts] - [why needed] - Should be file [N]
 
-## 🔧 IMPROVED COMMANDS:
-```bash
-[better command with versions]
-[additional command if needed]
-```
+**In GROUP 2 (Core):**
+- [path/file.ts] - [why needed] - Should be file [N]
 
-## ➕ ADDITIONAL DEPENDENCIES:
-Production: [missing pkg1], [missing pkg2]
-Dev: [missing pkg1], [missing pkg2]
+[...continue for each group]
 
-## 📝 SUGGESTIONS:
-- [improvement suggestion]
-- [another suggestion]
+## ✅ DEPENDENCY VERIFICATION:
+- [1] types.ts → No dependencies ✓
+- [2] constants.ts → Uses [1] ✓
+- [5] auth.ts → Uses [1,2,3,4] ✓
+[...verify all critical files]
+
+## 🔧 RECOMMENDED CHANGES:
+1. Move [file] from GROUP X to GROUP Y
+2. Renumber [file] from [N] to [M]
+3. Add [missing file] to GROUP Z as file [N]
+4. Reorder GROUP [X] to come before GROUP [Y]
+
 ===REVIEW_END===
 
 ## IMPORTANT:
-- Always use the markers ===REVIEW_START=== and ===REVIEW_END===
-- Be constructive - goal is to IMPROVE, not criticize
-- If structure is good, say so but still look for enhancements
-- Focus on what's MISSING, not what's wrong
+- Focus on LOGICAL STRUCTURE, not just missing files
+- Every file should be in exactly ONE group
+- Groups should be numbered 1-8
+- Foundation must be first, Documentation must be last
 
-Review the structure now."""
+Review now."""
 
 
-PROJECT_BUILDER_MERGER_PROMPT = """You are a Project Structure Finalizer. Your job is to MERGE the generator output and reviewer feedback into ONE final, complete structure.
+PROJECT_BUILDER_MERGER_PROMPT = """You are a Project Structure Finalizer. Create the PERFECT final structure with OPTIMAL grouping.
 
-## ORIGINAL QUESTION:
-{topic}
+## CONTEXT:
+Original request: {topic}
 
-## GENERATED STRUCTURE (Round 1):
-{round1}
+Round 1 (Generator): {round1}
 
-## REVIEW & ENHANCEMENTS (Round 2):
-{round2}
+Round 2 (Reviewer feedback): {round2}
 
 ## YOUR TASKS:
-1. Take the original structure as base
-2. Apply ALL valid improvements from reviewer
-3. Add missing files identified by reviewer
-4. Use improved commands if better
-5. Output ONE final, complete structure
+1. Apply ALL valid improvements from reviewer
+2. Fix any grouping issues
+3. Renumber files if needed to fix dependencies
+4. Add missing files in correct groups
+5. Output PERFECTLY STRUCTURED final result
 
 ## OUTPUT FORMAT (USE EXACTLY):
 
 ===FINAL_STRUCTURE_START===
-📁 [PROJECT_NAME] ✅ FINAL
-Tech: [tech stack]
+📁 [project-name] ✅ FINAL
+Tech: [technologies]
 ====================
 
-[complete merged tree with ALL files numbered]
+## 📦 GROUP 1: FOUNDATION (No external dependencies)
+[Complete file tree for this group]
+├── [file.ext]              [1] - [description]
+├── [file.ext]              [2] - [description]
+└── [folder]/
+    └── [file.ext]          [3] - [description]
+
+## 📦 GROUP 2: CORE LOGIC (Uses Foundation)
+[Complete file tree for this group]
+├── [folder]/
+│   └── [file.ext]          [4] - [description]
+└── [file.ext]              [5] - [description]
+
+## 📦 GROUP 3: INTEGRATION (Connects Core to UI)
+[...continue with all groups clearly separated...]
+
+## 📦 GROUP 4: UI LAYER (User interface)
+[...continue...]
+
+## 📦 GROUP 5: STYLING (Visual design)
+[...continue...]
+
+## 📦 GROUP 6: CONFIGURATION (Project setup)
+[...continue...]
+
+## 📦 GROUP 7: TOOLING (Development tools)
+[...continue...]
+
+## 📦 GROUP 8: DOCUMENTATION (Project meta)
+[...continue...]
 
 📋 SETUP COMMANDS:
 ```bash
-[final commands - use improved versions]
+[specific commands with package versions]
 ```
 
 📦 DEPENDENCIES:
-Production: [complete list]
-Dev: [complete list]
+Production: [pkg1@version], [pkg2@version]
+Dev: [pkg1@version], [pkg2@version]
 
-🔗 FILE ORDER:
-[1] [path] - [description]
-[2] [path] - [description]
-[...continue for ALL files]
+🔗 GENERATION ORDER & RATIONALE:
+
+**GROUP 1 (Generate first - no dependencies):**
+[1] [path/file] - No dependencies, defines base types
+[2] [path/file] - Uses [1] for type definitions
+[3] [path/file] - Uses [1,2] for types and constants
+[...continue for all GROUP 1 files]
+
+**GROUP 2 (Generate next - uses GROUP 1):**
+[N] [path/file] - Uses [1,2,3] from Foundation
+[N+1] [path/file] - Uses [1,2,N] 
+[...continue for all GROUP 2 files]
+
+**GROUP 3 (Integration layer):**
+[...continue explaining each group]
+
+[Continue through all groups with clear dependency explanation]
 
 ## 📋 GENERATION CHECKLIST:
-Ready to generate! Click on any file number to generate code.
+Generate files IN ORDER - each uses code from previous!
 
-| # | File | Status |
-|---|------|--------|
-| 1 | [path] | ⏳ Ready |
-| 2 | [path] | 🔒 Locked |
-| 3 | [path] | 🔒 Locked |
-[...continue for ALL files]
+| # | File | Group | Dependencies | Status |
+|---|------|-------|--------------|--------|
+| 1 | [path] | Foundation | None | ⏳ Ready |
+| 2 | [path] | Foundation | [1] | 🔒 Locked |
+| 3 | [path] | Foundation | [1,2] | 🔒 Locked |
+| 4 | [path] | Core | [1,2,3] | 🔒 Locked |
+[...complete table for ALL files]
+
+## 🎯 GENERATION STRATEGY:
+1. **Start with GROUP 1** (files 1-5ish)
+   - Generate all Foundation files first
+   - Test compilation: `npm run compile`
+   
+2. **Then GROUP 2** (files 6-10ish)
+   - Generate Core logic
+   - Foundation files are now available
+   
+3. **Then GROUP 3-4** (Integration & UI)
+   - Can use everything from previous groups
+   
+4. **Then GROUP 5-6** (Styling & Config)
+   - Reference all source code
+   
+5. **Finally GROUP 7-8** (Tooling & Docs)
+   - Everything is ready to document
+
+⚠️ **DO NOT skip ahead!** File [10] cannot work if [5] doesn't exist yet.
+
 ===FINAL_STRUCTURE_END===
 
-## IMPORTANT:
-- This is the FINAL structure - must be complete
-- Include EVERYTHING from both generator and reviewer
-- Use the table format for file checklist
-- Every file must be numbered
-- First file is ⏳ Ready, others are 🔒 Locked
+## CRITICAL VALIDATION:
+Before outputting, ensure:
+- ✅ All 8 groups are present and labeled
+- ✅ Groups are in correct order (1→8)
+- ✅ Files are numbered consecutively within groups
+- ✅ Dependencies column shows what each file uses
+- ✅ No file depends on higher-numbered files
+- ✅ Foundation group contains ONLY independent files
+- ✅ Configuration group is near the end
+- ✅ First file is ⏳ Ready, all others 🔒 Locked
 
-Create the final merged structure now."""
+Generate the PERFECTLY STRUCTURED final output now."""
 
 
 # =============================================================================
@@ -289,19 +515,19 @@ PROJECT_BUILDER_CONFIGS = {
     1: {
         "model_key": "gpt-4o",
         "role": "generator",
-        "max_tokens": 3000,
+        "max_tokens": 4000,  # Increased for detailed grouping
         "prompt_template": PROJECT_BUILDER_GENERATOR_PROMPT
     },
     2: {
         "model_key": "claude-3-5-sonnet",
         "role": "reviewer",
-        "max_tokens": 2500,
+        "max_tokens": 3000,  # Increased for detailed review
         "prompt_template": PROJECT_BUILDER_REVIEWER_PROMPT
     },
     "final": {
         "model_key": "claude-opus-4",
         "role": "merger",
-        "max_tokens": 4000,
+        "max_tokens": 5000,  # Increased for complete final structure
         "prompt_template": PROJECT_BUILDER_MERGER_PROMPT
     }
 }

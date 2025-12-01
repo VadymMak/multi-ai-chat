@@ -31,4 +31,9 @@ RUN mkdir -p /app/uploads
 EXPOSE ${PORT:-8000}
 
 # Run check_users, then migrations, then start server
-CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && python backend/scripts/check_users.py && python backend/scripts/init_auth_tables.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
+     python backend/scripts/check_users.py && \
+     python backend/scripts/init_auth_tables.py && \
+     python backend/migrations/add_user_id_to_projects.py && \
+     python backend/migrations/add_git_integration_to_projects.py && \
+     uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
