@@ -88,9 +88,10 @@ def build_smart_context(
             project_id=str(project_id),
             role_id=role_id,
             limit=5,
-            chat_session_id=session_id
+            chat_session_id=session_id,
+            for_display=False 
         )
-        recent_messages = recent_data.get("messages", [])
+        recent_messages = recent_data.get("messages", [])[-5]
         recent_text = format_recent(recent_messages)
         parts.append(f"📌 RECENT CONVERSATION:\n{recent_text}")
         print(f"✅ [Smart Context] Added {len(recent_messages)} recent messages")
