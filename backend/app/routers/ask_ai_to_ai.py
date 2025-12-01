@@ -1011,6 +1011,11 @@ async def ask_ai_to_ai_route(
     try:
         proj_id_int = int(project_id) if str(project_id).isdigit() else None
         project: Optional[Project] = db.query(Project).filter_by(id=proj_id_int).first() if proj_id_int else None
+        
+        # Refresh from DB to get latest project_structure after sync
+        if project:
+            db.refresh(project)
+            
     except Exception as e:
         print(f"[Project lookup error] {e}")
         project = None
