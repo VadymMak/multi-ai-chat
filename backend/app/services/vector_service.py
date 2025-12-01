@@ -251,10 +251,11 @@ def search_similar_messages(
         # Perform vector similarity search
         # <=> is pgvector's cosine distance operator
         # ✅ NEW CODE:
+        # ✅ NEW CODE:
         results = db.execute(
             text(f"""
                 SELECT id, raw_text, summary, is_summary, timestamp,
-                    embedding <=> :query_embedding AS distance
+                    embedding <=> CAST(:query_embedding AS vector) AS distance
                 FROM {table_name}
                 WHERE {session_column} = :session_id
                 AND embedding IS NOT NULL
