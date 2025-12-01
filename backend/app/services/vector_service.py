@@ -250,13 +250,14 @@ def search_similar_messages(
         
         # Perform vector similarity search
         # <=> is pgvector's cosine distance operator
+        # ✅ NEW CODE:
         results = db.execute(
             text(f"""
-                SELECT id, content, sender, created_at,
-                       embedding <=> :query_embedding AS distance
+                SELECT id, raw_text, summary, is_summary, timestamp,
+                    embedding <=> :query_embedding AS distance
                 FROM {table_name}
                 WHERE {session_column} = :session_id
-                  AND embedding IS NOT NULL
+                AND embedding IS NOT NULL
                 ORDER BY distance
                 LIMIT :limit
             """),
@@ -271,10 +272,10 @@ def search_similar_messages(
         messages = [
             {
                 "id": r.id,
-                "content": r.content,
-                "sender": r.sender,
-                "created_at": r.created_at,
-                "similarity": 1 - r.distance  # Convert distance to similarity score
+                "content": r.summary if r.summary else r.raw_text,
+                "timestamp": r.timestamp,
+                "is_summary": r.is_summary,
+                "similarity": 1 - r.distance
             }
             for r in results
         ]
