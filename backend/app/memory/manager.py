@@ -612,11 +612,16 @@ class MemoryManager:
 
         query = query.filter(MemoryEntry.deleted == False)
 
-        # Step 2: Fetch MORE messages initially (ignore 'limit' param for DB query)
-        # This allows token-based trimming to work correctly
-        FETCH_BUFFER = 200
-        rows = query.order_by(MemoryEntry.timestamp.desc()).limit(FETCH_BUFFER).all()
-        print(f"[Fetched Buffer] → {len(rows)} messages from DB")
+        # Step 2: Fetch messages - respect limit for AI context
+        if for_display:
+            # Display mode: large buffer for pagination
+            FETCH_BUFFER = 200
+            rows = query.order_by(MemoryEntry.timestamp.desc()).limit(FETCH_BUFFER).all()
+            print(f"[Fetched Buffer] → {len(rows)} messages from DB (display mode)")
+        else:
+            # AI context mode: respect the limit parameter (usually 5 for Smart Context)
+            rows = query.order_by(MemoryEntry.timestamp.desc()).limit(limit).all()
+            print(f"[Fetched Buffer] → {len(rows)} messages from DB (AI context, limit={limit})")
 
         # Step 3: Convert to messages
         messages: List[dict] = []
@@ -659,21 +664,24 @@ class MemoryManager:
                 "isSummary": False,
             })
 
-        # Step 4-5: Token budget (ONLY for AI context!)
+        # Step 4-5: Token budget - SKIP for Smart Context (limit ≤ 10)
         if not for_display:
-            # Apply token budget for AI
-            total_tokens = sum(self.count_tokens(m.get('text', '')) for m in messages)
-            print(f"[Token Budget] → {len(messages)} messages = {total_tokens} tokens (budget: {max_tokens})")
-
-            while total_tokens > max_tokens and len(messages) > 1:
-                removed = messages.pop(0)
-                removed_tokens = self.count_tokens(removed.get('text', ''))
-                total_tokens -= removed_tokens
-                print(f"[Token Trim] → Removed message ({removed_tokens} tokens)")
-
-            print(f"[Context Limited] → {len(messages)} messages, {total_tokens} tokens (budget: {max_tokens})")
+            if limit <= 10:
+                # Smart Context mode - no trimming needed
+                total_tokens = 0
+                print(f"[Smart Context Mode] → {len(messages)} messages, NO token budget applied")
+            else:
+                # Traditional mode - apply token budget
+                total_tokens = sum(self.count_tokens(m.get('text', '')) for m in messages)
+                print(f"[Token Budget] → {len(messages)} messages = {total_tokens} tokens (budget: {max_tokens})")
+                while total_tokens > max_tokens and len(messages) > 1:
+                    removed = messages.pop(0)
+                    removed_tokens = self.count_tokens(removed.get('text', ''))
+                    total_tokens -= removed_tokens
+                    print(f"[Token Trim] → Removed message ({removed_tokens} tokens)")
+                print(f"[Context Limited] → {len(messages)} messages, {total_tokens} tokens (budget: {max_tokens})")
         else:
-            # For display - NO token counting, return all
+            # Display mode - no token limits
             total_tokens = 0
             print(f"[Display Mode] → {len(messages)} messages WITHOUT token limits")
 
