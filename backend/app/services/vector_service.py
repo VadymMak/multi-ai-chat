@@ -319,8 +319,9 @@ def get_relevant_context(
         return ""
     
     # Format messages for context
+    # Use is_summary flag since 'sender' field doesn't exist in search results
     context_lines = [
-        f"[Previous {msg['sender']}]: {msg['content'][:max_chars_per_message]}"
+        f"[{'Summary' if msg['is_summary'] else 'Message'}]: {msg['content'][:max_chars_per_message]}"
         for msg in similar_messages
     ]
     
