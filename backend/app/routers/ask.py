@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 import json
 from app.deps import get_current_active_user
 from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+from app.services.smart_context import build_smart_context
 
 # ✅ Deterministic YouTube path
 from app.services.youtube_service import search_videos
@@ -588,56 +589,20 @@ async def ask_route(
         except Exception as e:
             print(f"[Embedding] User message skipped: {e}")
 
-        # 2) token preflight and optional autosummary
-        messages_data = memory.retrieve_messages(
-            role_id=role_id, project_id=project_id, chat_session_id=chat_session_id, limit=HISTORY_FETCH_LIMIT,
-            for_display=False,
+        # 2) Build Smart Context (replaces full history loading)
+        print(f"🎯 [Smart Context] Building context for query: {data.query[:50]}...")
+        smart_context_text = build_smart_context(
+            project_id=project_id_int,
+            role_id=role_id,
+            query=data.query,
+            session_id=chat_session_id,
+            db=db,
+            memory=memory
         )
-        rows_now = messages_data.get("messages", [])
-        hist_now = _db_rows_to_chat_messages(rows_now, memory)
-
-        chosen_model_name: Optional[str] = None
-        if data.model_key and data.model_key in MODEL_REGISTRY:
-            chosen_model_name = MODEL_REGISTRY[data.model_key].get("model")
-
-        soft_default, hard_default = get_thresholds(model=chosen_model_name, provider=data.provider)
-
-        if token_preflight is not None:
-            pf = token_preflight([m["content"] for m in hist_now], model=chosen_model_name, provider=data.provider)
-            preflight_total = int(pf.get("total", 0))
-            preflight_soft = int(pf.get("soft_limit", soft_default))
-            preflight_hard = int(pf.get("hard_limit", hard_default))
-            near_soft = bool(pf.get("near_soft", False))
-            over_soft = bool(pf.get("over_soft", False))
-            over_hard = bool(pf.get("over_hard", False))
-        else:
-            total = sum(memory.count_tokens(m["content"]) for m in hist_now)
-            preflight_total = total
-            preflight_soft = soft_default
-            preflight_hard = hard_default
-            near_soft = total >= int(preflight_soft * 0.80)
-            over_soft = total >= preflight_soft
-            over_hard = total >= preflight_hard
-
-        if getattr(settings, "LOG_TOKEN_COUNTS", True):
-            print(f"[Token Preflight] total={preflight_total} (soft={preflight_soft}, hard={preflight_hard})")
-
-        try:
-            memory.insert_audit_log(
-                project_id, role_id, chat_session_id, "internal", "token_preflight",
-                f"total={preflight_total} soft={preflight_soft} hard={preflight_hard}"
-            )
-        except Exception:
-            pass
-
-        if over_hard or near_soft:
-            await _auto_summarize_if_needed(memory, role_id, project_id, chat_session_id)
-            messages_data = memory.retrieve_messages(
-                role_id=role_id, project_id=project_id, chat_session_id=chat_session_id, limit=HISTORY_FETCH_LIMIT,
-                for_display=False,
-            )
-            rows_now = messages_data.get("messages", [])
-            hist_now = _db_rows_to_chat_messages(rows_now, memory)
+        
+        # Smart Context as system message
+        hist_now = [{"role": "system", "content": smart_context_text}]
+        print(f"✅ [Smart Context] Context ready (~4K tokens)")
 
         # 3) YouTube intent (force plain output when present)
         youtube_items: List[Dict[str, str]] = []
@@ -710,21 +675,13 @@ async def ask_route(
             canonical_context=None,
         )
 
-        # 5) Trim history and ensure the latest user turn is present
-        history = _clip_history_by_tokens(memory, hist_now, HISTORY_MAX_TOKENS)
-        if not history or history[-1]["role"] != "user" or history[-1]["content"] != data.query:
-            history = history + [{"role": "user", "content": data.query}]
+        # 5) Use Smart Context + current query
+        history = hist_now + [{"role": "user", "content": data.query}]
 
         debug_info: Optional[Dict[str, Any]] = None
         if debug:
             debug_info = {
-                "thresholds": {"soft": preflight_soft, "hard": preflight_hard},
-                "token_preflight": {
-                    "total": preflight_total,
-                    "near_soft": near_soft,
-                    "over_soft": over_soft,
-                    "over_hard": over_hard,
-                },
+                "smart_context": "enabled",
                 "mode": mode,
                 "presentation": data.presentation,
                 "yt_topic": yt_topic,
@@ -907,46 +864,20 @@ async def ask_stream_route(
             # Send initial status
             yield f"{json.dumps({'event': 'status', 'data': {'status': 'processing'}})}\n\n"
 
-            # 2) Token preflight and optional autosummary (same as /ask)
-            messages_data = memory.retrieve_messages(
-                role_id=role_id, project_id=project_id, chat_session_id=chat_session_id, limit=HISTORY_FETCH_LIMIT
+            # 2) Build Smart Context (replaces full history loading)
+            print(f"🎯 [Smart Context] Building context for streaming query: {data.query[:50]}...")
+            smart_context_text = build_smart_context(
+                project_id=project_id_int,
+                role_id=role_id,
+                query=data.query,
+                session_id=chat_session_id,
+                db=db,
+                memory=memory
             )
-            rows_now = messages_data.get("messages", [])
-            hist_now = _db_rows_to_chat_messages(rows_now, memory)
-
-            chosen_model_name: Optional[str] = None
-            if data.model_key and data.model_key in MODEL_REGISTRY:
-                chosen_model_name = MODEL_REGISTRY[data.model_key].get("model")
-
-            soft_default, hard_default = get_thresholds(model=chosen_model_name, provider=data.provider)
-
-            if token_preflight is not None:
-                pf = token_preflight([m["content"] for m in hist_now], model=chosen_model_name, provider=data.provider)
-                preflight_total = int(pf.get("total", 0))
-                preflight_soft = int(pf.get("soft_limit", soft_default))
-                preflight_hard = int(pf.get("hard_limit", hard_default))
-                near_soft = bool(pf.get("near_soft", False))
-                over_soft = bool(pf.get("over_soft", False))
-                over_hard = bool(pf.get("over_hard", False))
-            else:
-                total = sum(memory.count_tokens(m["content"]) for m in hist_now)
-                preflight_total = total
-                preflight_soft = soft_default
-                preflight_hard = hard_default
-                near_soft = total >= int(preflight_soft * 0.80)
-                over_soft = total >= preflight_soft
-                over_hard = total >= preflight_hard
-
-            if getattr(settings, "LOG_TOKEN_COUNTS", True):
-                print(f"[Token Preflight] total={preflight_total} (soft={preflight_soft}, hard={preflight_hard})")
-
-            if over_hard or near_soft:
-                await _auto_summarize_if_needed(memory, role_id, project_id, chat_session_id)
-                messages_data = memory.retrieve_messages(
-                    role_id=role_id, project_id=project_id, chat_session_id=chat_session_id, limit=HISTORY_FETCH_LIMIT
-                )
-                rows_now = messages_data.get("messages", [])
-                hist_now = _db_rows_to_chat_messages(rows_now, memory)
+            
+            # Smart Context as system message
+            hist_now = [{"role": "system", "content": smart_context_text}]
+            print(f"✅ [Smart Context] Context ready for streaming (~4K tokens)")
 
             # 3) Build prompt (same as /ask)
             base_system = (
@@ -997,10 +928,8 @@ async def ask_stream_route(
                 canonical_context=None,
             )
 
-            # 4) Trim history and ensure latest user turn is present
-            history = _clip_history_by_tokens(memory, hist_now, HISTORY_MAX_TOKENS)
-            if not history or history[-1]["role"] != "user" or history[-1]["content"] != data.query:
-                history = history + [{"role": "user", "content": data.query}]
+            # 4) Use Smart Context + current query
+            history = hist_now + [{"role": "user", "content": data.query}]
 
             # 5) Determine model and parameters
             chosen_key = data.model_key or _default_key_for_provider(data.provider)
