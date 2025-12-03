@@ -75,15 +75,29 @@ app = FastAPI(
 # Allow multiple origins via env: CORS_ORIGINS="http://localhost:3000,https://example.com"
 raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
 allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
-# Support wildcard explicitly if requested
-if allow_origins == ["*"]:
-    logger.info("CORS allow_origins: * (all)")
-else:
-    logger.info(f"CORS allow_origins: {allow_origins}")
+
+# Build regex pattern from allowed origins
+import re
+escaped_origins = []
+for origin in allow_origins:
+    if origin == "*":
+        # Keep wildcard support
+        escaped_origins.append(".*")
+    elif origin == "vscode-webview://*":
+        # ✅ VS Code webview support (any guid)
+        escaped_origins.append(r"vscode-webview://[a-z0-9]+")
+    else:
+        # Escape special regex characters and replace * with \d+ for ports
+        escaped = re.escape(origin).replace(r"\*", ".*").replace(r":\d+", r":\d+")
+        escaped_origins.append(escaped)
+
+# Create final regex pattern
+origin_pattern = "^(" + "|".join(escaped_origins) + ")$"
+logger.info(f"CORS allow_origin_regex: {origin_pattern}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins if allow_origins != ["*"] else ["*"],
+    allow_origin_regex=origin_pattern,  # ✅ ИЗМЕНЕНО: используем regex вместо списка
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
