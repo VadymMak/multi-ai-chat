@@ -925,7 +925,7 @@ Return ONLY the code, no explanations."""
             ask_claude,
             [{"role": "user", "content": step3_prompt}],
             system="You are an expert developer. Create the best possible final code.",
-            model="claude-opus-4-20241229", 
+            model="claude-sonnet-4-5-20250929",
             api_key=anthropic_key
         )
     except Exception as e:

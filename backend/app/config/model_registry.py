@@ -133,16 +133,16 @@ MODEL_REGISTRY: Dict[str, ModelInfo] = {
         "temperature": 0.7,
     },
     # Claude Opus 4 (premium quality)
-    "claude-opus-4": {
+    "claude-sonnet-4.5": {  # ← NEW!
         "provider": "anthropic",
-        "model": "claude-opus-4-20250514",
-        "max_tokens": 4096,
+        "model": "claude-sonnet-4-5-20250929",  # ✅ Самая умная!
+        "max_tokens": 8192,  # Sonnet 4.5 поддерживает больше
         "temperature": 0.7,
     },
-    "claude-opus-4-20250514": {
+    "claude-sonnet-4-5-20250929": {  # ← Alias
         "provider": "anthropic",
-        "model": "claude-opus-4-20250514",
-        "max_tokens": 4096,
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 8192,
         "temperature": 0.7,
     },
 }

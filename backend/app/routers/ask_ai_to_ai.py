@@ -389,13 +389,12 @@ async def claude_with_retry(
     messages: List[Dict[str, str]], 
     system: Optional[str] = None,
     retries: int = 2,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    model: str = "claude-sonnet-4-20250514"  # ← ADD THIS
 ) -> str:
-    """Claude wrapper with simple retries/backoff (runs provider in a thread)."""
-    # Filter out system messages from the messages list
+    """Claude wrapper with simple retries/backoff"""
     filtered_messages = [m for m in messages if m.get("role") != "system"]
     
-    # Extract system content if not provided explicitly
     if system is None:
         for m in messages:
             if m.get("role") == "system":
@@ -405,7 +404,13 @@ async def claude_with_retry(
     last = ""
     for attempt in range(retries + 1):
         try:
-            ans = await run_in_threadpool(ask_claude, filtered_messages, system=system, api_key=api_key)
+            ans = await run_in_threadpool(
+                ask_claude, 
+                filtered_messages, 
+                system=system,
+                model=model,  # ← ADD THIS
+                api_key=api_key
+            )
             last = ans or ""
             if ans and "[Claude Error]" not in ans and "overloaded" not in ans.lower():
                 return ans
@@ -653,18 +658,20 @@ async def _handle_project_builder_mode(
     print(f"✅ Round 2 complete: {len(claude_review)} chars")
 
     # ---- Final: Merge (Claude Opus) ----
-    print(f"🎯 Final: Merging into final structure...")
-    
+    # ---- Final: Merge (Claude Sonnet 4.5) ----  # ✅ Правильный комментарий
+    print(f"🎯 Final: Merging with Claude Sonnet 4.5...")  # ✅ Обновлённое сообщение
+
     merger_prompt = final_config["prompt_template"].format(
         topic=data.topic,
         round1=first_reply,
         round2=claude_review
     )
-    
+
     try:
         final_reply_raw = await claude_with_retry(
             [{"role": "user", "content": merger_prompt}],
             system="You are a project architecture expert. Create the best possible final structure.",
+            model="claude-sonnet-4-5-20250929",  # ✅ ДОБАВИТЬ ЭТУ СТРОКУ!
             api_key=anthropic_key
         )
     except Exception as e:
