@@ -657,7 +657,6 @@ async def _handle_project_builder_mode(
     
     print(f"✅ Round 2 complete: {len(claude_review)} chars")
 
-    # ---- Final: Merge (Claude Opus) ----
     # ---- Final: Merge (Claude Sonnet 4.5) ----  # ✅ Правильный комментарий
     print(f"🎯 Final: Merging with Claude Sonnet 4.5...")  # ✅ Обновлённое сообщение
 
