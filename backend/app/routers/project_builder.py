@@ -3,9 +3,9 @@
 Project Builder API - Generate individual files from project structure
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import logging
 from datetime import datetime
 from collections import Counter
@@ -21,6 +21,7 @@ from app.services.project_structure_parser import (
 
 from app.deps import get_current_user
 from app.providers.openai_provider import ask_openai
+from app.services.dependency_graph import get_generation_order_from_db
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +409,393 @@ CRITICAL RULES:
     except Exception as e:
         logger.exception(f"❌ Failed to generate {request.file_path}")
         raise HTTPException(status_code=500, detail=f"Failed to generate: {str(e)}")
+    
+
+# ====================================================================
+# 🆕 BATCH GENERATION - ALL FILES IN ORDER (Phase 0 Week 2)
+# ====================================================================
+
+
+
+
+class BatchGenerationStatus(BaseModel):
+    """Status of batch generation"""
+    project_id: int
+    total_files: int
+    files_generated: int
+    files_failed: int
+    current_file: Optional[str]
+    status: str  # 'running', 'completed', 'failed'
+    started_at: datetime
+    completed_at: Optional[datetime]
+    duration_seconds: Optional[int]
+    errors: List[str]
+
+
+class BatchGenerationResponse(BaseModel):
+    """Response from batch generation"""
+    success: bool
+    project_id: int
+    project_name: str
+    total_files: int
+    generation_order: List[str]
+    message: str
+
+
+@router.post("/generate-all-in-order/{project_id}", response_model=BatchGenerationResponse)
+async def generate_all_files_in_order(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate ALL files in correct dependency order
+    
+    This endpoint:
+    1. Loads all file_specifications for project
+    2. Loads all file_dependencies
+    3. Performs topological sort to get correct order
+    4. Generates files one by one in background
+    5. Returns immediately with generation order
+    
+    Background generation continues after response.
+    Use /generation-status/{project_id} to check progress.
+    """
+    
+    logger.info(f"🚀 Starting batch generation for project {project_id}")
+    
+    # 1. Load project
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # 2. Check if files exist
+    files_count = db.execute(text("""
+        SELECT COUNT(*) 
+        FROM file_specifications 
+        WHERE project_id = :project_id
+    """), {"project_id": project_id}).scalar()
+    
+    if files_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No files found. Run /save-structure first!"
+        )
+    
+    # 3. Get generation order
+    try:
+        generation_order = get_generation_order_from_db(project_id, db)
+    except ValueError as e:
+        # Circular dependencies
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Failed to get generation order: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to determine generation order: {str(e)}"
+        )
+    
+    logger.info(f"📊 Generation order: {len(generation_order)} files")
+    
+    # 4. Reset all statuses to 'pending'
+    db.execute(text("""
+        UPDATE file_specifications
+        SET status = 'pending',
+            generated_code = NULL,
+            updated_at = :now
+        WHERE project_id = :project_id
+    """), {
+        "project_id": project_id,
+        "now": datetime.utcnow()
+    })
+    db.commit()
+    
+    # 5. Start background generation
+    background_tasks.add_task(
+        generate_files_background,
+        project_id=project_id,
+        generation_order=generation_order,
+        user_id=current_user.id
+    )
+    
+    logger.info(f"✅ Batch generation started for project {project_id}")
+    
+    return BatchGenerationResponse(
+        success=True,
+        project_id=project_id,
+        project_name=project.name,
+        total_files=len(generation_order),
+        generation_order=generation_order,
+        message=f"Batch generation started for {len(generation_order)} files. Check /generation-status/{project_id} for progress."
+    )
+
+
+async def generate_files_background(
+    project_id: int,
+    generation_order: List[str],
+    user_id: int
+):
+    """
+    Background task to generate all files
+    
+    This runs AFTER the API response is sent.
+    Generates files one by one, tracking progress in database.
+    """
+    from app.memory.db import SessionLocal
+    
+    db = SessionLocal()
+    
+    try:
+        logger.info(f"🔄 Background generation started for project {project_id}")
+        
+        started_at = datetime.utcnow()
+        files_generated = 0
+        files_failed = 0
+        errors = []
+        
+        for i, file_path in enumerate(generation_order, 1):
+            logger.info(f"📝 [{i}/{len(generation_order)}] Generating: {file_path}")
+            
+            try:
+                # Load file spec
+                file_spec = db.execute(text("""
+                    SELECT file_number, description, language
+                    FROM file_specifications
+                    WHERE project_id = :project_id 
+                      AND file_path = :file_path
+                """), {
+                    "project_id": project_id,
+                    "file_path": file_path
+                }).fetchone()
+                
+                if not file_spec:
+                    logger.error(f"❌ File spec not found: {file_path}")
+                    files_failed += 1
+                    errors.append(f"{file_path}: Spec not found")
+                    continue
+                
+                file_number = file_spec[0]
+                description = file_spec[1]
+                language = file_spec[2] or detect_language(file_path)
+                
+                # Load project
+                project = db.query(Project).filter(Project.id == project_id).first()
+                
+                # Load dependency context
+                context_data = load_dependency_context(
+                    db=db,
+                    project_id=project_id,
+                    file_path=file_path
+                )
+                
+                # Build prompt
+                prompt_parts = []
+                
+                prompt_parts.append(f"""PROJECT: {project.name}
+FILE TO GENERATE: {file_path}
+FILE NUMBER: [{file_number}]
+LANGUAGE: {language}
+""")
+                
+                if description:
+                    prompt_parts.append(f"DESCRIPTION: {description}\n")
+                
+                # Add context from already-generated files
+                if context_data["context_files"]:
+                    prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
+                    
+                    for dep_file, dep_data in context_data["context_files"].items():
+                        dep_lang = dep_data["language"] or "text"
+                        dep_code = dep_data["code"]
+                        
+                        # Truncate very long files
+                        if len(dep_code) > 3000:
+                            dep_code = dep_code[:3000] + "\n\n// ... (truncated)"
+                        
+                        prompt_parts.append(f"""
+File: {dep_file}
+```{dep_lang}
+{dep_code}
+```
+""")
+                    
+                    prompt_parts.append("""
+CRITICAL RULES:
+1. Import types/functions from files above using CORRECT paths
+2. Do NOT redefine types that already exist above
+3. Ensure compatibility with files above
+4. Use EXACT import paths shown in file structure
+""")
+                
+                prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {file_path}")
+                
+                user_prompt = "\n".join(prompt_parts)
+                
+                # Generate with GPT-4o
+                messages = [{"role": "user", "content": user_prompt}]
+                
+                code = ask_openai(
+                    messages=messages,
+                    model="gpt-4o",
+                    max_tokens=4000,
+                    temperature=0.3,
+                    system_prompt=FILE_GENERATOR_SYSTEM
+                )
+                
+                if code.startswith("[OpenAI Error]"):
+                    logger.error(f"❌ OpenAI error for {file_path}: {code}")
+                    files_failed += 1
+                    errors.append(f"{file_path}: {code}")
+                    
+                    # Mark as failed
+                    db.execute(text("""
+                        UPDATE file_specifications
+                        SET status = 'failed',
+                            updated_at = :now
+                        WHERE project_id = :project_id
+                          AND file_path = :file_path
+                    """), {
+                        "now": datetime.utcnow(),
+                        "project_id": project_id,
+                        "file_path": file_path
+                    })
+                    db.commit()
+                    continue
+                
+                # Clean up
+                code = clean_code_output(code)
+                
+                # Save to database
+                db.execute(text("""
+                    UPDATE file_specifications
+                    SET generated_code = :code,
+                        status = 'generated',
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND file_path = :file_path
+                """), {
+                    "code": code,
+                    "now": datetime.utcnow(),
+                    "project_id": project_id,
+                    "file_path": file_path
+                })
+                db.commit()
+                
+                files_generated += 1
+                logger.info(f"✅ [{i}/{len(generation_order)}] Generated {file_path} ({len(code)} chars)")
+                
+            except Exception as e:
+                logger.exception(f"❌ Failed to generate {file_path}")
+                files_failed += 1
+                errors.append(f"{file_path}: {str(e)}")
+                
+                # Mark as failed
+                try:
+                    db.execute(text("""
+                        UPDATE file_specifications
+                        SET status = 'failed',
+                            updated_at = :now
+                        WHERE project_id = :project_id
+                          AND file_path = :file_path
+                    """), {
+                        "now": datetime.utcnow(),
+                        "project_id": project_id,
+                        "file_path": file_path
+                    })
+                    db.commit()
+                except:
+                    pass
+        
+        # Final summary
+        completed_at = datetime.utcnow()
+        duration = (completed_at - started_at).total_seconds()
+        
+        logger.info(f"""
+🎉 Batch generation completed for project {project_id}:
+   Total files: {len(generation_order)}
+   Generated: {files_generated}
+   Failed: {files_failed}
+   Duration: {duration:.1f}s
+   Errors: {len(errors)}
+""")
+        
+        if errors:
+            for error in errors[:5]:  # Log first 5 errors
+                logger.error(f"  - {error}")
+        
+    except Exception as e:
+        logger.exception(f"❌ Batch generation failed for project {project_id}")
+    finally:
+        db.close()
+
+
+@router.get("/generation-status/{project_id}")
+async def get_generation_status(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current status of batch generation
+    
+    Returns progress, current file, completion status, etc.
+    """
+    
+    # Check project exists
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Get counts by status
+    status_counts = db.execute(text("""
+        SELECT 
+            status,
+            COUNT(*) as count
+        FROM file_specifications
+        WHERE project_id = :project_id
+        GROUP BY status
+    """), {"project_id": project_id}).fetchall()
+    
+    total = sum(row[1] for row in status_counts)
+    generated = sum(row[1] for row in status_counts if row[0] == 'generated')
+    failed = sum(row[1] for row in status_counts if row[0] == 'failed')
+    pending = sum(row[1] for row in status_counts if row[0] == 'pending')
+    
+    # Get currently generating file (if any)
+    # (In this simple version, we don't track "currently generating")
+    # Could add a 'generating' status if needed
+    
+    # Determine overall status
+    if pending == 0 and failed == 0:
+        overall_status = "completed"
+    elif pending > 0:
+        overall_status = "running"
+    else:
+        overall_status = "completed_with_errors"
+    
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "status": overall_status,
+        "total_files": total,
+        "files_generated": generated,
+        "files_failed": failed,
+        "files_pending": pending,
+        "progress_percent": int((generated / total * 100) if total > 0 else 0),
+        "summary": {
+            status: count 
+            for status, count in status_counts
+        }
+    }
 
 # ====================================================================
 # 🆕 SAVE STRUCTURE ENDPOINT (Phase 0 Week 1)
