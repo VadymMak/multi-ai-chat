@@ -7,6 +7,16 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 import logging
+from datetime import datetime
+from collections import Counter
+from sqlalchemy.orm import Session
+
+from app.memory.db import get_db
+from app.memory.models import Project
+from app.services.project_structure_parser import (
+    parse_project_structure, 
+    analyze_basic_dependencies
+)
 
 from app.deps import get_current_user
 from app.providers.openai_provider import ask_openai
@@ -176,3 +186,125 @@ def clean_code_output(code: str) -> str:
         lines = lines[:-1]
     
     return "\n".join(lines)
+
+# ====================================================================
+# 🆕 SAVE STRUCTURE ENDPOINT (Phase 0 Week 1)
+# ====================================================================
+
+@router.post("/save-structure/{project_id}")
+async def save_project_structure(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Parse project_structure and save to file_specifications table
+    
+    This endpoint:
+    1. Loads project.project_structure (TEXT)
+    2. Parses it (supports JSON/Markdown/Plain)
+    3. Saves each file to file_specifications
+    4. Analyzes and saves basic dependencies
+    """
+    
+    # 1. Load project
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    if not project.project_structure:
+        raise HTTPException(
+            status_code=400, 
+            detail="Project has no structure. Generate with Debate Mode or sync Git first."
+        )
+    
+    # 2. Parse structure
+    try:
+        file_specs = parse_project_structure(project.project_structure)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse project_structure: {str(e)}"
+        )
+    
+    if not file_specs:
+        raise HTTPException(
+            status_code=400,
+            detail="No files found in project_structure"
+        )
+    
+    # 3. Clear existing specifications for this project
+    db.execute(
+        "DELETE FROM file_specifications WHERE project_id = :project_id",
+        {"project_id": project_id}
+    )
+    db.execute(
+        "DELETE FROM file_dependencies WHERE project_id = :project_id",
+        {"project_id": project_id}
+    )
+    db.commit()
+    
+    # 4. Save file specifications
+    files_saved = 0
+    for spec in file_specs:
+        db.execute("""
+            INSERT INTO file_specifications 
+            (project_id, file_path, file_number, description, language, status, created_at, updated_at)
+            VALUES (:project_id, :file_path, :file_number, :description, :language, 'pending', :now, :now)
+        """, {
+            "project_id": project_id,
+            "file_path": spec.file_path,
+            "file_number": spec.file_number,
+            "description": spec.description,
+            "language": spec.language,
+            "now": datetime.utcnow()
+        })
+        files_saved += 1
+    
+    db.commit()
+    
+    # 5. Analyze and save dependencies
+    dependencies = analyze_basic_dependencies(file_specs)
+    dependencies_saved = 0
+    
+    for source_file, targets in dependencies.items():
+        for target_file in targets:
+            db.execute("""
+                INSERT INTO file_dependencies
+                (project_id, source_file, target_file, dependency_type, created_at)
+                VALUES (:project_id, :source_file, :target_file, 'import', :now)
+            """, {
+                "project_id": project_id,
+                "source_file": source_file,
+                "target_file": target_file,
+                "now": datetime.utcnow()
+            })
+            dependencies_saved += 1
+    
+    db.commit()
+    
+    # 6. Language distribution
+    lang_count = Counter(f.language for f in file_specs)
+    
+    logger.info(f"✅ Saved {files_saved} files and {dependencies_saved} dependencies for project {project_id}")
+    
+    return {
+        "success": True,
+        "project_id": project_id,
+        "project_name": project.name,
+        "files_saved": files_saved,
+        "dependencies_saved": dependencies_saved,
+        "languages": dict(lang_count),
+        "sample_files": [
+            {
+                "file_path": spec.file_path,
+                "language": spec.language,
+                "description": spec.description
+            }
+            for spec in file_specs[:5]
+        ]
+    }
