@@ -112,8 +112,8 @@ async def generate_file(
         )
         
         # Check for error response
-        if code.startswith("[OpenAI Error]"):
-            logger.error(f"❌ OpenAI error for {request.file_path}: {code}")
+        if code.startswith("[OpenAI Error]") or code.startswith("[Claude Error]"):
+            logger.error(f"❌ AI error for {request.file_path}: {code}")
             raise HTTPException(status_code=500, detail=code)
         
         # Detect language from file extension
@@ -446,21 +446,16 @@ class BatchGenerationResponse(BaseModel):
 async def generate_all_files_in_order(
     project_id: int,
     background_tasks: BackgroundTasks,
+    use_debate: bool = True,  # ← ADD THIS
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Generate ALL files in correct dependency order
     
-    This endpoint:
-    1. Loads all file_specifications for project
-    2. Loads all file_dependencies
-    3. Performs topological sort to get correct order
-    4. Generates files one by one in background
-    5. Returns immediately with generation order
-    
-    Background generation continues after response.
-    Use /generation-status/{project_id} to check progress.
+    NEW: Supports debate mode (3-step) for higher quality!
+    - use_debate=True: GPT-4o → Sonnet → Sonnet 4.5 (slower, better quality)
+    - use_debate=False: GPT-4o only (faster, cheaper)
     """
     
     logger.info(f"🚀 Starting batch generation for project {project_id}")
@@ -486,6 +481,21 @@ async def generate_all_files_in_order(
             status_code=400,
             detail="No files found. Run /save-structure first!"
         )
+    
+    # Get API keys if debate mode is enabled
+    openai_key = None
+    anthropic_key = None
+    
+    if use_debate:
+        from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+        try:
+            openai_key = get_openai_key(current_user, db, required=True)
+            anthropic_key = get_anthropic_key(current_user, db, required=True)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Debate mode requires API keys: {str(e)}"
+            )
     
     # 3. Get generation order
     try:
@@ -520,7 +530,10 @@ async def generate_all_files_in_order(
         generate_files_background,
         project_id=project_id,
         generation_order=generation_order,
-        user_id=current_user.id
+        user_id=current_user.id,
+        use_debate=use_debate,  # ← ADD THIS
+        openai_key=openai_key,  # ← ADD THIS
+        anthropic_key=anthropic_key  # ← ADD THIS
     )
     
     logger.info(f"✅ Batch generation started for project {project_id}")
@@ -538,7 +551,10 @@ async def generate_all_files_in_order(
 async def generate_files_background(
     project_id: int,
     generation_order: List[str],
-    user_id: int
+    user_id: int,
+    use_debate: bool = True,  # ← ADD THIS
+    openai_key: Optional[str] = None,  # ← ADD THIS
+    anthropic_key: Optional[str] = None  # ← ADD THIS
 ):
     """
     Background task to generate all files
@@ -551,7 +567,9 @@ async def generate_files_background(
     db = SessionLocal()
     
     try:
+        mode_name = "Debate Mode (3-step)" if use_debate else "Fast Mode (GPT-4o)"
         logger.info(f"🔄 Background generation started for project {project_id}")
+        logger.info(f"🎯 Mode: {mode_name}")
         
         started_at = datetime.utcnow()
         files_generated = 0
@@ -593,62 +611,81 @@ async def generate_files_background(
                     file_path=file_path
                 )
                 
-                # Build prompt
-                prompt_parts = []
-                
-                prompt_parts.append(f"""PROJECT: {project.name}
+                # ========== DEBATE MODE OR FAST MODE ==========
+                if use_debate and openai_key and anthropic_key:
+                    # Use 3-step debate mode
+                    logger.info(f"  🎯 Using Debate Mode (3-step)")
+                    code = await generate_file_with_debate(
+                        file_path=file_path,
+                        file_number=file_number,
+                        description=description,
+                        language=language,
+                        project_name=project.name,
+                        context_files=context_data["context_files"],
+                        openai_key=openai_key,
+                        anthropic_key=anthropic_key
+                    )
+                else:
+                    # Fast mode: GPT-4o only
+                    logger.info(f"  ⚡ Using Fast Mode (GPT-4o)")
+                    
+                    # Build prompt
+                    prompt_parts = []
+                    
+                    prompt_parts.append(f"""PROJECT: {project.name}
 FILE TO GENERATE: {file_path}
 FILE NUMBER: [{file_number}]
 LANGUAGE: {language}
 """)
-                
-                if description:
-                    prompt_parts.append(f"DESCRIPTION: {description}\n")
-                
-                # Add context from already-generated files
-                if context_data["context_files"]:
-                    prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
                     
-                    for dep_file, dep_data in context_data["context_files"].items():
-                        dep_lang = dep_data["language"] or "text"
-                        dep_code = dep_data["code"]
+                    if description:
+                        prompt_parts.append(f"DESCRIPTION: {description}\n")
+                    
+                    # Add context from already-generated files
+                    if context_data["context_files"]:
+                        prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
                         
-                        # Truncate very long files
-                        if len(dep_code) > 3000:
-                            dep_code = dep_code[:3000] + "\n\n// ... (truncated)"
-                        
-                        prompt_parts.append(f"""
+                        for dep_file, dep_data in context_data["context_files"].items():
+                            dep_lang = dep_data["language"] or "text"
+                            dep_code = dep_data["code"]
+                            
+                            # Truncate very long files
+                            if len(dep_code) > 3000:
+                                dep_code = dep_code[:3000] + "\n\n// ... (truncated)"
+                            
+                            prompt_parts.append(f"""
 File: {dep_file}
 ```{dep_lang}
 {dep_code}
 ```
 """)
-                    
-                    prompt_parts.append("""
+                        
+                        prompt_parts.append("""
 CRITICAL RULES:
 1. Import types/functions from files above using CORRECT paths
 2. Do NOT redefine types that already exist above
 3. Ensure compatibility with files above
 4. Use EXACT import paths shown in file structure
 """)
+                    
+                    prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {file_path}")
+                    
+                    user_prompt = "\n".join(prompt_parts)
+                    
+                    # Generate with GPT-4o
+                    messages = [{"role": "user", "content": user_prompt}]
+                    
+                    code = ask_openai(
+                        messages=messages,
+                        model="gpt-4o",
+                        max_tokens=4000,
+                        temperature=0.3,
+                        system_prompt=FILE_GENERATOR_SYSTEM
+                    )
+                # ========== END MODE SELECTION ==========
                 
-                prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {file_path}")
-                
-                user_prompt = "\n".join(prompt_parts)
-                
-                # Generate with GPT-4o
-                messages = [{"role": "user", "content": user_prompt}]
-                
-                code = ask_openai(
-                    messages=messages,
-                    model="gpt-4o",
-                    max_tokens=4000,
-                    temperature=0.3,
-                    system_prompt=FILE_GENERATOR_SYSTEM
-                )
-                
-                if code.startswith("[OpenAI Error]"):
-                    logger.error(f"❌ OpenAI error for {file_path}: {code}")
+                if code.startswith("[OpenAI Error]") or code.startswith("[Claude Error]"):
+                    logger.error(f"❌ AI error for {file_path}: {code}")
                     files_failed += 1
                     errors.append(f"{file_path}: {code}")
                     
@@ -717,6 +754,7 @@ CRITICAL RULES:
         
         logger.info(f"""
 🎉 Batch generation completed for project {project_id}:
+   Mode: {mode_name}
    Total files: {len(generation_order)}
    Generated: {files_generated}
    Failed: {files_failed}
