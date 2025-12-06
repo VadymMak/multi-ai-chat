@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 from collections import Counter
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.memory.db import get_db
 from app.memory.models import Project
@@ -239,23 +240,23 @@ async def save_project_structure(
     
     # 3. Clear existing specifications for this project
     db.execute(
-        "DELETE FROM file_specifications WHERE project_id = :project_id",
-        {"project_id": project_id}
-    )
+    text("DELETE FROM file_specifications WHERE project_id = :project_id"),
+    {"project_id": project_id}
+)
     db.execute(
-        "DELETE FROM file_dependencies WHERE project_id = :project_id",
-        {"project_id": project_id}
-    )
+    text("DELETE FROM file_dependencies WHERE project_id = :project_id"),
+    {"project_id": project_id}
+)
     db.commit()
     
     # 4. Save file specifications
     files_saved = 0
     for spec in file_specs:
-        db.execute("""
+        db.execute(text("""
             INSERT INTO file_specifications 
             (project_id, file_path, file_number, description, language, status, created_at, updated_at)
             VALUES (:project_id, :file_path, :file_number, :description, :language, 'pending', :now, :now)
-        """, {
+        """), {
             "project_id": project_id,
             "file_path": spec.file_path,
             "file_number": spec.file_number,
@@ -273,11 +274,11 @@ async def save_project_structure(
     
     for source_file, targets in dependencies.items():
         for target_file in targets:
-            db.execute("""
+            db.execute(text("""
                 INSERT INTO file_dependencies
                 (project_id, source_file, target_file, dependency_type, created_at)
                 VALUES (:project_id, :source_file, :target_file, 'import', :now)
-            """, {
+            """), {
                 "project_id": project_id,
                 "source_file": source_file,
                 "target_file": target_file,
