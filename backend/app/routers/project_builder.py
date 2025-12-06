@@ -798,6 +798,149 @@ async def get_generation_status(
     }
 
 # ====================================================================
+# 🆕 DEBATE MODE FILE GENERATION (Phase 0.5)
+# ====================================================================
+
+async def generate_file_with_debate(
+    file_path: str,
+    file_number: int,
+    description: str,
+    language: str,
+    project_name: str,
+    context_files: dict,
+    openai_key: str,
+    anthropic_key: str
+) -> str:
+    """
+    Generate file using 3-step debate process:
+    
+    Step 1: GPT-4o generates initial code
+    Step 2: Claude Sonnet reviews and critiques
+    Step 3: Claude Opus creates final version
+    
+    Returns: Final code
+    """
+    from app.providers.claude_provider import ask_claude
+    from starlette.concurrency import run_in_threadpool
+    
+    logger.info(f"🎯 Debate Mode: Generating {file_path}")
+    
+    # ---- STEP 1: GPT-4o generates initial version ----
+    logger.info(f"  📝 Step 1/3: GPT-4o initial generation...")
+    
+    step1_prompt_parts = [
+        f"Generate {language} code for: {file_path}",
+        f"Description: {description}",
+        f"Project: {project_name}",
+    ]
+    
+    if context_files:
+        step1_prompt_parts.append("\n=== CONTEXT FROM OTHER FILES ===\n")
+        for dep_file, dep_data in context_files.items():
+            code_preview = dep_data["code"][:500] + "..." if len(dep_data["code"]) > 500 else dep_data["code"]
+            step1_prompt_parts.append(f"File: {dep_file}\n```\n{code_preview}\n```\n")
+    
+    step1_prompt_parts.append(f"\nGenerate COMPLETE code for {file_path}")
+    step1_prompt = "\n".join(step1_prompt_parts)
+    
+    try:
+        step1_code = await run_in_threadpool(
+            ask_openai,
+            [{"role": "user", "content": step1_prompt}],
+            model="gpt-4o",
+            max_tokens=4000,
+            temperature=0.3,
+            system_prompt=FILE_GENERATOR_SYSTEM,
+            api_key=openai_key
+        )
+    except Exception as e:
+        logger.error(f"❌ Step 1 failed: {e}")
+        raise
+    
+    step1_code = clean_code_output(step1_code)
+    logger.info(f"  ✅ Step 1 complete: {len(step1_code)} chars")
+    
+    # ---- STEP 2: Claude Sonnet reviews ----
+    logger.info(f"  🔍 Step 2/3: Claude Sonnet review...")
+    
+    step2_prompt = f"""Review this generated code and provide critique:
+
+File: {file_path}
+Language: {language}
+
+Generated Code:
+```{language}
+{step1_code}
+```
+
+Check for:
+1. Import errors
+2. Type errors  
+3. Missing dependencies
+4. Best practices violations
+5. Compatibility issues
+
+Provide constructive feedback and suggestions for improvement."""
+    
+    try:
+        step2_review = await run_in_threadpool(
+            ask_claude,
+            [{"role": "user", "content": step2_prompt}],
+            system="You are a code reviewer. Be constructive and helpful.",
+            api_key=anthropic_key
+        )
+    except Exception as e:
+        logger.error(f"❌ Step 2 failed: {e}")
+        # Fallback: use step1 code if review fails
+        logger.warning(f"⚠️ Using GPT-4o code without review")
+        return step1_code
+    
+    logger.info(f"  ✅ Step 2 complete: {len(step2_review)} chars")
+    
+    # ---- STEP 3: Claude Opus final version ----
+    logger.info(f"  🎯 Step 3/3: Claude Opus final synthesis...")
+    
+    step3_prompt = f"""Create the FINAL, BEST version of this code.
+
+File: {file_path}  
+Language: {language}
+Description: {description}
+
+Initial Code (GPT-4o):
+```{language}
+{step1_code}
+```
+
+Review Feedback (Sonnet):
+{step2_review}
+
+Context Files Available:
+{", ".join(context_files.keys()) if context_files else "None"}
+
+Generate the FINAL, IMPROVED code incorporating the review feedback.
+Return ONLY the code, no explanations."""
+    
+    try:
+        step3_final = await run_in_threadpool(
+            ask_claude,
+            [{"role": "user", "content": step3_prompt}],
+            system="You are an expert developer. Create the best possible final code.",
+            model="claude-opus-4",
+            api_key=anthropic_key
+        )
+    except Exception as e:
+        logger.error(f"❌ Step 3 failed: {e}")
+        # Fallback: use step1 code if final fails
+        logger.warning(f"⚠️ Using GPT-4o code as fallback")
+        return step1_code
+    
+    step3_final = clean_code_output(step3_final)
+    logger.info(f"  ✅ Step 3 complete: {len(step3_final)} chars")
+    logger.info(f"🎉 Debate Mode complete for {file_path}")
+    
+    return step3_final
+
+# ====================================================================
 # 🆕 SAVE STRUCTURE ENDPOINT (Phase 0 Week 1)
 # ====================================================================
 
@@ -917,4 +1060,60 @@ async def save_project_structure(
             }
             for spec in file_specs[:5]
         ]
+    }
+
+
+@router.post("/test-debate-generation")
+async def test_debate_generation(
+    project_id: int,
+    file_path: str,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    TEST endpoint - generate ONE file with debate mode
+    """
+    from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+    
+    # Get API keys
+    openai_key = get_openai_key(current_user, db, required=True)
+    anthropic_key = get_anthropic_key(current_user, db, required=True)
+    
+    # Load file spec
+    file_spec = db.execute(text("""
+        SELECT file_number, description, language
+        FROM file_specifications
+        WHERE project_id = :project_id 
+          AND file_path = :file_path
+    """), {
+        "project_id": project_id,
+        "file_path": file_path
+    }).fetchone()
+    
+    if not file_spec:
+        raise HTTPException(404, "File not found")
+    
+    # Load project
+    project = db.query(Project).filter(Project.id == project_id).first()
+    
+    # Load context
+    context_data = load_dependency_context(db, project_id, file_path)
+    
+    # Generate with debate
+    code = await generate_file_with_debate(
+        file_path=file_path,
+        file_number=file_spec[0],
+        description=file_spec[1],
+        language=file_spec[2] or "typescript",
+        project_name=project.name,
+        context_files=context_data["context_files"],
+        openai_key=openai_key,
+        anthropic_key=anthropic_key
+    )
+    
+    return {
+        "success": True,
+        "file_path": file_path,
+        "code": code,
+        "code_length": len(code)
     }
