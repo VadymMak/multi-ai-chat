@@ -245,9 +245,9 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
 
           return (
             <div key={project.id} className="relative group">
-              <button
+              <div
                 onClick={() => handleProjectSelect(project)}
-                className={`w-full text-left p-3 rounded-lg border transition-all ${
+                className={`w-full text-left p-3 rounded-lg border transition-all cursor-pointer ${
                   isActive
                     ? "bg-primary/10 border-primary shadow-sm"
                     : "bg-surface border-border hover:border-primary/50 hover:bg-surface/80"
@@ -299,7 +299,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                     {project.description}
                   </div>
                 )}
-              </button>
+              </div>
             </div>
           );
         })}

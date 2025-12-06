@@ -1,10 +1,12 @@
 import React, { useState } from "react";
-import { Settings, Trash2, LogOut, User } from "lucide-react";
+import { Settings, Trash2, LogOut, User, FileText } from "lucide-react";
 import ProjectSelector from "../../features/aiConversation/ProjectSelector";
+import FilesModal from "../FileViewer/FilesModal";
 import { useChatStore } from "../../store/chatStore";
 import { useAuthStore } from "../../store/authStore";
 import SettingsModal from "../Settings/SettingsModal";
 import { toast } from "../../store/toastStore";
+import { useProjectStore } from "../../store/projectStore";
 
 interface SidebarProps {
   // Add any props if needed later
@@ -12,11 +14,19 @@ interface SidebarProps {
 
 const Sidebar: React.FC<SidebarProps> = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
 
   // Store hooks
   const clearMessages = useChatStore.use.clearMessages();
   const messages = useChatStore.use.messages();
   const { user, logout } = useAuthStore();
+  const projectId = useProjectStore((s) => s.projectId);
+  const projectsByRole = useProjectStore((s) => s.projectsByRole);
+  const roleId = 1; // Or get from your memory store if needed
+  const currentProject =
+    projectId && projectsByRole[roleId]
+      ? projectsByRole[roleId].find((p) => p.id === projectId)
+      : null;
 
   // Handle clearing current session
   const handleClearChat = () => {
@@ -57,7 +67,7 @@ const Sidebar: React.FC<SidebarProps> = () => {
           <ProjectSelector onOpenSettings={handleOpenSettings} />
         </div>
 
-        {/* Footer Buttons */}
+        {/* Footer Buttons - KEEP ONLY THIS ONE */}
         <div className="border-t border-border p-4 space-y-2">
           <button
             onClick={handleClearChat}
@@ -72,6 +82,19 @@ const Sidebar: React.FC<SidebarProps> = () => {
             <Trash2 size={16} />
             Clear Chat {messages.length > 0 && `(${messages.length})`}
           </button>
+
+          <button
+            onClick={() => setIsFilesModalOpen(true)}
+            disabled={!projectId}
+            className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-primary/10 text-primary rounded-lg border border-primary/30 hover:border-primary flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-surface disabled:hover:border-primary/30"
+            title={
+              projectId ? "View generated files" : "Select a project first"
+            }
+          >
+            <FileText size={16} />
+            View Files
+          </button>
+
           <button
             onClick={handleOpenSettings}
             className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-surface/80 rounded-lg border border-border hover:border-primary/50 flex items-center justify-center gap-2 text-text-primary transition"
@@ -115,6 +138,17 @@ const Sidebar: React.FC<SidebarProps> = () => {
           </div>
         )}
       </aside>
+
+      {/* Modals - KEEP ONLY ONE OF EACH */}
+      {projectId && currentProject && (
+        <FilesModal
+          isOpen={isFilesModalOpen}
+          onClose={() => setIsFilesModalOpen(false)}
+          projectId={projectId}
+          projectName={currentProject.name}
+        />
+      )}
+
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

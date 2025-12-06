@@ -1,6 +1,8 @@
 // File: src/store/projectStore.ts
 import { create, StateCreator, StoreApi, UseBoundStore } from "zustand";
 import { persist, PersistOptions, createJSONStorage } from "zustand/middleware";
+import { getGeneratedFiles } from "../services/fileApi";
+import type { GeneratedFile } from "../types/projects";
 import api from "../services/api";
 import type {
   Project,
@@ -50,6 +52,12 @@ export interface ProjectStore {
   ) => Promise<GitLinkResponse>;
   syncGitStructure: (projectId: number) => Promise<GitSyncResponse>;
   unlinkGitRepository: (projectId: number) => Promise<void>;
+  generatedFiles: GeneratedFile[];
+  filesLoading: boolean;
+  filesError: string | null;
+
+  fetchGeneratedFiles: (projectId: number) => Promise<void>;
+  clearGeneratedFiles: () => void;
 }
 
 type MyPersist = PersistOptions<ProjectStore, Partial<ProjectStore>>;
@@ -140,6 +148,9 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
       allProjects: [],
       isLoading: false,
       hasHydrated: false,
+      generatedFiles: [],
+      filesLoading: false,
+      filesError: null,
 
       setProjectId: (incoming) => {
         const id = toProjectId(incoming);
@@ -548,6 +559,59 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
           );
           throw err;
         }
+      },
+      fetchGeneratedFiles: async (projectId: number) => {
+        set({ filesLoading: true, filesError: null });
+        try {
+          const response = await getGeneratedFiles(projectId);
+          set({
+            generatedFiles: response.files,
+            filesLoading: false,
+          });
+          if (process.env.NODE_ENV !== "production") {
+            console.debug(
+              `📥 [projectStore] Loaded ${response.files.length} generated files`
+            );
+          }
+        } catch (error) {
+          let errorMsg = "Failed to load files";
+
+          if (error instanceof Error) {
+            errorMsg = error.message;
+          } else if (
+            error &&
+            typeof error === "object" &&
+            "response" in error
+          ) {
+            const axiosError = error as {
+              response?: { data?: { detail?: string } };
+              message?: string;
+            };
+            errorMsg =
+              axiosError.response?.data?.detail ||
+              axiosError.message ||
+              errorMsg;
+          }
+
+          set({
+            filesError: errorMsg,
+            filesLoading: false,
+            generatedFiles: [],
+          });
+
+          console.error(
+            "❌ [projectStore] Failed to fetch generated files:",
+            error
+          );
+        }
+      },
+
+      clearGeneratedFiles: () => {
+        set({
+          generatedFiles: [],
+          filesError: null,
+          filesLoading: false,
+        });
       },
     }),
     {

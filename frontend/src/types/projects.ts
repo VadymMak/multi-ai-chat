@@ -56,3 +56,26 @@ export interface GitSyncResponse {
   files_preview?: Array<{ path: string }>;
   message?: string;
 }
+
+// ✅ NEW: File Viewer types (Phase 0 - Week 1)
+export interface GeneratedFile {
+  file_path: string;
+  content: string;
+  language: string;
+  size: number;
+}
+
+export interface GeneratedFilesResponse {
+  project_id: number;
+  project_name: string;
+  total_files: number;
+  files: GeneratedFile[];
+}
+
+export interface FileNode {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  children?: FileNode[];
+  file?: GeneratedFile;
+}
