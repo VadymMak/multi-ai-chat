@@ -44,6 +44,12 @@ class GenerateFileResponse(BaseModel):
     language: str
     tokens_used: int
 
+class GenerateFileWithContextRequest(BaseModel):
+    """Request to generate file WITH context from database"""
+    project_id: int         # Which project
+    file_path: str          # Path of file to generate
+    use_smart_context: bool = True  # Use Smart Context?
+
 
 # System prompt for file generation
 FILE_GENERATOR_SYSTEM = """You are a senior software engineer generating production-ready code.
@@ -175,6 +181,65 @@ def detect_language(file_path: str) -> str:
     
     return "text"
 
+def load_dependency_context(
+    db: Session,
+    project_id: int,
+    file_path: str
+) -> dict:
+    """
+    Load context from already-generated dependencies
+    
+    Returns:
+        {
+            "dependencies": ["types.d.ts", "utils.ts"],
+            "context_files": {
+                "types.d.ts": "interface Logger {...}",
+                "utils.ts": "export function helper() {...}"
+            }
+        }
+    """
+    
+    # Find dependencies for this file
+    deps = db.execute(text("""
+        SELECT target_file
+        FROM file_dependencies
+        WHERE project_id = :project_id 
+          AND source_file = :file_path
+    """), {
+        "project_id": project_id,
+        "file_path": file_path
+    }).fetchall()
+    
+    dependency_files = [row[0] for row in deps]
+    
+    # Load already-generated code from dependencies
+    context_files = {}
+    
+    for dep_file in dependency_files:
+        result = db.execute(text("""
+            SELECT generated_code, language
+            FROM file_specifications
+            WHERE project_id = :project_id 
+              AND file_path = :file_path
+              AND generated_code IS NOT NULL
+        """), {
+            "project_id": project_id,
+            "file_path": dep_file
+        }).fetchone()
+        
+        if result and result[0]:
+            context_files[dep_file] = {
+                "code": result[0],
+                "language": result[1]
+            }
+    
+    logger.info(f"📦 Loaded {len(context_files)} dependency files for context")
+    
+    return {
+        "dependencies": dependency_files,
+        "context_files": context_files
+    }
+
 
 def clean_code_output(code: str) -> str:
     """Remove markdown code fences if present"""
@@ -187,6 +252,162 @@ def clean_code_output(code: str) -> str:
         lines = lines[:-1]
     
     return "\n".join(lines)
+
+# ====================================================================
+# 🆕 GENERATE FILE WITH CONTEXT (Phase 0 Week 1 Day 2)
+# ====================================================================
+
+@router.post("/generate-file-with-context", response_model=GenerateFileResponse)
+async def generate_file_with_context(
+    request: GenerateFileWithContextRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate code WITH CONTEXT from database
+    
+    NEW FLOW:
+    1. Load file spec from file_specifications
+    2. Load dependencies from file_dependencies
+    3. Load already-generated files (context!)
+    4. Build enhanced prompt with context
+    5. Generate with GPT-4o
+    6. Save to database
+    """
+    
+    logger.info(f"🔧 [WITH CONTEXT] Generating: {request.file_path}")
+    
+    # 1. Load file spec from database
+    file_spec = db.execute(text("""
+        SELECT file_number, description, language, specification
+        FROM file_specifications
+        WHERE project_id = :project_id 
+          AND file_path = :file_path
+    """), {
+        "project_id": request.project_id,
+        "file_path": request.file_path
+    }).fetchone()
+    
+    if not file_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"File spec not found. Run /save-structure first!"
+        )
+    
+    file_number = file_spec[0]
+    description = file_spec[1]
+    language = file_spec[2] or detect_language(request.file_path)
+    
+    # 2. Load project info
+    project = db.query(Project).filter(
+        Project.id == request.project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # 3. Load dependency context
+    context_data = load_dependency_context(
+        db=db,
+        project_id=request.project_id,
+        file_path=request.file_path
+    )
+    
+    # 4. Build ENHANCED prompt with context
+    prompt_parts = []
+    
+    # Project info
+    prompt_parts.append(f"""PROJECT: {project.name}
+FILE TO GENERATE: {request.file_path}
+FILE NUMBER: [{file_number}]
+LANGUAGE: {language}
+""")
+    
+    if description:
+        prompt_parts.append(f"DESCRIPTION: {description}\n")
+    
+    # CRITICAL: Add context from already-generated files
+    if context_data["context_files"]:
+        prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
+        
+        for dep_file, dep_data in context_data["context_files"].items():
+            dep_lang = dep_data["language"] or "text"
+            dep_code = dep_data["code"]
+            
+            prompt_parts.append(f"""
+File: {dep_file}
+```{dep_lang}
+{dep_code}
+```
+""")
+        
+        prompt_parts.append("""
+CRITICAL RULES:
+1. Import types/functions from files above using CORRECT paths
+2. Do NOT redefine types that already exist above
+3. Ensure compatibility with files above
+4. Use EXACT import paths shown in file structure
+""")
+    
+    prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {request.file_path}")
+    
+    user_prompt = "\n".join(prompt_parts)
+    
+    logger.info(f"📝 Prompt size: {len(user_prompt)} chars, Context files: {len(context_data['context_files'])}")
+    
+    try:
+        # 5. Generate with GPT-4o
+        messages = [
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        code = ask_openai(
+            messages=messages,
+            model="gpt-4o",
+            max_tokens=4000,
+            temperature=0.3,
+            system_prompt=FILE_GENERATOR_SYSTEM
+        )
+        
+        if code.startswith("[OpenAI Error]"):
+            logger.error(f"❌ OpenAI error: {code}")
+            raise HTTPException(status_code=500, detail=code)
+        
+        # Clean up
+        code = clean_code_output(code)
+        
+        # 6. Save to database
+        db.execute(text("""
+            UPDATE file_specifications
+            SET generated_code = :code,
+                status = 'generated',
+                updated_at = :now
+            WHERE project_id = :project_id
+              AND file_path = :file_path
+        """), {
+            "code": code,
+            "now": datetime.utcnow(),
+            "project_id": request.project_id,
+            "file_path": request.file_path
+        })
+        db.commit()
+        
+        logger.info(f"✅ Generated {request.file_path} ({len(code)} chars) WITH CONTEXT!")
+        
+        return GenerateFileResponse(
+            file_number=file_number,
+            file_path=request.file_path,
+            code=code,
+            language=language,
+            tokens_used=len(code) // 4
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"❌ Failed to generate {request.file_path}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate: {str(e)}")
 
 # ====================================================================
 # 🆕 SAVE STRUCTURE ENDPOINT (Phase 0 Week 1)
