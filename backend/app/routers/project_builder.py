@@ -446,7 +446,7 @@ class BatchGenerationResponse(BaseModel):
 async def generate_all_files_in_order(
     project_id: int,
     background_tasks: BackgroundTasks,
-    use_debate: bool = True,  # ← ADD THIS
+    use_debate: bool = False,  # ← ADD THIS
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
