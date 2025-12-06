@@ -836,6 +836,118 @@ async def get_generation_status(
     }
 
 # ====================================================================
+# 🆕 DOWNLOAD ENDPOINTS (Phase 0 Week 3)
+# ====================================================================
+
+@router.get("/projects/{project_id}/all-generated-files")
+async def get_all_generated_files(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Get ALL generated files for download
+    Returns list of files with content
+    """
+    
+    # Verify project belongs to user
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Get all generated files
+    files = db.execute(text("""
+        SELECT file_path, generated_code, language
+        FROM file_specifications
+        WHERE project_id = :project_id
+          AND status = 'generated'
+        ORDER BY file_number
+    """), {"project_id": project_id}).fetchall()
+    
+    # Format response
+    file_list = []
+    for file in files:
+        file_list.append({
+            "file_path": file[0],
+            "content": file[1],
+            "language": file[2],
+            "size": len(file[1]) if file[1] else 0
+        })
+    
+    logger.info(f"📥 Downloaded {len(file_list)} files for project {project_id}")
+    
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "total_files": len(file_list),
+        "files": file_list
+    }
+
+
+@router.get("/projects/{project_id}/dependencies")
+async def get_project_dependencies(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Get project dependencies for package.json or requirements.txt
+    """
+    
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Parse project structure for dependencies
+    dependencies = {}
+    dev_dependencies = {}
+    package_manager = "unknown"
+    
+    if project.project_structure:
+        import json
+        try:
+            structure = json.loads(project.project_structure)
+            dependencies = structure.get("dependencies", {})
+            dev_dependencies = structure.get("devDependencies", {})
+        except:
+            # If not JSON, try to extract from structure text
+            pass
+    
+    # Detect package manager from files
+    files = db.execute(text("""
+        SELECT file_path
+        FROM file_specifications
+        WHERE project_id = :project_id
+    """), {"project_id": project_id}).fetchall()
+    
+    file_paths = [f[0] for f in files]
+    
+    if any("package.json" in fp for fp in file_paths):
+        package_manager = "npm"
+    elif any("requirements.txt" in fp for fp in file_paths):
+        package_manager = "pip"
+    elif any("Cargo.toml" in fp for fp in file_paths):
+        package_manager = "cargo"
+    elif any("go.mod" in fp for fp in file_paths):
+        package_manager = "go"
+    
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "package_manager": package_manager,
+        "dependencies": dependencies,
+        "dev_dependencies": dev_dependencies
+    }
+
+# ====================================================================
 # 🆕 DEBATE MODE FILE GENERATION (Phase 0.5)
 # ====================================================================
 
