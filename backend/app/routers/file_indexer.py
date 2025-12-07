@@ -406,21 +406,32 @@ async def find_related_files(
         if not result or not result[0]:
             raise HTTPException(404, f"File not indexed: {file_path}")
         
+        # Convert embedding to PostgreSQL vector string format
+        # This avoids the :: conflict with SQLAlchemy parameters
+        target_embedding = result[0]
+        if isinstance(target_embedding, str):
+            embedding_str = target_embedding
+        else:
+            # It's a list/array from pgvector
+            embedding_str = "[" + ",".join(str(x) for x in target_embedding) + "]"
+        
         # Find similar files (excluding the target file)
-        related = db.execute(text("""
+        # Embed vector directly in SQL to avoid :param::vector syntax conflict
+        sql = f"""
             SELECT 
                 file_path, file_name, language, line_count,
-                1 - (embedding <=> :target_embedding::vector) AS similarity
+                1 - (embedding <=> '{embedding_str}'::vector) AS similarity
             FROM file_embeddings
             WHERE project_id = :project_id
               AND file_path != :file_path
               AND embedding IS NOT NULL
-            ORDER BY embedding <=> :target_embedding::vector
+            ORDER BY embedding <=> '{embedding_str}'::vector
             LIMIT :limit
-        """), {
+        """
+        
+        related = db.execute(text(sql), {
             "project_id": project_id,
             "file_path": file_path,
-            "target_embedding": result[0],
             "limit": limit
         }).fetchall()
         
