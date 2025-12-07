@@ -724,7 +724,17 @@ async def generate_all_files_in_order(
     try:
         generation_order = get_generation_order_from_db(project_id, db)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        # Circular dependencies detected - use simple file_number order as fallback
+        logger.warning(f"⚠️ {e} - Using fallback order by file_number")
+        
+        fallback_files = db.execute(text("""
+            SELECT file_path FROM file_specifications
+            WHERE project_id = :project_id
+            ORDER BY file_number
+        """), {"project_id": project_id}).fetchall()
+        
+        generation_order = [row[0] for row in fallback_files]
+        logger.info(f"📋 Using fallback order: {len(generation_order)} files")
     except Exception as e:
         raise HTTPException(500, f"Failed to determine generation order: {e}")
     

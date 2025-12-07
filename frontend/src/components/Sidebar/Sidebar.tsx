@@ -124,8 +124,8 @@ const Sidebar: React.FC<SidebarProps> = () => {
       );
     }
 
-    // Completed or has files - show View Files with count
-    if (isCompleted || filesGenerated > 0) {
+    // Has files - show View Files with count (enabled)
+    if (filesGenerated > 0) {
       return (
         <button
           onClick={() => setIsFilesModalOpen(true)}
@@ -138,15 +138,15 @@ const Sidebar: React.FC<SidebarProps> = () => {
       );
     }
 
-    // Idle/No files yet
+    // No files yet - disabled
     return (
       <button
-        onClick={() => setIsFilesModalOpen(true)}
-        className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-primary/10 text-text-secondary hover:text-primary rounded-lg border border-border hover:border-primary/50 flex items-center justify-center gap-2 transition"
+        disabled
+        className="w-full px-4 py-2.5 text-sm bg-surface text-text-secondary rounded-lg border border-border flex items-center justify-center gap-2 opacity-50 cursor-not-allowed"
         title="No files generated yet"
       >
         <FileText size={16} />
-        View Files
+        No Files
       </button>
     );
   };
