@@ -1,12 +1,19 @@
 # File: backend/app/routers/project_builder.py
 """
 Project Builder API - Generate individual files from project structure
+
+UPDATED: Uses Claude Sonnet 4.5 with Smart Context for code generation
+- Dependency context (already-generated files)
+- pgvector semantic search (relevant past conversations)
+- Memory summaries (architecture decisions)
+- Project structure (Git file tree)
 """
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import logging
+import json
 from datetime import datetime
 from collections import Counter
 from sqlalchemy.orm import Session
@@ -14,13 +21,16 @@ from sqlalchemy import text
 
 from app.memory.db import get_db
 from app.memory.models import Project
+from app.memory.manager import MemoryManager
 from app.services.project_structure_parser import (
     parse_project_structure, 
     analyze_basic_dependencies
 )
+from app.services import vector_service
 
 from app.deps import get_current_user
 from app.providers.openai_provider import ask_openai
+from app.providers.claude_provider import ask_claude
 from app.services.dependency_graph import get_generation_order_from_db
 
 logger = logging.getLogger(__name__)
@@ -28,11 +38,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/project-builder", tags=["project-builder"])
 
 
+# ====================================================================
+# MODELS
+# ====================================================================
+
 class GenerateFileRequest(BaseModel):
     """Request to generate a single file"""
-    project_structure: str  # The full project structure text
-    file_number: int        # Which file to generate [1], [2], etc.
-    file_path: str          # Path of the file to generate
+    project_structure: str
+    file_number: int
+    file_path: str
     project_name: Optional[str] = None
     tech_stack: Optional[str] = None
 
@@ -45,142 +59,114 @@ class GenerateFileResponse(BaseModel):
     language: str
     tokens_used: int
 
+
 class GenerateFileWithContextRequest(BaseModel):
     """Request to generate file WITH context from database"""
-    project_id: int         # Which project
-    file_path: str          # Path of file to generate
-    use_smart_context: bool = True  # Use Smart Context?
+    project_id: int
+    file_path: str
+    use_smart_context: bool = True
 
 
-# System prompt for file generation
+class BatchGenerationStatus(BaseModel):
+    """Status of batch generation"""
+    project_id: int
+    total_files: int
+    files_generated: int
+    files_failed: int
+    current_file: Optional[str]
+    status: str
+    started_at: datetime
+    completed_at: Optional[datetime]
+    duration_seconds: Optional[int]
+    errors: List[str]
+
+
+class BatchGenerationResponse(BaseModel):
+    """Response from batch generation"""
+    success: bool
+    project_id: int
+    project_name: str
+    total_files: int
+    generation_order: List[str]
+    message: str
+
+
+# ====================================================================
+# SYSTEM PROMPTS
+# ====================================================================
+
 FILE_GENERATOR_SYSTEM = """You are a senior software engineer generating production-ready code.
-Generate COMPLETE, WORKING code - not stubs or placeholders.
-Include all necessary imports at the top.
-Add helpful comments for complex logic.
-Follow best practices for the given tech stack.
-Ensure compatibility with other files in the project.
-Include error handling where appropriate.
-Use TypeScript types if applicable.
+
+CRITICAL RULES:
+1. Generate COMPLETE, WORKING code - not stubs or placeholders
+2. Include ALL necessary imports at the top
+3. Use EXACT import paths from the context files provided
+4. Do NOT redefine types/interfaces that already exist in context
+5. Ensure compatibility with already-generated files
+6. Add helpful comments for complex logic
+7. Follow best practices for the given tech stack
+8. Include error handling where appropriate
+9. Use TypeScript types if applicable
+
 Return ONLY the code for this file. No explanations, no markdown code blocks.
 Start directly with the code content."""
 
 
-FILE_GENERATOR_PROMPT = """PROJECT CONTEXT:
-{project_structure}
+FILE_GENERATOR_SYSTEM_WITH_CONTEXT = """You are a senior software engineer generating production-ready code.
 
-FILE TO GENERATE:
-- Number: [{file_number}]
-- Path: {file_path}
-- Project: {project_name}
-- Tech Stack: {tech_stack}
+You have access to:
+1. ALREADY GENERATED FILES - Use their exports, types, and interfaces
+2. RELEVANT CONTEXT - Past discussions and decisions about this project
+3. PROJECT STRUCTURE - The full file tree
 
-GENERATE THE COMPLETE CODE FOR: {file_path}"""
+CRITICAL RULES:
+1. Import from ALREADY GENERATED files using EXACT paths shown
+2. Do NOT redefine types/interfaces - import them instead
+3. Match coding style from existing files
+4. Ensure all imports resolve correctly
+5. Generate COMPLETE working code
+6. Include error handling
+7. Add comments for complex logic
+
+Return ONLY the code. No markdown fences, no explanations."""
 
 
-@router.post("/generate-file", response_model=GenerateFileResponse)
-async def generate_file(
-    request: GenerateFileRequest,
-    current_user = Depends(get_current_user)
-):
-    """
-    Generate code for a single file based on project structure.
-    Uses GPT-4o for fast, high-quality code generation.
-    """
-    logger.info(f"🔧 Generating file [{request.file_number}]: {request.file_path}")
-    
-    # Build the prompt
-    user_prompt = FILE_GENERATOR_PROMPT.format(
-        project_structure=request.project_structure,
-        file_number=request.file_number,
-        file_path=request.file_path,
-        project_name=request.project_name or "Project",
-        tech_stack=request.tech_stack or "TypeScript"
-    )
-    
-    try:
-        # Use GPT-4o for code generation (fast and good quality)
-        messages = [
-            {"role": "user", "content": user_prompt}
-        ]
-        
-        code = ask_openai(
-            messages=messages,
-            model="gpt-4o",
-            max_tokens=4000,
-            temperature=0.3,  # Lower temperature for more consistent code
-            system_prompt=FILE_GENERATOR_SYSTEM
-        )
-        
-        # Check for error response
-        if code.startswith("[OpenAI Error]") or code.startswith("[Claude Error]"):
-            logger.error(f"❌ AI error for {request.file_path}: {code}")
-            raise HTTPException(status_code=500, detail=code)
-        
-        # Detect language from file extension
-        language = detect_language(request.file_path)
-        
-        # Clean up code (remove markdown fences if present)
-        code = clean_code_output(code)
-        
-        # Estimate tokens (rough: 4 chars = 1 token)
-        tokens_used = len(code) // 4
-        
-        logger.info(f"✅ Generated {request.file_path} ({len(code)} chars)")
-        
-        return GenerateFileResponse(
-            file_number=request.file_number,
-            file_path=request.file_path,
-            code=code,
-            language=language,
-            tokens_used=tokens_used
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to generate {request.file_path}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate file: {str(e)}")
-
+# ====================================================================
+# HELPER FUNCTIONS
+# ====================================================================
 
 def detect_language(file_path: str) -> str:
     """Detect programming language from file extension"""
     ext_map = {
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".py": "python",
-        ".json": "json",
-        ".css": "css",
-        ".scss": "scss",
-        ".html": "html",
-        ".md": "markdown",
-        ".yml": "yaml",
-        ".yaml": "yaml",
-        ".sh": "bash",
-        ".bash": "bash",
-        ".sql": "sql",
-        ".graphql": "graphql",
-        ".vue": "vue",
-        ".svelte": "svelte",
-        ".go": "go",
-        ".rs": "rust",
-        ".java": "java",
-        ".kt": "kotlin",
-        ".swift": "swift",
-        ".rb": "ruby",
-        ".php": "php",
-        ".c": "c",
-        ".cpp": "cpp",
-        ".h": "c",
-        ".hpp": "cpp",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".js": "javascript", ".jsx": "javascript",
+        ".py": "python", ".json": "json",
+        ".css": "css", ".scss": "scss",
+        ".html": "html", ".md": "markdown",
+        ".yml": "yaml", ".yaml": "yaml",
+        ".sh": "bash", ".sql": "sql",
+        ".vue": "vue", ".svelte": "svelte",
+        ".go": "go", ".rs": "rust",
+        ".java": "java", ".kt": "kotlin",
     }
     
     for ext, lang in ext_map.items():
         if file_path.endswith(ext):
             return lang
-    
     return "text"
+
+
+def clean_code_output(code: str) -> str:
+    """Remove markdown code fences if present"""
+    lines = code.strip().split("\n")
+    
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    
+    return "\n".join(lines)
+
 
 def load_dependency_context(
     db: Session,
@@ -194,13 +180,11 @@ def load_dependency_context(
         {
             "dependencies": ["types.d.ts", "utils.ts"],
             "context_files": {
-                "types.d.ts": "interface Logger {...}",
-                "utils.ts": "export function helper() {...}"
+                "types.d.ts": {"code": "...", "language": "typescript"}
             }
         }
     """
     
-    # Find dependencies for this file
     deps = db.execute(text("""
         SELECT target_file
         FROM file_dependencies
@@ -212,8 +196,6 @@ def load_dependency_context(
     }).fetchall()
     
     dependency_files = [row[0] for row in deps]
-    
-    # Load already-generated code from dependencies
     context_files = {}
     
     for dep_file in dependency_files:
@@ -242,126 +224,238 @@ def load_dependency_context(
     }
 
 
-def clean_code_output(code: str) -> str:
-    """Remove markdown code fences if present"""
-    lines = code.strip().split("\n")
-    
-    # Check if wrapped in ```
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    
-    return "\n".join(lines)
-
 # ====================================================================
-# 🆕 GENERATE FILE WITH CONTEXT (Phase 0 Week 1 Day 2)
+# 🆕 SMART CONTEXT CODE GENERATION (NEW!)
 # ====================================================================
 
-@router.post("/generate-file-with-context", response_model=GenerateFileResponse)
-async def generate_file_with_context(
-    request: GenerateFileWithContextRequest,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def generate_file_with_smart_context(
+    file_path: str,
+    file_number: int,
+    description: str,
+    language: str,
+    project_id: int,
+    project_name: str,
+    db: Session,
+    anthropic_key: str,
+    role_id: int = 9,  # Project Builder role
+    chat_session_id: Optional[str] = None,
+) -> str:
     """
-    Generate code WITH CONTEXT from database
+    Generate file using Claude Sonnet 4.5 with FULL Smart Context:
     
-    NEW FLOW:
-    1. Load file spec from file_specifications
-    2. Load dependencies from file_dependencies
-    3. Load already-generated files (context!)
-    4. Build enhanced prompt with context
-    5. Generate with GPT-4o
-    6. Save to database
+    1. Dependency context (already-generated files)
+    2. pgvector semantic search (relevant past conversations)
+    3. Memory summaries (architecture decisions)
+    4. Project structure (Git file tree)
+    
+    Returns: Generated code
     """
+    from starlette.concurrency import run_in_threadpool
     
-    logger.info(f"🔧 [WITH CONTEXT] Generating: {request.file_path}")
+    logger.info(f"🎯 [Smart Context] Generating: {file_path}")
     
-    # 1. Load file spec from database
-    file_spec = db.execute(text("""
-        SELECT file_number, description, language, specification
-        FROM file_specifications
-        WHERE project_id = :project_id 
-          AND file_path = :file_path
-    """), {
-        "project_id": request.project_id,
-        "file_path": request.file_path
-    }).fetchone()
+    # Initialize MemoryManager
+    memory = MemoryManager(db)
     
-    if not file_spec:
-        raise HTTPException(
-            status_code=404,
-            detail=f"File spec not found. Run /save-structure first!"
+    # ========== 1. DEPENDENCY CONTEXT ==========
+    logger.info(f"  📦 Loading dependency context...")
+    context_data = load_dependency_context(db, project_id, file_path)
+    dep_count = len(context_data["context_files"])
+    logger.info(f"  ✅ Loaded {dep_count} dependency files")
+    
+    # ========== 2. PGVECTOR SEMANTIC SEARCH ==========
+    logger.info(f"  🔍 Running semantic search...")
+    relevant_context = ""
+    try:
+        # Search for relevant past conversations about this file/feature
+        search_query = f"Generate {file_path} {description} {language}"
+        relevant_context = vector_service.get_relevant_context(
+            db=db,
+            query=search_query,
+            session_id=chat_session_id or str(project_id),
+            limit=3,
+            max_chars_per_message=300
         )
+        if relevant_context:
+            logger.info(f"  ✅ Found relevant context ({len(relevant_context)} chars)")
+        else:
+            logger.info(f"  ℹ️ No relevant past conversations found")
+    except Exception as e:
+        logger.warning(f"  ⚠️ Semantic search failed: {e}")
     
-    file_number = file_spec[0]
-    description = file_spec[1]
-    language = file_spec[2] or detect_language(request.file_path)
+    # ========== 3. MEMORY SUMMARIES ==========
+    logger.info(f"  📝 Loading memory summaries...")
+    summaries = []
+    try:
+        summaries = memory.load_recent_summaries(
+            project_id=str(project_id),
+            role_id=role_id,
+            limit=3
+        )
+        if summaries:
+            logger.info(f"  ✅ Loaded {len(summaries)} summaries")
+        else:
+            logger.info(f"  ℹ️ No summaries found")
+    except Exception as e:
+        logger.warning(f"  ⚠️ Summaries loading failed: {e}")
     
-    # 2. Load project info
-    project = db.query(Project).filter(
-        Project.id == request.project_id,
-        Project.user_id == current_user.id
-    ).first()
+    # ========== 4. PROJECT STRUCTURE ==========
+    logger.info(f"  📁 Loading project structure...")
+    project_structure_text = ""
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if project and project.project_structure:
+            try:
+                structure = json.loads(project.project_structure)
+                files = structure.get("files", [])
+                if files:
+                    file_list = [f.get("path", "") for f in files[:100]]
+                    project_structure_text = "\n".join([f"  - {f}" for f in file_list])
+                    if len(files) > 100:
+                        project_structure_text += f"\n  ... and {len(files) - 100} more files"
+                    logger.info(f"  ✅ Loaded project structure ({len(files)} files)")
+            except json.JSONDecodeError:
+                # Raw text structure
+                project_structure_text = project.project_structure[:2000]
+                logger.info(f"  ✅ Loaded raw project structure")
+    except Exception as e:
+        logger.warning(f"  ⚠️ Project structure loading failed: {e}")
     
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    # ========== BUILD PROMPT ==========
+    logger.info(f"  🔧 Building prompt...")
     
-    # 3. Load dependency context
-    context_data = load_dependency_context(
-        db=db,
-        project_id=request.project_id,
-        file_path=request.file_path
-    )
-    
-    # 4. Build ENHANCED prompt with context
     prompt_parts = []
     
-    # Project info
-    prompt_parts.append(f"""PROJECT: {project.name}
-FILE TO GENERATE: {request.file_path}
-FILE NUMBER: [{file_number}]
-LANGUAGE: {language}
+    # Header
+    prompt_parts.append(f"""## FILE TO GENERATE
+- Path: {file_path}
+- Number: [{file_number}]
+- Language: {language}
+- Project: {project_name}
+- Description: {description or 'No description'}
 """)
     
-    if description:
-        prompt_parts.append(f"DESCRIPTION: {description}\n")
-    
-    # CRITICAL: Add context from already-generated files
+    # Dependency context (CRITICAL!)
     if context_data["context_files"]:
-        prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
+        prompt_parts.append("\n## 📦 ALREADY GENERATED FILES (USE THESE!)\n")
+        prompt_parts.append("Import types and functions from these files. Do NOT redefine them!\n")
         
         for dep_file, dep_data in context_data["context_files"].items():
             dep_lang = dep_data["language"] or "text"
             dep_code = dep_data["code"]
             
+            # Truncate very long files but keep important parts
+            if len(dep_code) > 4000:
+                # Keep first 2000 and last 1000 chars
+                dep_code = dep_code[:2000] + "\n\n// ... (middle truncated) ...\n\n" + dep_code[-1000:]
+            
             prompt_parts.append(f"""
-File: {dep_file}
+### File: {dep_file}
 ```{dep_lang}
 {dep_code}
 ```
 """)
-        
-        prompt_parts.append("""
-CRITICAL RULES:
-1. Import types/functions from files above using CORRECT paths
-2. Do NOT redefine types that already exist above
-3. Ensure compatibility with files above
-4. Use EXACT import paths shown in file structure
+    
+    # Semantic search context
+    if relevant_context:
+        prompt_parts.append(f"""
+## 🔍 RELEVANT PAST CONTEXT
+{relevant_context}
 """)
     
-    prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {request.file_path}")
+    # Memory summaries
+    if summaries:
+        summaries_text = "\n".join([f"- {s[:500]}" for s in summaries[:3]])
+        prompt_parts.append(f"""
+## 📝 PROJECT DECISIONS & SUMMARIES
+{summaries_text}
+""")
+    
+    # Project structure
+    if project_structure_text:
+        prompt_parts.append(f"""
+## 📁 PROJECT STRUCTURE
+{project_structure_text}
+""")
+    
+    # Final instruction
+    prompt_parts.append(f"""
+## 🎯 GENERATE CODE
+
+Generate COMPLETE, WORKING code for: {file_path}
+
+Requirements:
+1. Use imports from files shown above (exact paths!)
+2. Match coding style from existing files
+3. Include all necessary imports
+4. Add error handling
+5. Include helpful comments
+
+Return ONLY the code, no explanations.""")
     
     user_prompt = "\n".join(prompt_parts)
     
-    logger.info(f"📝 Prompt size: {len(user_prompt)} chars, Context files: {len(context_data['context_files'])}")
+    # Log prompt size
+    prompt_tokens = memory.count_tokens(user_prompt)
+    logger.info(f"  📊 Prompt size: {prompt_tokens} tokens")
+    
+    # ========== GENERATE WITH CLAUDE SONNET 4.5 ==========
+    logger.info(f"  🚀 Generating with Claude Sonnet 4.5...")
     
     try:
-        # 5. Generate with GPT-4o
-        messages = [
-            {"role": "user", "content": user_prompt}
-        ]
+        code = await run_in_threadpool(
+            ask_claude,
+            [{"role": "user", "content": user_prompt}],
+            system=FILE_GENERATOR_SYSTEM_WITH_CONTEXT,
+            model="claude-sonnet-4-5-20250929",  # ← STRONGEST MODEL!
+            max_tokens=8192,
+            api_key=anthropic_key
+        )
+        
+        if code.startswith("[Claude Error]"):
+            logger.error(f"  ❌ Claude error: {code}")
+            raise Exception(code)
+        
+        code = clean_code_output(code)
+        
+        code_tokens = memory.count_tokens(code)
+        logger.info(f"  ✅ Generated {file_path} ({len(code)} chars, {code_tokens} tokens)")
+        
+        return code
+        
+    except Exception as e:
+        logger.exception(f"  ❌ Generation failed: {e}")
+        raise
+
+
+# ====================================================================
+# ENDPOINTS
+# ====================================================================
+
+@router.post("/generate-file", response_model=GenerateFileResponse)
+async def generate_file(
+    request: GenerateFileRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Generate code for a single file (simple mode, no context).
+    Uses GPT-4o for fast generation.
+    """
+    logger.info(f"🔧 Generating file [{request.file_number}]: {request.file_path}")
+    
+    user_prompt = f"""PROJECT CONTEXT:
+{request.project_structure}
+
+FILE TO GENERATE:
+- Number: [{request.file_number}]
+- Path: {request.file_path}
+- Project: {request.project_name or "Project"}
+- Tech Stack: {request.tech_stack or "TypeScript"}
+
+GENERATE THE COMPLETE CODE FOR: {request.file_path}"""
+    
+    try:
+        messages = [{"role": "user", "content": user_prompt}]
         
         code = ask_openai(
             messages=messages,
@@ -372,171 +466,177 @@ CRITICAL RULES:
         )
         
         if code.startswith("[OpenAI Error]"):
-            logger.error(f"❌ OpenAI error: {code}")
             raise HTTPException(status_code=500, detail=code)
         
-        # Clean up
+        language = detect_language(request.file_path)
         code = clean_code_output(code)
+        tokens_used = len(code) // 4
         
-        # 6. Save to database
-        db.execute(text("""
-            UPDATE file_specifications
-            SET generated_code = :code,
-                status = 'generated',
-                updated_at = :now
-            WHERE project_id = :project_id
-              AND file_path = :file_path
-        """), {
-            "code": code,
-            "now": datetime.utcnow(),
-            "project_id": request.project_id,
-            "file_path": request.file_path
-        })
-        db.commit()
-        
-        logger.info(f"✅ Generated {request.file_path} ({len(code)} chars) WITH CONTEXT!")
+        logger.info(f"✅ Generated {request.file_path} ({len(code)} chars)")
         
         return GenerateFileResponse(
-            file_number=file_number,
+            file_number=request.file_number,
             file_path=request.file_path,
             code=code,
             language=language,
-            tokens_used=len(code) // 4
+            tokens_used=tokens_used
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"❌ Failed to generate {request.file_path}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate: {str(e)}")
+        logger.error(f"❌ Failed to generate {request.file_path}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/generate-file-with-context", response_model=GenerateFileResponse)
+async def generate_file_with_context_endpoint(
+    request: GenerateFileWithContextRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate code WITH Smart Context (Sonnet 4.5 + pgvector + dependencies)
+    """
+    from app.utils.api_key_resolver import get_anthropic_key
     
-
-# ====================================================================
-# 🆕 BATCH GENERATION - ALL FILES IN ORDER (Phase 0 Week 2)
-# ====================================================================
-
-
-
-
-class BatchGenerationStatus(BaseModel):
-    """Status of batch generation"""
-    project_id: int
-    total_files: int
-    files_generated: int
-    files_failed: int
-    current_file: Optional[str]
-    status: str  # 'running', 'completed', 'failed'
-    started_at: datetime
-    completed_at: Optional[datetime]
-    duration_seconds: Optional[int]
-    errors: List[str]
-
-
-class BatchGenerationResponse(BaseModel):
-    """Response from batch generation"""
-    success: bool
-    project_id: int
-    project_name: str
-    total_files: int
-    generation_order: List[str]
-    message: str
+    logger.info(f"🔧 [WITH CONTEXT] Generating: {request.file_path}")
+    
+    # Load file spec
+    file_spec = db.execute(text("""
+        SELECT file_number, description, language
+        FROM file_specifications
+        WHERE project_id = :project_id 
+          AND file_path = :file_path
+    """), {
+        "project_id": request.project_id,
+        "file_path": request.file_path
+    }).fetchone()
+    
+    if not file_spec:
+        raise HTTPException(404, "File spec not found. Run /save-structure first!")
+    
+    # Load project
+    project = db.query(Project).filter(
+        Project.id == request.project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    # Get API key
+    anthropic_key = get_anthropic_key(current_user, db, required=True)
+    
+    # Generate with Smart Context
+    code = await generate_file_with_smart_context(
+        file_path=request.file_path,
+        file_number=file_spec[0],
+        description=file_spec[1] or "",
+        language=file_spec[2] or detect_language(request.file_path),
+        project_id=request.project_id,
+        project_name=project.name,
+        db=db,
+        anthropic_key=anthropic_key,
+    )
+    
+    # Save to database
+    db.execute(text("""
+        UPDATE file_specifications
+        SET generated_code = :code,
+            status = 'generated',
+            updated_at = :now
+        WHERE project_id = :project_id
+          AND file_path = :file_path
+    """), {
+        "code": code,
+        "now": datetime.utcnow(),
+        "project_id": request.project_id,
+        "file_path": request.file_path
+    })
+    db.commit()
+    
+    return GenerateFileResponse(
+        file_number=file_spec[0],
+        file_path=request.file_path,
+        code=code,
+        language=file_spec[2] or detect_language(request.file_path),
+        tokens_used=len(code) // 4
+    )
 
 
 @router.post("/generate-all-in-order/{project_id}", response_model=BatchGenerationResponse)
 async def generate_all_files_in_order(
     project_id: int,
     background_tasks: BackgroundTasks,
-    use_debate: bool = False,  # ← ADD THIS
+    use_smart_context: bool = True,  # ← NEW: Default to Smart Context
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Generate ALL files in correct dependency order
+    Generate ALL files in correct dependency order.
     
-    NEW: Supports debate mode (3-step) for higher quality!
-    - use_debate=True: GPT-4o → Sonnet → Sonnet 4.5 (slower, better quality)
-    - use_debate=False: GPT-4o only (faster, cheaper)
+    - use_smart_context=True (default): Claude Sonnet 4.5 + pgvector + dependencies
+    - use_smart_context=False: GPT-4o only (faster, cheaper, less quality)
     """
     
     logger.info(f"🚀 Starting batch generation for project {project_id}")
     
-    # 1. Load project
+    # Load project
     project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(404, "Project not found")
     
-    # 2. Check if files exist
+    # Check files exist
     files_count = db.execute(text("""
-        SELECT COUNT(*) 
-        FROM file_specifications 
-        WHERE project_id = :project_id
+        SELECT COUNT(*) FROM file_specifications WHERE project_id = :project_id
     """), {"project_id": project_id}).scalar()
     
     if files_count == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No files found. Run /save-structure first!"
-        )
+        raise HTTPException(400, "No files found. Run /save-structure first!")
     
-    # Get API keys if debate mode is enabled
-    openai_key = None
+    # Get API keys
     anthropic_key = None
-    
-    if use_debate:
-        from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+    if use_smart_context:
+        from app.utils.api_key_resolver import get_anthropic_key
         try:
-            openai_key = get_openai_key(current_user, db, required=True)
             anthropic_key = get_anthropic_key(current_user, db, required=True)
         except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Debate mode requires API keys: {str(e)}"
-            )
+            raise HTTPException(400, f"Smart Context requires Anthropic API key: {e}")
     
-    # 3. Get generation order
+    # Get generation order
     try:
         generation_order = get_generation_order_from_db(project_id, db)
     except ValueError as e:
-        # Circular dependencies
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
     except Exception as e:
-        logger.exception(f"Failed to get generation order: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to determine generation order: {str(e)}"
-        )
+        raise HTTPException(500, f"Failed to determine generation order: {e}")
     
     logger.info(f"📊 Generation order: {len(generation_order)} files")
     
-    # 4. Reset all statuses to 'pending'
+    # Reset statuses
     db.execute(text("""
         UPDATE file_specifications
-        SET status = 'pending',
-            generated_code = NULL,
-            updated_at = :now
+        SET status = 'pending', generated_code = NULL, updated_at = :now
         WHERE project_id = :project_id
-    """), {
-        "project_id": project_id,
-        "now": datetime.utcnow()
-    })
+    """), {"project_id": project_id, "now": datetime.utcnow()})
     db.commit()
     
-    # 5. Start background generation
+    # Start background generation
     background_tasks.add_task(
         generate_files_background,
         project_id=project_id,
         generation_order=generation_order,
         user_id=current_user.id,
-        use_debate=use_debate,  # ← ADD THIS
-        openai_key=openai_key,  # ← ADD THIS
-        anthropic_key=anthropic_key  # ← ADD THIS
+        use_smart_context=use_smart_context,
+        anthropic_key=anthropic_key,
     )
     
-    logger.info(f"✅ Batch generation started for project {project_id}")
+    mode_name = "Smart Context (Sonnet 4.5)" if use_smart_context else "Fast Mode (GPT-4o)"
     
     return BatchGenerationResponse(
         success=True,
@@ -544,7 +644,7 @@ async def generate_all_files_in_order(
         project_name=project.name,
         total_files=len(generation_order),
         generation_order=generation_order,
-        message=f"Batch generation started for {len(generation_order)} files. Check /generation-status/{project_id} for progress."
+        message=f"Batch generation started with {mode_name}. Check /generation-status/{project_id}"
     )
 
 
@@ -552,22 +652,21 @@ async def generate_files_background(
     project_id: int,
     generation_order: List[str],
     user_id: int,
-    use_debate: bool = True,  # ← ADD THIS
-    openai_key: Optional[str] = None,  # ← ADD THIS
-    anthropic_key: Optional[str] = None  # ← ADD THIS
+    use_smart_context: bool = True,
+    anthropic_key: Optional[str] = None,
 ):
     """
-    Background task to generate all files
+    Background task to generate all files.
     
-    This runs AFTER the API response is sent.
-    Generates files one by one, tracking progress in database.
+    - use_smart_context=True: Claude Sonnet 4.5 with full context
+    - use_smart_context=False: GPT-4o only (fast mode)
     """
     from app.memory.db import SessionLocal
     
     db = SessionLocal()
     
     try:
-        mode_name = "Debate Mode (3-step)" if use_debate else "Fast Mode (GPT-4o)"
+        mode_name = "Smart Context (Sonnet 4.5)" if use_smart_context else "Fast Mode (GPT-4o)"
         logger.info(f"🔄 Background generation started for project {project_id}")
         logger.info(f"🎯 Mode: {mode_name}")
         
@@ -575,6 +674,9 @@ async def generate_files_background(
         files_generated = 0
         files_failed = 0
         errors = []
+        
+        # Load project once
+        project = db.query(Project).filter(Project.id == project_id).first()
         
         for i, file_path in enumerate(generation_order, 1):
             logger.info(f"📝 [{i}/{len(generation_order)}] Generating: {file_path}")
@@ -584,12 +686,8 @@ async def generate_files_background(
                 file_spec = db.execute(text("""
                     SELECT file_number, description, language
                     FROM file_specifications
-                    WHERE project_id = :project_id 
-                      AND file_path = :file_path
-                """), {
-                    "project_id": project_id,
-                    "file_path": file_path
-                }).fetchone()
+                    WHERE project_id = :project_id AND file_path = :file_path
+                """), {"project_id": project_id, "file_path": file_path}).fetchone()
                 
                 if not file_spec:
                     logger.error(f"❌ File spec not found: {file_path}")
@@ -598,123 +696,71 @@ async def generate_files_background(
                     continue
                 
                 file_number = file_spec[0]
-                description = file_spec[1]
+                description = file_spec[1] or ""
                 language = file_spec[2] or detect_language(file_path)
                 
-                # Load project
-                project = db.query(Project).filter(Project.id == project_id).first()
-                
-                # Load dependency context
-                context_data = load_dependency_context(
-                    db=db,
-                    project_id=project_id,
-                    file_path=file_path
-                )
-                
-                # ========== DEBATE MODE OR FAST MODE ==========
-                if use_debate and openai_key and anthropic_key:
-                    # Use 3-step debate mode
-                    logger.info(f"  🎯 Using Debate Mode (3-step)")
-                    code = await generate_file_with_debate(
+                # ========== GENERATE CODE ==========
+                if use_smart_context and anthropic_key:
+                    # Smart Context Mode: Claude Sonnet 4.5
+                    code = await generate_file_with_smart_context(
                         file_path=file_path,
                         file_number=file_number,
                         description=description,
                         language=language,
+                        project_id=project_id,
                         project_name=project.name,
-                        context_files=context_data["context_files"],
-                        openai_key=openai_key,
-                        anthropic_key=anthropic_key
+                        db=db,
+                        anthropic_key=anthropic_key,
                     )
                 else:
-                    # Fast mode: GPT-4o only
-                    logger.info(f"  ⚡ Using Fast Mode (GPT-4o)")
+                    # Fast Mode: GPT-4o only
+                    context_data = load_dependency_context(db, project_id, file_path)
                     
-                    # Build prompt
-                    prompt_parts = []
-                    
-                    prompt_parts.append(f"""PROJECT: {project.name}
+                    prompt_parts = [f"""PROJECT: {project.name}
 FILE TO GENERATE: {file_path}
 FILE NUMBER: [{file_number}]
 LANGUAGE: {language}
-""")
+DESCRIPTION: {description}
+"""]
                     
-                    if description:
-                        prompt_parts.append(f"DESCRIPTION: {description}\n")
-                    
-                    # Add context from already-generated files
                     if context_data["context_files"]:
-                        prompt_parts.append("\n=== ALREADY GENERATED FILES (USE THESE!) ===\n")
-                        
+                        prompt_parts.append("\n=== ALREADY GENERATED FILES ===\n")
                         for dep_file, dep_data in context_data["context_files"].items():
-                            dep_lang = dep_data["language"] or "text"
                             dep_code = dep_data["code"]
-                            
-                            # Truncate very long files
                             if len(dep_code) > 3000:
-                                dep_code = dep_code[:3000] + "\n\n// ... (truncated)"
-                            
-                            prompt_parts.append(f"""
-File: {dep_file}
-```{dep_lang}
-{dep_code}
-```
-""")
-                        
-                        prompt_parts.append("""
-CRITICAL RULES:
-1. Import types/functions from files above using CORRECT paths
-2. Do NOT redefine types that already exist above
-3. Ensure compatibility with files above
-4. Use EXACT import paths shown in file structure
-""")
+                                dep_code = dep_code[:3000] + "\n// ... truncated"
+                            prompt_parts.append(f"File: {dep_file}\n```\n{dep_code}\n```\n")
                     
                     prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {file_path}")
                     
-                    user_prompt = "\n".join(prompt_parts)
-                    
-                    # Generate with GPT-4o
-                    messages = [{"role": "user", "content": user_prompt}]
-                    
                     code = ask_openai(
-                        messages=messages,
+                        messages=[{"role": "user", "content": "\n".join(prompt_parts)}],
                         model="gpt-4o",
                         max_tokens=4000,
                         temperature=0.3,
                         system_prompt=FILE_GENERATOR_SYSTEM
                     )
-                # ========== END MODE SELECTION ==========
                 
+                # Check for errors
                 if code.startswith("[OpenAI Error]") or code.startswith("[Claude Error]"):
                     logger.error(f"❌ AI error for {file_path}: {code}")
                     files_failed += 1
-                    errors.append(f"{file_path}: {code}")
+                    errors.append(f"{file_path}: {code[:100]}")
                     
-                    # Mark as failed
                     db.execute(text("""
-                        UPDATE file_specifications
-                        SET status = 'failed',
-                            updated_at = :now
-                        WHERE project_id = :project_id
-                          AND file_path = :file_path
-                    """), {
-                        "now": datetime.utcnow(),
-                        "project_id": project_id,
-                        "file_path": file_path
-                    })
+                        UPDATE file_specifications SET status = 'failed', updated_at = :now
+                        WHERE project_id = :project_id AND file_path = :file_path
+                    """), {"now": datetime.utcnow(), "project_id": project_id, "file_path": file_path})
                     db.commit()
                     continue
                 
-                # Clean up
+                # Clean and save
                 code = clean_code_output(code)
                 
-                # Save to database
                 db.execute(text("""
                     UPDATE file_specifications
-                    SET generated_code = :code,
-                        status = 'generated',
-                        updated_at = :now
-                    WHERE project_id = :project_id
-                      AND file_path = :file_path
+                    SET generated_code = :code, status = 'generated', updated_at = :now
+                    WHERE project_id = :project_id AND file_path = :file_path
                 """), {
                     "code": code,
                     "now": datetime.utcnow(),
@@ -729,45 +775,33 @@ CRITICAL RULES:
             except Exception as e:
                 logger.exception(f"❌ Failed to generate {file_path}")
                 files_failed += 1
-                errors.append(f"{file_path}: {str(e)}")
+                errors.append(f"{file_path}: {str(e)[:100]}")
                 
-                # Mark as failed
                 try:
                     db.execute(text("""
-                        UPDATE file_specifications
-                        SET status = 'failed',
-                            updated_at = :now
-                        WHERE project_id = :project_id
-                          AND file_path = :file_path
-                    """), {
-                        "now": datetime.utcnow(),
-                        "project_id": project_id,
-                        "file_path": file_path
-                    })
+                        UPDATE file_specifications SET status = 'failed', updated_at = :now
+                        WHERE project_id = :project_id AND file_path = :file_path
+                    """), {"now": datetime.utcnow(), "project_id": project_id, "file_path": file_path})
                     db.commit()
                 except:
                     pass
         
-        # Final summary
+        # Summary
         completed_at = datetime.utcnow()
         duration = (completed_at - started_at).total_seconds()
         
         logger.info(f"""
 🎉 Batch generation completed for project {project_id}:
    Mode: {mode_name}
-   Total files: {len(generation_order)}
+   Total: {len(generation_order)} files
    Generated: {files_generated}
    Failed: {files_failed}
    Duration: {duration:.1f}s
    Errors: {len(errors)}
 """)
         
-        if errors:
-            for error in errors[:5]:  # Log first 5 errors
-                logger.error(f"  - {error}")
-        
     except Exception as e:
-        logger.exception(f"❌ Batch generation failed for project {project_id}")
+        logger.exception(f"❌ Batch generation failed: {e}")
     finally:
         db.close()
 
@@ -778,26 +812,18 @@ async def get_generation_status(
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Get current status of batch generation
+    """Get current status of batch generation"""
     
-    Returns progress, current file, completion status, etc.
-    """
-    
-    # Check project exists
     project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(404, "Project not found")
     
-    # Get counts by status
     status_counts = db.execute(text("""
-        SELECT 
-            status,
-            COUNT(*) as count
+        SELECT status, COUNT(*) as count
         FROM file_specifications
         WHERE project_id = :project_id
         GROUP BY status
@@ -808,11 +834,6 @@ async def get_generation_status(
     failed = sum(row[1] for row in status_counts if row[0] == 'failed')
     pending = sum(row[1] for row in status_counts if row[0] == 'pending')
     
-    # Get currently generating file (if any)
-    # (In this simple version, we don't track "currently generating")
-    # Could add a 'generating' status if needed
-    
-    # Determine overall status
     if pending == 0 and failed == 0:
         overall_status = "completed"
     elif pending > 0:
@@ -829,15 +850,8 @@ async def get_generation_status(
         "files_failed": failed,
         "files_pending": pending,
         "progress_percent": int((generated / total * 100) if total > 0 else 0),
-        "summary": {
-            status: count 
-            for status, count in status_counts
-        }
     }
 
-# ====================================================================
-# 🆕 DOWNLOAD ENDPOINTS (Phase 0 Week 3)
-# ====================================================================
 
 @router.get("/projects/{project_id}/all-generated-files")
 async def get_all_generated_files(
@@ -845,40 +859,29 @@ async def get_all_generated_files(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """
-    Get ALL generated files for download
-    Returns list of files with content
-    """
+    """Get ALL generated files for download"""
     
-    # Verify project belongs to user
     project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(404, "Project not found")
     
-    # Get all generated files
     files = db.execute(text("""
         SELECT file_path, generated_code, language
         FROM file_specifications
-        WHERE project_id = :project_id
-          AND status = 'generated'
+        WHERE project_id = :project_id AND status = 'generated'
         ORDER BY file_number
     """), {"project_id": project_id}).fetchall()
     
-    # Format response
-    file_list = []
-    for file in files:
-        file_list.append({
-            "file_path": file[0],
-            "content": file[1],
-            "language": file[2],
-            "size": len(file[1]) if file[1] else 0
-        })
-    
-    logger.info(f"📥 Downloaded {len(file_list)} files for project {project_id}")
+    file_list = [{
+        "file_path": f[0],
+        "content": f[1],
+        "language": f[2],
+        "size": len(f[1]) if f[1] else 0
+    } for f in files]
     
     return {
         "project_id": project_id,
@@ -888,270 +891,39 @@ async def get_all_generated_files(
     }
 
 
-@router.get("/projects/{project_id}/dependencies")
-async def get_project_dependencies(
-    project_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """
-    Get project dependencies for package.json or requirements.txt
-    """
-    
-    project = db.query(Project).filter(
-        Project.id == project_id,
-        Project.user_id == current_user.id
-    ).first()
-    
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Parse project structure for dependencies
-    dependencies = {}
-    dev_dependencies = {}
-    package_manager = "unknown"
-    
-    if project.project_structure:
-        import json
-        try:
-            structure = json.loads(project.project_structure)
-            dependencies = structure.get("dependencies", {})
-            dev_dependencies = structure.get("devDependencies", {})
-        except:
-            # If not JSON, try to extract from structure text
-            pass
-    
-    # Detect package manager from files
-    files = db.execute(text("""
-        SELECT file_path
-        FROM file_specifications
-        WHERE project_id = :project_id
-    """), {"project_id": project_id}).fetchall()
-    
-    file_paths = [f[0] for f in files]
-    
-    if any("package.json" in fp for fp in file_paths):
-        package_manager = "npm"
-    elif any("requirements.txt" in fp for fp in file_paths):
-        package_manager = "pip"
-    elif any("Cargo.toml" in fp for fp in file_paths):
-        package_manager = "cargo"
-    elif any("go.mod" in fp for fp in file_paths):
-        package_manager = "go"
-    
-    return {
-        "project_id": project_id,
-        "project_name": project.name,
-        "package_manager": package_manager,
-        "dependencies": dependencies,
-        "dev_dependencies": dev_dependencies
-    }
-
-# ====================================================================
-# 🆕 DEBATE MODE FILE GENERATION (Phase 0.5)
-# ====================================================================
-
-async def generate_file_with_debate(
-    file_path: str,
-    file_number: int,
-    description: str,
-    language: str,
-    project_name: str,
-    context_files: dict,
-    openai_key: str,
-    anthropic_key: str
-) -> str:
-    """
-    Generate file using 3-step debate process:
-    
-    Step 1: GPT-4o generates initial code
-    Step 2: Claude Sonnet reviews and critiques
-    Step 3: Claude Opus creates final version
-    
-    Returns: Final code
-    """
-    from app.providers.claude_provider import ask_claude
-    from starlette.concurrency import run_in_threadpool
-    
-    logger.info(f"🎯 Debate Mode: Generating {file_path}")
-    
-    # ---- STEP 1: GPT-4o generates initial version ----
-    logger.info(f"  📝 Step 1/3: GPT-4o initial generation...")
-    
-    step1_prompt_parts = [
-        f"Generate {language} code for: {file_path}",
-        f"Description: {description}",
-        f"Project: {project_name}",
-    ]
-    
-    if context_files:
-        step1_prompt_parts.append("\n=== CONTEXT FROM OTHER FILES ===\n")
-        for dep_file, dep_data in context_files.items():
-            code_preview = dep_data["code"][:500] + "..." if len(dep_data["code"]) > 500 else dep_data["code"]
-            step1_prompt_parts.append(f"File: {dep_file}\n```\n{code_preview}\n```\n")
-    
-    step1_prompt_parts.append(f"\nGenerate COMPLETE code for {file_path}")
-    step1_prompt = "\n".join(step1_prompt_parts)
-    
-    try:
-        step1_code = await run_in_threadpool(
-            ask_openai,
-            [{"role": "user", "content": step1_prompt}],
-            model="gpt-4o",
-            max_tokens=4000,
-            temperature=0.3,
-            system_prompt=FILE_GENERATOR_SYSTEM,
-            api_key=openai_key
-        )
-    except Exception as e:
-        logger.error(f"❌ Step 1 failed: {e}")
-        raise
-    
-    step1_code = clean_code_output(step1_code)
-    logger.info(f"  ✅ Step 1 complete: {len(step1_code)} chars")
-    
-    # ---- STEP 2: Claude Sonnet reviews ----
-    logger.info(f"  🔍 Step 2/3: Claude Sonnet review...")
-    
-    step2_prompt = f"""Review this generated code and provide critique:
-
-File: {file_path}
-Language: {language}
-
-Generated Code:
-```{language}
-{step1_code}
-```
-
-Check for:
-1. Import errors
-2. Type errors  
-3. Missing dependencies
-4. Best practices violations
-5. Compatibility issues
-
-Provide constructive feedback and suggestions for improvement."""
-    
-    try:
-        step2_review = await run_in_threadpool(
-            ask_claude,
-            [{"role": "user", "content": step2_prompt}],
-            system="You are a code reviewer. Be constructive and helpful.",
-            api_key=anthropic_key
-        )
-    except Exception as e:
-        logger.error(f"❌ Step 2 failed: {e}")
-        # Fallback: use step1 code if review fails
-        logger.warning(f"⚠️ Using GPT-4o code without review")
-        return step1_code
-    
-    logger.info(f"  ✅ Step 2 complete: {len(step2_review)} chars")
-    
-    # ---- STEP 3: Claude Opus final version ----
-    logger.info(f"  🎯 Step 3/3: Claude Opus final synthesis...")
-    
-    step3_prompt = f"""Create the FINAL, BEST version of this code.
-
-File: {file_path}  
-Language: {language}
-Description: {description}
-
-Initial Code (GPT-4o):
-```{language}
-{step1_code}
-```
-
-Review Feedback (Sonnet):
-{step2_review}
-
-Context Files Available:
-{", ".join(context_files.keys()) if context_files else "None"}
-
-Generate the FINAL, IMPROVED code incorporating the review feedback.
-Return ONLY the code, no explanations."""
-    
-    try:
-        step3_final = await run_in_threadpool(
-            ask_claude,
-            [{"role": "user", "content": step3_prompt}],
-            system="You are an expert developer. Create the best possible final code.",
-            model="claude-sonnet-4-5-20250929",
-            api_key=anthropic_key
-        )
-    except Exception as e:
-        logger.error(f"❌ Step 3 failed: {e}")
-        # Fallback: use step1 code if final fails
-        logger.warning(f"⚠️ Using GPT-4o code as fallback")
-        return step1_code
-    
-    step3_final = clean_code_output(step3_final)
-    logger.info(f"  ✅ Step 3 complete: {len(step3_final)} chars")
-    logger.info(f"🎉 Debate Mode complete for {file_path}")
-    
-    return step3_final
-
-# ====================================================================
-# 🆕 SAVE STRUCTURE ENDPOINT (Phase 0 Week 1)
-# ====================================================================
-
 @router.post("/save-structure/{project_id}")
 async def save_project_structure(
     project_id: int,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Parse project_structure and save to file_specifications table
+    """Parse project_structure and save to file_specifications table"""
     
-    This endpoint:
-    1. Loads project.project_structure (TEXT)
-    2. Parses it (supports JSON/Markdown/Plain)
-    3. Saves each file to file_specifications
-    4. Analyzes and saves basic dependencies
-    """
-    
-    # 1. Load project
     project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
     
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(404, "Project not found")
     
     if not project.project_structure:
-        raise HTTPException(
-            status_code=400, 
-            detail="Project has no structure. Generate with Debate Mode or sync Git first."
-        )
+        raise HTTPException(400, "Project has no structure. Generate with Debate Mode first.")
     
-    # 2. Parse structure
     try:
         file_specs = parse_project_structure(project.project_structure)
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to parse project_structure: {str(e)}"
-        )
+        raise HTTPException(400, f"Failed to parse: {e}")
     
     if not file_specs:
-        raise HTTPException(
-            status_code=400,
-            detail="No files found in project_structure"
-        )
+        raise HTTPException(400, "No files found in project_structure")
     
-    # 3. Clear existing specifications for this project
-    db.execute(
-    text("DELETE FROM file_specifications WHERE project_id = :project_id"),
-    {"project_id": project_id}
-)
-    db.execute(
-    text("DELETE FROM file_dependencies WHERE project_id = :project_id"),
-    {"project_id": project_id}
-)
+    # Clear existing
+    db.execute(text("DELETE FROM file_specifications WHERE project_id = :project_id"), {"project_id": project_id})
+    db.execute(text("DELETE FROM file_dependencies WHERE project_id = :project_id"), {"project_id": project_id})
     db.commit()
     
-    # 4. Save file specifications
+    # Save files
     files_saved = 0
     for spec in file_specs:
         db.execute(text("""
@@ -1167,18 +939,15 @@ async def save_project_structure(
             "now": datetime.utcnow()
         })
         files_saved += 1
-    
     db.commit()
     
-    # 5. Analyze and save dependencies
+    # Save dependencies
     dependencies = analyze_basic_dependencies(file_specs)
-    dependencies_saved = 0
-    
+    deps_saved = 0
     for source_file, targets in dependencies.items():
         for target_file in targets:
             db.execute(text("""
-                INSERT INTO file_dependencies
-                (project_id, source_file, target_file, dependency_type, created_at)
+                INSERT INTO file_dependencies (project_id, source_file, target_file, dependency_type, created_at)
                 VALUES (:project_id, :source_file, :target_file, 'import', :now)
             """), {
                 "project_id": project_id,
@@ -1186,84 +955,62 @@ async def save_project_structure(
                 "target_file": target_file,
                 "now": datetime.utcnow()
             })
-            dependencies_saved += 1
-    
+            deps_saved += 1
     db.commit()
     
-    # 6. Language distribution
     lang_count = Counter(f.language for f in file_specs)
     
-    logger.info(f"✅ Saved {files_saved} files and {dependencies_saved} dependencies for project {project_id}")
+    logger.info(f"✅ Saved {files_saved} files and {deps_saved} dependencies")
     
     return {
         "success": True,
         "project_id": project_id,
-        "project_name": project.name,
         "files_saved": files_saved,
-        "dependencies_saved": dependencies_saved,
+        "dependencies_saved": deps_saved,
         "languages": dict(lang_count),
-        "sample_files": [
-            {
-                "file_path": spec.file_path,
-                "language": spec.language,
-                "description": spec.description
-            }
-            for spec in file_specs[:5]
-        ]
     }
 
 
-@router.post("/test-debate-generation")
-async def test_debate_generation(
+@router.post("/test-smart-context-generation")
+async def test_smart_context_generation(
     project_id: int,
     file_path: str,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    TEST endpoint - generate ONE file with debate mode
+    TEST endpoint - generate ONE file with Smart Context
     """
-    from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+    from app.utils.api_key_resolver import get_anthropic_key
     
-    # Get API keys
-    openai_key = get_openai_key(current_user, db, required=True)
     anthropic_key = get_anthropic_key(current_user, db, required=True)
     
-    # Load file spec
     file_spec = db.execute(text("""
         SELECT file_number, description, language
         FROM file_specifications
-        WHERE project_id = :project_id 
-          AND file_path = :file_path
-    """), {
-        "project_id": project_id,
-        "file_path": file_path
-    }).fetchone()
+        WHERE project_id = :project_id AND file_path = :file_path
+    """), {"project_id": project_id, "file_path": file_path}).fetchone()
     
     if not file_spec:
         raise HTTPException(404, "File not found")
     
-    # Load project
     project = db.query(Project).filter(Project.id == project_id).first()
     
-    # Load context
-    context_data = load_dependency_context(db, project_id, file_path)
-    
-    # Generate with debate
-    code = await generate_file_with_debate(
+    code = await generate_file_with_smart_context(
         file_path=file_path,
         file_number=file_spec[0],
-        description=file_spec[1],
+        description=file_spec[1] or "",
         language=file_spec[2] or "typescript",
+        project_id=project_id,
         project_name=project.name,
-        context_files=context_data["context_files"],
-        openai_key=openai_key,
-        anthropic_key=anthropic_key
+        db=db,
+        anthropic_key=anthropic_key,
     )
     
     return {
         "success": True,
         "file_path": file_path,
         "code": code,
-        "code_length": len(code)
+        "code_length": len(code),
+        "mode": "Smart Context (Sonnet 4.5)"
     }

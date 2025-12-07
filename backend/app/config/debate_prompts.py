@@ -504,10 +504,10 @@ DEBATE_CONFIGS = {
         "prompt_template": DEFENDER_PROMPT
     },
     "final": {
-        "model_key": "claude-opus-4",
-        "role": "judge",
-        "max_tokens": 3000,
-        "prompt_template": JUDGE_PROMPT
+        "model_key": "claude-sonnet-4.5",  
+        "role": "merger",
+        "max_tokens": 8192,  
+        "prompt_template": PROJECT_BUILDER_MERGER_PROMPT
     }
 }
 
@@ -525,7 +525,7 @@ PROJECT_BUILDER_CONFIGS = {
         "prompt_template": PROJECT_BUILDER_REVIEWER_PROMPT
     },
     "final": {
-        "model_key": "claude-opus-4",
+        "model_key": "claude-sonnet-4.5",
         "role": "merger",
         "max_tokens": 5000,  # Increased for complete final structure
         "prompt_template": PROJECT_BUILDER_MERGER_PROMPT
@@ -561,19 +561,18 @@ def get_available_modes() -> list:
 
 
 def get_mode_info(mode: str) -> dict:
-    """Возвращает информацию о режиме"""
     modes = {
         "debate": {
             "name": "Debate Mode",
             "description": "AI дискуссия с 3 раундами + финальное решение",
             "rounds": 3,
-            "models": ["gpt-4o", "claude-3-5-sonnet", "gpt-4o", "claude-opus-4"]
+            "models": ["gpt-4o", "claude-3-5-sonnet", "gpt-4o", "claude-sonnet-4.5"]  # ✅ FIX
         },
         "project-builder": {
             "name": "Project Builder",
             "description": "Генерация структуры проекта с review",
             "rounds": 2,
-            "models": ["gpt-4o", "claude-3-5-sonnet", "claude-opus-4"]
+            "models": ["gpt-4o", "claude-3-5-sonnet", "claude-sonnet-4.5"]  # ✅ FIX
         }
     }
     return modes.get(mode, modes["debate"])
