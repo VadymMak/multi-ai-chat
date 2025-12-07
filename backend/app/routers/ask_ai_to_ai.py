@@ -473,9 +473,10 @@ def _extract_terms_from_topic(topic: str) -> List[str]:
     toks = re.findall(r"[A-Za-z0-9_]+", topic or "")
     return [t for t in toks if len(t) >= 3][:8]
 
-def _build_smart_context_from_git(
+async def _build_smart_context_from_git(
     project: Optional[Project],
     memory: MemoryManager,
+    db: Session,  # ← NEW PARAMETER
     role_id: int,
     project_id: str,
     query: str,
@@ -490,6 +491,7 @@ def _build_smart_context_from_git(
         - Recent messages (~500 tokens)
         - Semantic search results (~800 tokens)
         - Memory summaries (~700 tokens)
+        - Relevant code files (~500 tokens) ← NEW!
     """
     parts = []
     
@@ -575,6 +577,52 @@ Files: {len(files)}
             print(f"✅ Summaries: {len(summaries)} included")
     except Exception as e:
         print(f"⚠️ Failed to load summaries: {e}")
+    
+    # ============================================================
+    # 5. Relevant code files from file_embeddings (NEW!)
+    # ============================================================
+    try:
+        if project and project.git_url:
+            from app.services.file_indexer import FileIndexer
+            
+            indexer = FileIndexer(db)
+            project_id_int = int(project_id) if str(project_id).isdigit() else 0
+            
+            relevant_files = await indexer.search_files(
+                project_id=project_id_int,
+                query=query,
+                limit=3
+            )
+            
+            if relevant_files:
+                files_text = "\n\n## 📄 Relevant Code Files:\n\n"
+                for f in relevant_files:
+                    path = f.get("file_path", "unknown")
+                    lang = f.get("language", "")
+                    similarity = f.get("similarity", 0)
+                    metadata = f.get("metadata", {})
+                    
+                    files_text += f"**{path}** ({lang}, {similarity:.0%} relevant)\n"
+                    
+                    if metadata.get("imports"):
+                        imports_list = metadata["imports"][:5]
+                        files_text += f"  - imports: {', '.join(imports_list)}\n"
+                    if metadata.get("exports"):
+                        exports_list = metadata["exports"][:5]
+                        files_text += f"  - exports: {', '.join(exports_list)}\n"
+                    if metadata.get("functions"):
+                        funcs_list = metadata["functions"][:5]
+                        files_text += f"  - functions: {', '.join(funcs_list)}\n"
+                    if metadata.get("classes"):
+                        classes_list = metadata["classes"][:5]
+                        files_text += f"  - classes: {', '.join(classes_list)}\n"
+                
+                parts.append(files_text)
+                print(f"✅ Relevant code files: {len(relevant_files)} found")
+            else:
+                print(f"ℹ️ No indexed files found for query")
+    except Exception as e:
+        print(f"⚠️ File search failed: {e}")
     
     context = "\n".join(parts)
     
@@ -1029,9 +1077,10 @@ async def ask_ai_to_ai_route(
     # Build smart context if Git is linked
     if project and project.git_url:
         print("🚀 Using Smart Context (Git structure)")
-        smart_context = _build_smart_context_from_git(
+        smart_context = await _build_smart_context_from_git(
             project=project,
             memory=memory,
+            db=db,  # ← ADD THIS
             role_id=role_id,
             project_id=project_id,
             query=data.topic,
