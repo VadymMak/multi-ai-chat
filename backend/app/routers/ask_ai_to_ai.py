@@ -784,7 +784,20 @@ async def _handle_project_builder_mode(
                             db.commit()
                             
                             # Save new file specs
+                            seen_paths = set()
                             for spec in file_specs:
+                                # Skip invalid or duplicate paths
+                                if not spec.file_path or len(spec.file_path) < 3:
+                                    print(f"  ⏭️ Skipping invalid path: {spec.file_path}")
+                                    continue
+                                if spec.file_path in seen_paths:
+                                    print(f"  ⏭️ Skipping duplicate: {spec.file_path}")
+                                    continue
+                                if not any(c.isalnum() for c in spec.file_path):
+                                    print(f"  ⏭️ Skipping non-file path: {spec.file_path}")
+                                    continue
+                                seen_paths.add(spec.file_path)
+                                
                                 db.execute(text("""
                                     INSERT INTO file_specifications 
                                     (project_id, file_path, file_number, description, language, status, created_at, updated_at)
