@@ -616,7 +616,7 @@ Imports: {', '.join(metadata.get('imports', []))}
                 "language": r[3],
                 "line_count": r[4],
                 "similarity": round(r[5], 4),
-                "metadata": json.loads(r[6]) if r[6] else {}
+                "metadata": r[6] if r[6] else {}
             }
             for r in results
         ]
