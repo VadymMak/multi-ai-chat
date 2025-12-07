@@ -15,7 +15,7 @@ type ProjectId = number;
 
 // ✅ NEW: Generation status type
 export interface GenerationStatus {
-  status: "idle" | "generating" | "completed" | "failed";
+  status: "idle" | "running" | "generating" | "completed" | "failed";
   total_files: number;
   files_generated: number;
   files_failed: number;
@@ -660,8 +660,8 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
             );
           }
 
-          // Auto-start polling if generating
-          if (status.status === "generating") {
+          // Auto-start polling if generating (backend returns 'running')
+          if (status.status === "running" || status.status === "generating") {
             get().startGenerationPolling(projectId);
           } else {
             get().stopGenerationPolling();

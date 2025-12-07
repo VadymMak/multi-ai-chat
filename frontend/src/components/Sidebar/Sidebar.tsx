@@ -76,7 +76,10 @@ const Sidebar: React.FC<SidebarProps> = () => {
 
   // ✅ Render View Files button based on generation status
   const renderViewFilesButton = () => {
-    const isGenerating = generationStatus?.status === "generating";
+    // Backend returns 'running', frontend also checks 'generating' for safety
+    const isGenerating =
+      generationStatus?.status === "running" ||
+      generationStatus?.status === "generating";
     const isCompleted = generationStatus?.status === "completed";
     const totalFiles = generationStatus?.total_files || 0;
     const filesGenerated = generationStatus?.files_generated || 0;
