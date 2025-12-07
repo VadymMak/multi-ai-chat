@@ -80,7 +80,7 @@ def format_relevant_files(files: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def build_smart_context(
+async def build_smart_context(
     project_id: int,
     role_id: int, 
     query: str,
@@ -174,7 +174,8 @@ def build_smart_context(
             from app.services.file_indexer import FileIndexer
             
             indexer = FileIndexer(db)
-            relevant_files = indexer.search_files(
+            # FIXED: await the async search_files method
+            relevant_files = await indexer.search_files(
                 project_id=project_id,
                 query=query,
                 limit=3
@@ -195,3 +196,43 @@ def build_smart_context(
     print(f"✅ [Smart Context] Built context with {len(parts)} components")
     
     return result
+
+
+# ============================================================
+# Sync wrapper for backwards compatibility
+# ============================================================
+def build_smart_context_sync(
+    project_id: int,
+    role_id: int, 
+    query: str,
+    session_id: str,
+    db: Session,
+    memory: MemoryManager
+) -> str:
+    """
+    Synchronous wrapper for build_smart_context.
+    Use this if calling from sync code.
+    """
+    import asyncio
+    
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is already running (e.g., in FastAPI), create task
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run,
+                    build_smart_context(project_id, role_id, query, session_id, db, memory)
+                )
+                return future.result()
+        else:
+            return loop.run_until_complete(
+                build_smart_context(project_id, role_id, query, session_id, db, memory)
+            )
+    except RuntimeError:
+        # No event loop, create new one
+        return asyncio.run(
+            build_smart_context(project_id, role_id, query, session_id, db, memory)
+        )

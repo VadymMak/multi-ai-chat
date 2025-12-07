@@ -591,7 +591,7 @@ async def ask_route(
 
         # 2) Build Smart Context (replaces full history loading)
         print(f"🎯 [Smart Context] Building context for query: {data.query[:50]}...")
-        smart_context_text = build_smart_context(
+        smart_context_text = await build_smart_context(
             project_id=project_id_int,
             role_id=role_id,
             query=data.query,
@@ -866,7 +866,7 @@ async def ask_stream_route(
 
             # 2) Build Smart Context (replaces full history loading)
             print(f"🎯 [Smart Context] Building context for streaming query: {data.query[:50]}...")
-            smart_context_text = build_smart_context(
+            smart_context_text =await build_smart_context(
                 project_id=project_id_int,
                 role_id=role_id,
                 query=data.query,
