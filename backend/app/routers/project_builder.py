@@ -223,6 +223,118 @@ def load_dependency_context(
         "context_files": context_files
     }
 
+def resolve_import_to_file(
+    import_path: str,
+    source_file: str,
+    all_project_files: List[str]
+) -> Optional[str]:
+    """
+    Resolve import path to actual file path in project.
+    
+    Examples:
+        import_path: "./types" or "../utils/helpers" or "@/components/Button"
+        source_file: "src/services/logger.ts"
+        all_project_files: ["src/types.ts", "src/types.d.ts", ...]
+        
+    Returns:
+        Matching file path or None if not found
+    """
+    import os
+    
+    # Skip external packages (no ./ or ../ prefix, no @ alias)
+    if not import_path.startswith(('./', '../', '@/')):
+        if '/' not in import_path and not import_path.startswith('.'):
+            return None  # External package like "react", "lodash"
+    
+    # Get directory of source file
+    source_dir = os.path.dirname(source_file)
+    
+    # Handle @ alias (common in TypeScript projects)
+    if import_path.startswith('@/'):
+        import_path = 'src/' + import_path[2:]
+        resolved_path = import_path
+    elif import_path.startswith('./'):
+        resolved_path = os.path.normpath(os.path.join(source_dir, import_path[2:]))
+    elif import_path.startswith('../'):
+        resolved_path = os.path.normpath(os.path.join(source_dir, import_path))
+    else:
+        resolved_path = os.path.normpath(os.path.join(source_dir, import_path))
+    
+    # Normalize path separators
+    resolved_path = resolved_path.replace('\\', '/')
+    
+    # Try to find matching file with various extensions
+    extensions = ['', '.ts', '.tsx', '.js', '.jsx', '.d.ts', '/index.ts', '/index.js']
+    
+    for ext in extensions:
+        candidate = resolved_path + ext
+        candidate_normalized = candidate.lstrip('./')
+        
+        for project_file in all_project_files:
+            project_file_normalized = project_file.lstrip('./')
+            if project_file_normalized == candidate_normalized:
+                return project_file
+    
+    return None
+
+
+def update_file_dependencies_from_code(
+    db: Session,
+    project_id: int,
+    file_path: str,
+    code: str,
+    language: str,
+    all_project_files: List[str]
+) -> int:
+    """
+    Parse generated code and update file_dependencies with REAL imports.
+    
+    Returns:
+        Number of dependencies added
+    """
+    from app.services.file_indexer import extract_metadata
+    
+    # Extract real imports from generated code
+    metadata = extract_metadata(code, language)
+    real_imports = metadata.get("imports", [])
+    
+    if not real_imports:
+        logger.info(f"  📦 No imports found in {file_path}")
+        return 0
+    
+    logger.info(f"  📦 Found {len(real_imports)} imports in {file_path}: {real_imports}")
+    
+    # Clear old heuristic dependencies for this file
+    db.execute(text("""
+        DELETE FROM file_dependencies 
+        WHERE project_id = :project_id AND source_file = :file_path
+    """), {"project_id": project_id, "file_path": file_path})
+    
+    # Add REAL dependencies based on parsed imports
+    deps_added = 0
+    for import_path in real_imports:
+        target_file = resolve_import_to_file(import_path, file_path, all_project_files)
+        
+        if target_file:
+            db.execute(text("""
+                INSERT INTO file_dependencies 
+                (project_id, source_file, target_file, dependency_type, created_at)
+                VALUES (:project_id, :source_file, :target_file, 'import', :now)
+                ON CONFLICT DO NOTHING
+            """), {
+                "project_id": project_id,
+                "source_file": file_path,
+                "target_file": target_file,
+                "now": datetime.utcnow()
+            })
+            deps_added += 1
+            logger.info(f"    ✅ {file_path} → {target_file}")
+        else:
+            logger.debug(f"    ⏭️ External/unresolved: {import_path}")
+    
+    db.commit()
+    return deps_added
+
 
 # ====================================================================
 # 🆕 SMART CONTEXT CODE GENERATION (NEW!)
@@ -768,6 +880,21 @@ DESCRIPTION: {description}
                     "file_path": file_path
                 })
                 db.commit()
+                
+                # 🆕 UPDATE DEPENDENCIES FROM REAL IMPORTS
+                try:
+                    deps_count = update_file_dependencies_from_code(
+                        db=db,
+                        project_id=project_id,
+                        file_path=file_path,
+                        code=code,
+                        language=language,
+                        all_project_files=generation_order  # ← All files in project
+                    )
+                    if deps_count > 0:
+                        logger.info(f"  📦 Updated {deps_count} real dependencies for {file_path}")
+                except Exception as dep_error:
+                    logger.warning(f"  ⚠️ Failed to update dependencies: {dep_error}")
                 
                 files_generated += 1
                 logger.info(f"✅ [{i}/{len(generation_order)}] Generated {file_path} ({len(code)} chars)")
