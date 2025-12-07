@@ -30,11 +30,12 @@ RUN mkdir -p /app/uploads
 # Expose port (Railway will set PORT env var)
 EXPOSE ${PORT:-8000}
 
-# Run check_users, init_auth, new migration, then start server
+# Run check_users, init_auth, migrations, then start server
 CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
      python backend/scripts/check_users.py && \
      python backend/scripts/init_auth_tables.py && \
      python backend/migrations/add_git_integration_to_projects.py && \
      python backend/migrations/add_file_dependencies_table.py && \
      python backend/migrations/add_file_specifications_table.py && \
+     python backend/migrations/add_file_embeddings_table.py && \
      uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

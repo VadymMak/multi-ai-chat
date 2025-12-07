@@ -1,0 +1,445 @@
+# File: backend/app/routers/file_indexer.py
+"""
+File Indexer API - Index and search project files using pgvector
+
+Endpoints:
+- POST /index/{project_id} - Index all files from Git
+- GET /search/{project_id} - Semantic search in files
+- GET /stats/{project_id} - Get indexing statistics
+- GET /file/{project_id}/{file_path} - Get indexed file content
+- DELETE /index/{project_id} - Delete project index
+"""
+
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+import logging
+from sqlalchemy.orm import Session
+
+from app.memory.db import get_db
+from app.memory.models import Project
+from app.deps import get_current_user
+from app.services.file_indexer import FileIndexer
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/file-indexer", tags=["file-indexer"])
+
+
+# ====================================================================
+# MODELS
+# ====================================================================
+
+class IndexProjectResponse(BaseModel):
+    """Response from indexing request"""
+    success: bool
+    project_id: int
+    message: str
+    stats: Optional[Dict[str, Any]] = None
+
+
+class SearchResult(BaseModel):
+    """Single search result"""
+    id: int
+    file_path: str
+    file_name: str
+    language: Optional[str]
+    line_count: int
+    similarity: float
+    metadata: Dict[str, Any]
+
+
+class SearchResponse(BaseModel):
+    """Response from search request"""
+    project_id: int
+    query: str
+    results: List[SearchResult]
+    total_results: int
+
+
+class ProjectStats(BaseModel):
+    """Project indexing statistics"""
+    project_id: int
+    total_files: int
+    languages: int
+    total_lines: int
+    total_size_kb: float
+    last_indexed: Optional[str]
+    by_language: Dict[str, int]
+
+
+class FileContentResponse(BaseModel):
+    """Response with file content"""
+    project_id: int
+    file_path: str
+    content: str
+    language: Optional[str]
+    line_count: int
+
+
+# ====================================================================
+# ENDPOINTS
+# ====================================================================
+
+@router.post("/index/{project_id}", response_model=IndexProjectResponse)
+async def index_project(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = Query(False, description="Force reindex all files"),
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Index all files from project's Git repository.
+    
+    This is an async operation - indexing happens in background.
+    Check /stats/{project_id} to monitor progress.
+    
+    Args:
+        project_id: Project ID to index
+        force: If true, reindex all files even if unchanged
+    """
+    logger.info(f"🔍 Index request for project {project_id} (force={force})")
+    
+    # Verify project exists and belongs to user
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    if not project.git_url:
+        raise HTTPException(400, "Project has no Git URL. Link a repository first.")
+    
+    # Start background indexing
+    background_tasks.add_task(
+        _index_project_background,
+        project_id=project_id,
+        force_reindex=force
+    )
+    
+    return IndexProjectResponse(
+        success=True,
+        project_id=project_id,
+        message=f"Indexing started for {project.name}. Check /stats/{project_id} for progress."
+    )
+
+
+async def _index_project_background(project_id: int, force_reindex: bool):
+    """Background task to index project"""
+    from app.memory.db import SessionLocal
+    
+    db = SessionLocal()
+    try:
+        indexer = FileIndexer(db)
+        stats = await indexer.index_project(project_id, force_reindex=force_reindex)
+        logger.info(f"✅ Background indexing complete for project {project_id}: {stats}")
+    except Exception as e:
+        logger.exception(f"❌ Background indexing failed for project {project_id}: {e}")
+    finally:
+        db.close()
+
+
+@router.post("/index-sync/{project_id}", response_model=IndexProjectResponse)
+async def index_project_sync(
+    project_id: int,
+    force: bool = Query(False, description="Force reindex all files"),
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Index project files SYNCHRONOUSLY (waits for completion).
+    
+    Use this for small projects or when you need immediate results.
+    For large projects, use /index/{project_id} instead.
+    """
+    logger.info(f"🔍 Sync index request for project {project_id}")
+    
+    # Verify project
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    if not project.git_url:
+        raise HTTPException(400, "Project has no Git URL")
+    
+    try:
+        indexer = FileIndexer(db)
+        stats = await indexer.index_project(project_id, force_reindex=force)
+        
+        return IndexProjectResponse(
+            success=True,
+            project_id=project_id,
+            message=f"Indexed {stats['indexed']} files",
+            stats=stats
+        )
+    except Exception as e:
+        logger.exception(f"Indexing failed: {e}")
+        raise HTTPException(500, f"Indexing failed: {str(e)}")
+
+
+@router.get("/search/{project_id}", response_model=SearchResponse)
+async def search_files(
+    project_id: int,
+    q: str = Query(..., min_length=2, description="Search query"),
+    limit: int = Query(5, ge=1, le=20, description="Max results"),
+    language: Optional[str] = Query(None, description="Filter by language"),
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Search files by semantic similarity.
+    
+    Examples:
+    - q="authentication" → finds auth-related files
+    - q="error handling" → finds error handler files
+    - q="API client" → finds API-related code
+    
+    Args:
+        project_id: Project ID to search in
+        q: Search query
+        limit: Maximum number of results (1-20)
+        language: Filter by language (e.g., "typescript", "python")
+    """
+    logger.info(f"🔍 Search: project={project_id}, query='{q}', limit={limit}")
+    
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        results = await indexer.search_files(
+            project_id=project_id,
+            query=q,
+            limit=limit,
+            language=language
+        )
+        
+        return SearchResponse(
+            project_id=project_id,
+            query=q,
+            results=[SearchResult(**r) for r in results],
+            total_results=len(results)
+        )
+    except Exception as e:
+        logger.exception(f"Search failed: {e}")
+        raise HTTPException(500, f"Search failed: {str(e)}")
+
+
+@router.get("/stats/{project_id}", response_model=ProjectStats)
+async def get_project_stats(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get indexing statistics for a project.
+    
+    Returns:
+    - Total indexed files
+    - Number of languages
+    - Total lines of code
+    - Last indexed time
+    - Files by language breakdown
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        stats = await indexer.get_project_stats(project_id)
+        
+        return ProjectStats(
+            project_id=project_id,
+            **stats
+        )
+    except Exception as e:
+        logger.exception(f"Failed to get stats: {e}")
+        raise HTTPException(500, f"Failed to get stats: {str(e)}")
+
+
+@router.get("/file/{project_id}/{file_path:path}", response_model=FileContentResponse)
+async def get_file_content(
+    project_id: int,
+    file_path: str,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get content of an indexed file.
+    
+    Args:
+        project_id: Project ID
+        file_path: Full file path (e.g., "src/extension.ts")
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        content = await indexer.get_file_content(project_id, file_path)
+        
+        if content is None:
+            raise HTTPException(404, f"File not indexed: {file_path}")
+        
+        # Get file info
+        from sqlalchemy import text
+        file_info = db.execute(text("""
+            SELECT language, line_count
+            FROM file_embeddings
+            WHERE project_id = :project_id AND file_path = :file_path
+        """), {"project_id": project_id, "file_path": file_path}).fetchone()
+        
+        return FileContentResponse(
+            project_id=project_id,
+            file_path=file_path,
+            content=content,
+            language=file_info[0] if file_info else None,
+            line_count=file_info[1] if file_info else 0
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get file: {e}")
+        raise HTTPException(500, f"Failed to get file: {str(e)}")
+
+
+@router.delete("/index/{project_id}")
+async def delete_project_index(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all indexed files for a project.
+    
+    Use this when:
+    - Changing Git repository
+    - Project is deleted
+    - Need to fully reindex
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        deleted_count = await indexer.delete_project_index(project_id)
+        
+        return {
+            "success": True,
+            "project_id": project_id,
+            "deleted_files": deleted_count,
+            "message": f"Deleted {deleted_count} indexed files"
+        }
+    except Exception as e:
+        logger.exception(f"Failed to delete index: {e}")
+        raise HTTPException(500, f"Failed to delete index: {str(e)}")
+
+
+@router.get("/find-related/{project_id}")
+async def find_related_files(
+    project_id: int,
+    file_path: str = Query(..., description="Current file path"),
+    limit: int = Query(5, ge=1, le=10),
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Find files related to a specific file.
+    
+    Uses the file's embedding to find similar files.
+    Useful for understanding dependencies and related code.
+    
+    Args:
+        project_id: Project ID
+        file_path: Path of the file to find related files for
+        limit: Max results
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        from sqlalchemy import text
+        
+        # Get embedding of target file
+        result = db.execute(text("""
+            SELECT embedding FROM file_embeddings
+            WHERE project_id = :project_id AND file_path = :file_path
+        """), {"project_id": project_id, "file_path": file_path}).fetchone()
+        
+        if not result or not result[0]:
+            raise HTTPException(404, f"File not indexed: {file_path}")
+        
+        # Find similar files (excluding the target file)
+        related = db.execute(text("""
+            SELECT 
+                file_path, file_name, language, line_count,
+                1 - (embedding <=> :target_embedding::vector) AS similarity
+            FROM file_embeddings
+            WHERE project_id = :project_id
+              AND file_path != :file_path
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> :target_embedding::vector
+            LIMIT :limit
+        """), {
+            "project_id": project_id,
+            "file_path": file_path,
+            "target_embedding": result[0],
+            "limit": limit
+        }).fetchall()
+        
+        return {
+            "project_id": project_id,
+            "source_file": file_path,
+            "related_files": [
+                {
+                    "file_path": r[0],
+                    "file_name": r[1],
+                    "language": r[2],
+                    "line_count": r[3],
+                    "similarity": round(r[4], 4)
+                }
+                for r in related
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to find related files: {e}")
+        raise HTTPException(500, f"Failed: {str(e)}")
