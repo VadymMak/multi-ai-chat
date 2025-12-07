@@ -7,6 +7,7 @@ import { useAuthStore } from "../../store/authStore";
 import SettingsModal from "../Settings/SettingsModal";
 import { toast } from "../../store/toastStore";
 import { useProjectStore } from "../../store/projectStore";
+import { useMemoryStore } from "../../store/memoryStore";
 
 interface SidebarProps {
   // Add any props if needed later
@@ -22,11 +23,19 @@ const Sidebar: React.FC<SidebarProps> = () => {
   const { user, logout } = useAuthStore();
   const projectId = useProjectStore((s) => s.projectId);
   const projectsByRole = useProjectStore((s) => s.projectsByRole);
-  const roleId = 1; // Or get from your memory store if needed
-  const currentProject =
-    projectId && projectsByRole[roleId]
-      ? projectsByRole[roleId].find((p) => p.id === projectId)
-      : null;
+
+  const roleId = useMemoryStore((s) => s.role?.id ?? null);
+  const currentProject = React.useMemo(() => {
+    if (!projectId || !roleId || !projectsByRole[roleId]) return null;
+    return projectsByRole[roleId].find((p) => p.id === projectId) ?? null;
+  }, [projectId, roleId, projectsByRole]);
+
+  console.log("🔍 Debug:", {
+    projectId,
+    roleId,
+    currentProject,
+    projectsByRole,
+  });
 
   // Handle clearing current session
   const handleClearChat = () => {
