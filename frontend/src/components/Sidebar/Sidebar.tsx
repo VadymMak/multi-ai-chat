@@ -1,12 +1,23 @@
-import React, { useState } from "react";
-import { Settings, Trash2, LogOut, User, FileText } from "lucide-react";
+// File: src/components/Sidebar/Sidebar.tsx
+import React, { useState, useEffect } from "react";
+import {
+  Settings,
+  Trash2,
+  LogOut,
+  User,
+  FileText,
+  Loader2,
+} from "lucide-react";
 import ProjectSelector from "../../features/aiConversation/ProjectSelector";
 import FilesModal from "../FileViewer/FilesModal";
 import { useChatStore } from "../../store/chatStore";
 import { useAuthStore } from "../../store/authStore";
 import SettingsModal from "../Settings/SettingsModal";
 import { toast } from "../../store/toastStore";
-import { useProjectStore } from "../../store/projectStore";
+import {
+  useProjectStore,
+  selectGenerationStatus,
+} from "../../store/projectStore";
 import { useMemoryStore } from "../../store/memoryStore";
 
 interface SidebarProps {
@@ -23,6 +34,11 @@ const Sidebar: React.FC<SidebarProps> = () => {
   const { user, logout } = useAuthStore();
   const projectId = useProjectStore((s) => s.projectId);
   const projectsByRole = useProjectStore((s) => s.projectsByRole);
+  const generationStatus = useProjectStore(selectGenerationStatus);
+  const fetchGenerationStatus = useProjectStore((s) => s.fetchGenerationStatus);
+  const startGenerationPolling = useProjectStore(
+    (s) => s.startGenerationPolling
+  );
 
   const roleId = useMemoryStore((s) => s.role?.id ?? null);
   const currentProject = React.useMemo(() => {
@@ -30,12 +46,12 @@ const Sidebar: React.FC<SidebarProps> = () => {
     return projectsByRole[roleId].find((p) => p.id === projectId) ?? null;
   }, [projectId, roleId, projectsByRole]);
 
-  console.log("🔍 Debug:", {
-    projectId,
-    roleId,
-    currentProject,
-    projectsByRole,
-  });
+  // ✅ Fetch generation status when project changes
+  useEffect(() => {
+    if (projectId) {
+      fetchGenerationStatus(projectId);
+    }
+  }, [projectId, fetchGenerationStatus]);
 
   // Handle clearing current session
   const handleClearChat = () => {
@@ -58,6 +74,80 @@ const Sidebar: React.FC<SidebarProps> = () => {
     setIsSettingsOpen(true);
   };
 
+  // ✅ Render View Files button based on generation status
+  const renderViewFilesButton = () => {
+    const isGenerating = generationStatus?.status === "generating";
+    const isCompleted = generationStatus?.status === "completed";
+    const totalFiles = generationStatus?.total_files || 0;
+    const filesGenerated = generationStatus?.files_generated || 0;
+    const progressPercent = generationStatus?.progress_percent || 0;
+
+    // No project selected
+    if (!projectId) {
+      return (
+        <button
+          disabled
+          className="w-full px-4 py-2.5 text-sm bg-surface text-text-secondary rounded-lg border border-border flex items-center justify-center gap-2 opacity-50 cursor-not-allowed"
+          title="Select a project first"
+        >
+          <FileText size={16} />
+          No Project
+        </button>
+      );
+    }
+
+    // Generating - show progress bar
+    if (isGenerating && totalFiles > 0) {
+      return (
+        <div className="w-full">
+          <button
+            disabled
+            className="w-full px-4 py-2.5 text-sm bg-surface text-primary rounded-lg border border-primary/30 flex items-center justify-center gap-2 cursor-wait"
+            title={`Generating ${filesGenerated}/${totalFiles} files...`}
+          >
+            <Loader2 size={16} className="animate-spin" />
+            <span>
+              Generating {filesGenerated}/{totalFiles}
+            </span>
+          </button>
+          {/* Progress bar */}
+          <div className="mt-1 h-1.5 bg-surface rounded-full overflow-hidden border border-border">
+            <div
+              className="h-full bg-gradient-to-r from-primary to-accent transition-all duration-300 ease-out"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    // Completed or has files - show View Files with count
+    if (isCompleted || filesGenerated > 0) {
+      return (
+        <button
+          onClick={() => setIsFilesModalOpen(true)}
+          className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-primary/10 text-primary rounded-lg border border-primary/30 hover:border-primary flex items-center justify-center gap-2 transition"
+          title={`View ${filesGenerated} generated files`}
+        >
+          <FileText size={16} />
+          View Files ({filesGenerated})
+        </button>
+      );
+    }
+
+    // Idle/No files yet
+    return (
+      <button
+        onClick={() => setIsFilesModalOpen(true)}
+        className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-primary/10 text-text-secondary hover:text-primary rounded-lg border border-border hover:border-primary/50 flex items-center justify-center gap-2 transition"
+        title="No files generated yet"
+      >
+        <FileText size={16} />
+        View Files
+      </button>
+    );
+  };
+
   return (
     <>
       <aside className="w-72 bg-panel border-r border-border flex flex-col">
@@ -76,7 +166,7 @@ const Sidebar: React.FC<SidebarProps> = () => {
           <ProjectSelector onOpenSettings={handleOpenSettings} />
         </div>
 
-        {/* Footer Buttons - KEEP ONLY THIS ONE */}
+        {/* Footer Buttons */}
         <div className="border-t border-border p-4 space-y-2">
           <button
             onClick={handleClearChat}
@@ -92,17 +182,8 @@ const Sidebar: React.FC<SidebarProps> = () => {
             Clear Chat {messages.length > 0 && `(${messages.length})`}
           </button>
 
-          <button
-            onClick={() => setIsFilesModalOpen(true)}
-            disabled={!projectId}
-            className="w-full px-4 py-2.5 text-sm bg-surface hover:bg-primary/10 text-primary rounded-lg border border-primary/30 hover:border-primary flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-surface disabled:hover:border-primary/30"
-            title={
-              projectId ? "View generated files" : "Select a project first"
-            }
-          >
-            <FileText size={16} />
-            View Files
-          </button>
+          {/* ✅ NEW: Dynamic View Files button with progress */}
+          {renderViewFilesButton()}
 
           <button
             onClick={handleOpenSettings}
@@ -148,7 +229,7 @@ const Sidebar: React.FC<SidebarProps> = () => {
         )}
       </aside>
 
-      {/* Modals - KEEP ONLY ONE OF EACH */}
+      {/* Modals */}
       {projectId && currentProject && (
         <FilesModal
           isOpen={isFilesModalOpen}

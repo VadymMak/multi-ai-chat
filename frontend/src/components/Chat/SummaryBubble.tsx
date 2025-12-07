@@ -1,16 +1,14 @@
 // File: src/components/Chat/SummaryBubble.tsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { Copy, Check, Download } from "lucide-react";
+import { Copy, Check, Download, CheckCircle, Loader2 } from "lucide-react";
 import { useChatStore } from "../../store/chatStore";
+import {
+  useProjectStore,
+  selectGenerationStatus,
+} from "../../store/projectStore";
 import { toast } from "../../store/toastStore";
 import MarkdownMessage from "../Shared/MarkdownMessage";
-import ProjectStructureView from "./ProjectStructureView";
-import { generateProjectFile } from "../../services/aiApi";
-import {
-  ParsedFile,
-  ParsedProjectStructure,
-} from "../../utils/projectStructureParser";
 
 type Props = {
   text: string;
@@ -66,6 +64,13 @@ function extractReviewText(text: string): string {
   return result;
 }
 
+// ✅ Count files in structure
+function countFilesInStructure(text: string): number {
+  const filePattern = /^\d+\.\s+`[^`]+`/gm;
+  const matches = text.match(filePattern);
+  return matches?.length || 0;
+}
+
 const SummaryBubble: React.FC<Props> = ({
   text,
   deferWhileTyping = true,
@@ -75,10 +80,27 @@ const SummaryBubble: React.FC<Props> = ({
   const reduce = useReducedMotion();
   const [copied, setCopied] = useState(false);
 
+  // ✅ Get generation status from store
+  const generationStatus = useProjectStore(selectGenerationStatus);
+  const projectId = useProjectStore((s) => s.projectId);
+  const fetchGenerationStatus = useProjectStore((s) => s.fetchGenerationStatus);
+
   const showText = !(deferWhileTyping && isTyping);
   const isProjectBuilder = isProjectBuilderOutput(text);
   const reviewText = isProjectBuilder ? extractReviewText(text) : "";
   const structureBlock = isProjectBuilder ? extractStructureBlock(text) : "";
+  const fileCount = isProjectBuilder ? countFilesInStructure(text) : 0;
+
+  // ✅ Trigger generation status fetch when Project Builder output detected
+  useEffect(() => {
+    if (isProjectBuilder && projectId) {
+      // Small delay to let backend start generation
+      const timer = setTimeout(() => {
+        fetchGenerationStatus(projectId);
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [isProjectBuilder, projectId, fetchGenerationStatus]);
 
   const handleCopy = async () => {
     try {
@@ -106,22 +128,48 @@ const SummaryBubble: React.FC<Props> = ({
     toast.success(`Downloaded ${filename}`);
   };
 
-  // ✅ Handle file generation
-  const handleGenerateFile = async (
-    file: ParsedFile,
-    structure: ParsedProjectStructure
-  ): Promise<string> => {
-    const response = await generateProjectFile({
-      project_structure: text,
-      file_number: file.number,
-      file_path: file.path,
-      project_name: structure.projectName,
-      tech_stack: structure.tech,
-    });
-    return response.code;
+  // ✅ Render generation status indicator
+  const renderGenerationStatus = () => {
+    if (!generationStatus) return null;
+
+    const { status, files_generated, total_files, progress_percent } =
+      generationStatus;
+
+    if (status === "generating") {
+      return (
+        <div className="flex items-center gap-3 px-4 py-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+          <Loader2 size={18} className="animate-spin text-blue-400" />
+          <div className="flex-1">
+            <div className="text-sm text-blue-300 font-medium">
+              Generating files... {files_generated}/{total_files}
+            </div>
+            <div className="mt-1.5 h-1.5 bg-blue-900/50 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-300"
+                style={{ width: `${progress_percent}%` }}
+              />
+            </div>
+          </div>
+          <span className="text-xs text-blue-400">{progress_percent}%</span>
+        </div>
+      );
+    }
+
+    if (status === "completed" && files_generated > 0) {
+      return (
+        <div className="flex items-center gap-2 px-4 py-2 bg-green-500/10 border border-green-500/30 rounded-lg">
+          <CheckCircle size={16} className="text-green-400" />
+          <span className="text-sm text-green-300">
+            ✅ {files_generated} files generated! Click "View Files" in sidebar.
+          </span>
+        </div>
+      );
+    }
+
+    return null;
   };
 
-  // ✅ For Project Builder - show structure + review + interactive component
+  // ✅ For Project Builder - show structure + review + generation status
   if (isProjectBuilder) {
     return (
       <motion.div
@@ -134,7 +182,7 @@ const SummaryBubble: React.FC<Props> = ({
       >
         {/* Review/Suggestions text (if any) - BEFORE structure */}
         {reviewText && (
-          <div className="group relative bg-panel border-l-4 border-blue-500 px-4 py-3 rounded shadow-sm ">
+          <div className="group relative bg-panel border-l-4 border-blue-500 px-4 py-3 rounded shadow-sm">
             <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
                 onClick={handleCopy}
@@ -168,10 +216,16 @@ const SummaryBubble: React.FC<Props> = ({
           </div>
         )}
 
+        {/* ✅ Generation status indicator */}
+        {renderGenerationStatus()}
+
         {/* Raw structure block - full width */}
         {structureBlock && (
           <div className="group relative bg-[#1e1e2e] rounded-lg p-4 shadow-sm max-w-4xl">
             <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              <span className="text-xs text-gray-500 mr-2">
+                {fileCount} files
+              </span>
               <button
                 onClick={async () => {
                   await navigator.clipboard.writeText(structureBlock);
@@ -192,13 +246,8 @@ const SummaryBubble: React.FC<Props> = ({
           </div>
         )}
 
-        {/* Interactive file generation view - full width */}
-        {showText && (
-          <ProjectStructureView
-            text={text}
-            onGenerateFile={handleGenerateFile}
-          />
-        )}
+        {/* ✅ REMOVED: ProjectStructureView component */}
+        {/* Files now generate automatically - check sidebar for progress */}
       </motion.div>
     );
   }

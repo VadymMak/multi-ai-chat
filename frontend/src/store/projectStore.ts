@@ -13,6 +13,17 @@ import type {
 
 type ProjectId = number;
 
+// ✅ NEW: Generation status type
+export interface GenerationStatus {
+  status: "idle" | "generating" | "completed" | "failed";
+  total_files: number;
+  files_generated: number;
+  files_failed: number;
+  progress_percent: number;
+  current_file?: string;
+  errors?: string[];
+}
+
 export interface ProjectStore {
   projectId: ProjectId | null;
   recentProjects: ProjectId[];
@@ -58,6 +69,15 @@ export interface ProjectStore {
 
   fetchGeneratedFiles: (projectId: number) => Promise<void>;
   clearGeneratedFiles: () => void;
+
+  // ✅ NEW: Generation status
+  generationStatus: GenerationStatus | null;
+  generationPollingId: NodeJS.Timeout | null;
+  fetchGenerationStatus: (
+    projectId: number
+  ) => Promise<GenerationStatus | null>;
+  startGenerationPolling: (projectId: number) => void;
+  stopGenerationPolling: () => void;
 }
 
 type MyPersist = PersistOptions<ProjectStore, Partial<ProjectStore>>;
@@ -151,6 +171,9 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
       generatedFiles: [],
       filesLoading: false,
       filesError: null,
+      // ✅ NEW: Generation status state
+      generationStatus: null,
+      generationPollingId: null,
 
       setProjectId: (incoming) => {
         const id = toProjectId(incoming);
@@ -166,16 +189,22 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
         }
         if (prev === id) return; // no-op
 
+        // Stop polling for old project
+        get().stopGenerationPolling();
+
         // update recent list (dedupe, cap 10)
         const recent = get().recentProjects;
         const updated = recent.includes(id)
           ? recent
           : [id, ...recent].slice(0, 10);
 
-        set({ projectId: id, recentProjects: updated });
+        set({ projectId: id, recentProjects: updated, generationStatus: null });
         if (process.env.NODE_ENV !== "production") {
           console.debug("📌 [projectStore] Project selected:", id);
         }
+
+        // Check generation status for new project
+        get().fetchGenerationStatus(id);
       },
 
       addProject: (incoming) => {
@@ -516,7 +545,6 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
         try {
           await api.delete(`/projects/${projectId}/git`);
 
-          // ⬇️ ДОБАВЬ ЭТИ СТРОКИ ЗДЕСЬ (после delete, перед if)
           // Update cache: remove git fields
           const state = get();
           state.allProjects = state.allProjects.map((p) =>
@@ -613,6 +641,106 @@ const baseProjectStore: UseBoundStore<StoreApi<ProjectStore>> = create<
           filesLoading: false,
         });
       },
+
+      // ✅ NEW: Fetch generation status
+      fetchGenerationStatus: async (projectId: number) => {
+        try {
+          const res = await api.get(
+            `/project-builder/generation-status/${projectId}`
+          );
+          const status: GenerationStatus = res.data;
+
+          set({ generationStatus: status });
+
+          if (process.env.NODE_ENV !== "production") {
+            console.debug(
+              `📊 [projectStore] Generation status for ${projectId}:`,
+              status.status,
+              `${status.files_generated}/${status.total_files}`
+            );
+          }
+
+          // Auto-start polling if generating
+          if (status.status === "generating") {
+            get().startGenerationPolling(projectId);
+          } else {
+            get().stopGenerationPolling();
+          }
+
+          return status;
+        } catch (error) {
+          // 404 means no files/status yet - that's OK
+          if ((error as any)?.response?.status === 404) {
+            set({
+              generationStatus: {
+                status: "idle",
+                total_files: 0,
+                files_generated: 0,
+                files_failed: 0,
+                progress_percent: 0,
+              },
+            });
+            return null;
+          }
+          console.error(
+            "❌ [projectStore] Failed to fetch generation status:",
+            error
+          );
+          return null;
+        }
+      },
+
+      // ✅ NEW: Start polling for generation status
+      startGenerationPolling: (projectId: number) => {
+        // Stop any existing polling
+        get().stopGenerationPolling();
+
+        if (process.env.NODE_ENV !== "production") {
+          console.debug(
+            `🔄 [projectStore] Starting generation polling for project ${projectId}`
+          );
+        }
+
+        const pollInterval = setInterval(async () => {
+          const currentProjectId = get().projectId;
+
+          // Stop if project changed
+          if (currentProjectId !== projectId) {
+            get().stopGenerationPolling();
+            return;
+          }
+
+          const status = await get().fetchGenerationStatus(projectId);
+
+          // Stop polling if completed or failed
+          if (
+            status &&
+            (status.status === "completed" || status.status === "failed")
+          ) {
+            get().stopGenerationPolling();
+
+            // Auto-refresh files when complete
+            if (status.status === "completed") {
+              get().fetchGeneratedFiles(projectId);
+            }
+          }
+        }, 2000); // Poll every 2 seconds
+
+        set({ generationPollingId: pollInterval });
+      },
+
+      // ✅ NEW: Stop polling
+      stopGenerationPolling: () => {
+        const { generationPollingId } = get();
+        if (generationPollingId) {
+          clearInterval(generationPollingId);
+          set({ generationPollingId: null });
+
+          if (process.env.NODE_ENV !== "production") {
+            console.debug("⏹️ [projectStore] Stopped generation polling");
+          }
+        }
+      },
     }),
     {
       name: "project-store",
@@ -653,6 +781,9 @@ export const selectBasics = (s: ProjectStore) => ({
   projectId: s.projectId,
   isLoading: s.isLoading,
 });
+
+// ✅ NEW: Generation status selector
+export const selectGenerationStatus = (s: ProjectStore) => s.generationStatus;
 
 /* -------------------- Export -------------------- */
 export const useProjectStore = baseProjectStore;
