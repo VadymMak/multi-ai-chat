@@ -570,41 +570,41 @@ Imports: {', '.join(metadata.get('imports', []))}
     ) -> List[Dict[str, Any]]:
         """
         Search files by semantic similarity.
-        
-        Args:
-            project_id: Project ID
-            query: Search query (e.g., "authentication", "error handling")
-            limit: Max results
-            language: Filter by language (optional)
-            
-        Returns:
-            List of matching files with similarity scores
         """
         # Generate query embedding
         query_embedding = vector_service.create_embedding(query)
         
-        # Build query
-        sql = """
-            SELECT 
-                id, file_path, file_name, language, line_count,
-                1 - (embedding <=> :query_embedding::vector) AS similarity,
-                metadata
-            FROM file_embeddings
-            WHERE project_id = :project_id
-              AND embedding IS NOT NULL
-        """
+        # Convert embedding to PostgreSQL vector string format
+        embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
         
-        params = {
-            "project_id": project_id,
-            "query_embedding": query_embedding,
-            "limit": limit
-        }
-        
+        # Build query - use string formatting for vector to avoid :: conflict
         if language:
-            sql += " AND language = :language"
-            params["language"] = language
-        
-        sql += " ORDER BY embedding <=> :query_embedding::vector LIMIT :limit"
+            sql = f"""
+                SELECT 
+                    id, file_path, file_name, language, line_count,
+                    1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
+                    metadata
+                FROM file_embeddings
+                WHERE project_id = :project_id
+                AND embedding IS NOT NULL
+                AND language = :language
+                ORDER BY embedding <=> '{embedding_str}'::vector
+                LIMIT :limit
+            """
+            params = {"project_id": project_id, "language": language, "limit": limit}
+        else:
+            sql = f"""
+                SELECT 
+                    id, file_path, file_name, language, line_count,
+                    1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
+                    metadata
+                FROM file_embeddings
+                WHERE project_id = :project_id
+                AND embedding IS NOT NULL
+                ORDER BY embedding <=> '{embedding_str}'::vector
+                LIMIT :limit
+            """
+            params = {"project_id": project_id, "limit": limit}
         
         results = self.db.execute(text(sql), params).fetchall()
         
