@@ -1,6 +1,6 @@
 """
 Smart Context Builder - Universal context engine.
-Uses existing services: vector_service + memory/manager.
+Uses existing services: vector_service + memory/manager + file_indexer.
 """
 
 import json
@@ -45,6 +45,41 @@ def format_git_structure(git_data: Dict[str, Any]) -> str:
     return f"Repository: {git_url}\nFiles ({files_count}):\n{file_list}"
 
 
+# ============================================================
+# NEW: Format relevant code files from file_embeddings
+# ============================================================
+def format_relevant_files(files: List[Dict[str, Any]]) -> str:
+    """Format relevant code files for context"""
+    if not files:
+        return "No relevant files found"
+    
+    lines = []
+    for f in files:
+        path = f.get("file_path", "unknown")
+        lang = f.get("language", "")
+        similarity = f.get("similarity", 0)
+        metadata = f.get("metadata", {})
+        
+        # Show file info with similarity percentage
+        lines.append(f"📄 {path} ({lang}, {similarity:.0%} relevant)")
+        
+        # Show key metadata (imports, exports, functions)
+        if metadata.get("imports"):
+            imports_list = metadata["imports"][:5]  # First 5 imports
+            lines.append(f"   imports: {', '.join(imports_list)}")
+        if metadata.get("exports"):
+            exports_list = metadata["exports"][:5]  # First 5 exports
+            lines.append(f"   exports: {', '.join(exports_list)}")
+        if metadata.get("functions"):
+            funcs_list = metadata["functions"][:5]  # First 5 functions
+            lines.append(f"   functions: {', '.join(funcs_list)}")
+        if metadata.get("classes"):
+            classes_list = metadata["classes"][:5]  # First 5 classes
+            lines.append(f"   classes: {', '.join(classes_list)}")
+    
+    return "\n".join(lines)
+
+
 def build_smart_context(
     project_id: int,
     role_id: int, 
@@ -62,6 +97,7 @@ def build_smart_context(
     2. Recent 5 messages (immediate context)
     3. Summaries (high-level context)
     4. Git structure (if available)
+    5. Relevant code files (if indexed) ← NEW!
     """
     
     print(f"🎯 [Smart Context] Building for project={project_id}, role={role_id}, query={query[:50]}...")
@@ -83,7 +119,6 @@ def build_smart_context(
         print(f"⚠️ [Smart Context] pgvector search failed: {e}")
     
     # 2. Recent 5 messages (EXISTING!)
-    # 2. Recent 5 messages (EXISTING!)
     try:
         recent_data = memory.retrieve_messages(
             project_id=str(project_id),
@@ -92,7 +127,7 @@ def build_smart_context(
             chat_session_id=session_id,
             for_display=False 
         )
-        # ✅ FIX: Handle list slicing properly
+        # Handle list slicing properly
         all_messages = recent_data.get("messages", [])
         recent_messages = all_messages[-5:] if len(all_messages) > 5 else all_messages
         recent_text = format_recent(recent_messages)
@@ -128,6 +163,33 @@ def build_smart_context(
             print(f"ℹ️ [Smart Context] No Git structure (project without Git)")
     except Exception as e:
         print(f"⚠️ [Smart Context] Git structure failed: {e}")
+    
+    # ============================================================
+    # 5. Relevant code files from file_embeddings (NEW!)
+    # ============================================================
+    try:
+        # Check if project has indexed files
+        project = db.query(Project).filter_by(id=project_id).first()
+        if project and project.git_url:
+            from app.services.file_indexer import FileIndexer
+            
+            indexer = FileIndexer(db)
+            relevant_files = indexer.search_files(
+                project_id=project_id,
+                query=query,
+                limit=3
+            )
+            
+            if relevant_files:
+                files_text = format_relevant_files(relevant_files)
+                parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
+                print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files")
+            else:
+                print(f"ℹ️ [Smart Context] No indexed files found for query")
+        else:
+            print(f"ℹ️ [Smart Context] Skipping file search (no Git URL)")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] File search skipped: {e}")
     
     result = "\n\n".join(parts)
     print(f"✅ [Smart Context] Built context with {len(parts)} components")
