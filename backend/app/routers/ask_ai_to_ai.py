@@ -656,6 +656,7 @@ async def _handle_project_builder_mode(
     final_config: dict,
     canon_digest: str,
     canon_items_struct: List[Dict[str, Any]],
+    user_id: int,
 ) -> JSONResponse:
     """
     Project Builder mode: Generate structure → Review → Merge final
@@ -745,6 +746,110 @@ async def _handle_project_builder_mode(
     except Exception as e:
         print(f"[Project Builder memory error] {e}")
 
+    # ========================================================
+    # 🆕 AUTO-SAVE STRUCTURE & START GENERATION
+    # ========================================================
+    generation_started = False
+    files_count = 0
+    
+    try:
+        # Check if final_reply contains structure
+        if "===FINAL_STRUCTURE_END===" in final_reply or "```" in final_reply:
+            print(f"📦 Detected project structure in response, auto-saving...")
+            
+            # Get project from DB
+            proj_id_int = int(project_id) if str(project_id).isdigit() else None
+            if proj_id_int:
+                from sqlalchemy import text
+                from app.services.project_structure_parser import parse_project_structure, analyze_basic_dependencies
+                from datetime import datetime
+                from collections import Counter
+                
+                project_obj = db.query(Project).filter(Project.id == proj_id_int).first()
+                
+                if project_obj:
+                    # 1. Save raw structure to project
+                    project_obj.project_structure = final_reply
+                    db.commit()
+                    print(f"✅ Saved structure to projects.project_structure")
+                    
+                    # 2. Parse structure into file specs
+                    try:
+                        file_specs = parse_project_structure(final_reply)
+                        
+                        if file_specs:
+                            # Clear existing specs
+                            db.execute(text("DELETE FROM file_specifications WHERE project_id = :pid"), {"pid": proj_id_int})
+                            db.execute(text("DELETE FROM file_dependencies WHERE project_id = :pid"), {"pid": proj_id_int})
+                            db.commit()
+                            
+                            # Save new file specs
+                            for spec in file_specs:
+                                db.execute(text("""
+                                    INSERT INTO file_specifications 
+                                    (project_id, file_path, file_number, description, language, status, created_at, updated_at)
+                                    VALUES (:project_id, :file_path, :file_number, :description, :language, 'pending', :now, :now)
+                                """), {
+                                    "project_id": proj_id_int,
+                                    "file_path": spec.file_path,
+                                    "file_number": spec.file_number,
+                                    "description": spec.description,
+                                    "language": spec.language,
+                                    "now": datetime.utcnow()
+                                })
+                            db.commit()
+                            
+                            # Save dependencies
+                            dependencies = analyze_basic_dependencies(file_specs)
+                            for source_file, targets in dependencies.items():
+                                for target_file in targets:
+                                    db.execute(text("""
+                                        INSERT INTO file_dependencies (project_id, source_file, target_file, dependency_type, created_at)
+                                        VALUES (:project_id, :source_file, :target_file, 'import', :now)
+                                    """), {
+                                        "project_id": proj_id_int,
+                                        "source_file": source_file,
+                                        "target_file": target_file,
+                                        "now": datetime.utcnow()
+                                    })
+                            db.commit()
+                            
+                            files_count = len(file_specs)
+                            print(f"✅ Saved {files_count} file specs and {len(dependencies)} dependencies")
+                            
+                            # 3. Start background generation automatically
+                            try:
+                                from app.services.dependency_graph import get_generation_order_from_db
+                                from app.routers.project_builder import generate_files_background
+                                import asyncio
+                                
+                                generation_order = get_generation_order_from_db(proj_id_int, db)
+                                
+                                if generation_order:
+                                    # Create background task
+                                    asyncio.create_task(
+                                        generate_files_background(
+                                            project_id=proj_id_int,
+                                            generation_order=generation_order,
+                                            user_id=user_id,
+                                            use_smart_context=True,
+                                            anthropic_key=anthropic_key,
+                                        )
+                                    )
+                                    generation_started = True
+                                    print(f"🚀 Started background generation for {len(generation_order)} files")
+                                    
+                            except Exception as gen_err:
+                                print(f"⚠️ Could not start auto-generation: {gen_err}")
+                                
+                    except Exception as parse_err:
+                        print(f"⚠️ Could not parse structure: {parse_err}")
+                        
+    except Exception as auto_save_err:
+        print(f"⚠️ Auto-save structure failed: {auto_save_err}")
+
+    # ========================================================
+
     resp: Dict[str, Any] = {
         "mode": "project-builder",
         "messages": [
@@ -753,6 +858,9 @@ async def _handle_project_builder_mode(
         ],
         "summary": final_reply,
         "chat_session_id": chat_session_id,
+        # 🆕 Auto-generation info
+        "generation_started": generation_started,
+        "files_count": files_count,
     }
     
     if canon_items_struct:
@@ -1183,6 +1291,7 @@ async def ask_ai_to_ai_route(
             final_config=final_config,
             canon_digest=canon_digest,
             canon_items_struct=canon_items_struct,
+            user_id=current_user.id,
         )
     
     else:
