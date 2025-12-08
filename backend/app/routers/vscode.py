@@ -54,34 +54,77 @@ async def vscode_chat(
         if request.project_id:
             try:
                 indexer = FileIndexer(db)
-                # Search for relevant files based on user's question
-                relevant_files = await indexer.search_files(
-                    project_id=request.project_id,
-                    query=request.message,
-                    limit=5
-                )
+                found_exact_match = False
                 
-                if relevant_files:
-                    system_prompt += "\n\n🔍 **Relevant files from your codebase:**\n"
+                # 1. Check if user is asking about a specific file path
+                import re
+                file_path_match = re.search(r'[\w/\\.-]+\.(py|ts|tsx|js|jsx|json|md|css|html|vue|go|rs|java|rb|php|sql|sh|yaml|yml)', request.message, re.IGNORECASE)
+                
+                if file_path_match:
+                    # Try exact file path match first
+                    requested_path = file_path_match.group(0).replace('\\', '/')
+                    print(f"🔍 [Smart Context] Looking for exact file: {requested_path}")
                     
-                    for file_info in relevant_files:
-                        # Get file content
-                        content = await indexer.get_file_content(
-                            project_id=request.project_id,
-                            file_path=file_info["file_path"]
-                        )
+                    # Search in DB for matching path
+                    from sqlalchemy import text
+                    exact_match = db.execute(text("""
+                        SELECT file_path, content, language 
+                        FROM file_embeddings 
+                        WHERE project_id = :project_id 
+                        AND file_path ILIKE :pattern
+                        LIMIT 1
+                    """), {
+                        "project_id": request.project_id,
+                        "pattern": f"%{requested_path}%"
+                    }).fetchone()
+                    
+                    if exact_match:
+                        found_exact_match = True
+                        file_path, content, language = exact_match
+                        print(f"✅ [Smart Context] Found exact match: {file_path}")
                         
-                        if content:
-                            # Truncate long files
-                            content_preview = content[:3000]
-                            if len(content) > 3000:
-                                content_preview += "\n... (truncated)"
-                            
-                            system_prompt += f"\n\n📄 **{file_info['file_path']}** (similarity: {file_info['similarity']}):\n```{file_info['language']}\n{content_preview}\n```"
+                        # Truncate if needed
+                        content_preview = content[:8000] if content else ""
+                        if content and len(content) > 8000:
+                            content_preview += "\n... (truncated)"
+                        
+                        system_prompt += f"\n\n📄 **Requested file: {file_path}**:\n```{language or 'text'}\n{content_preview}\n```"
+                        system_prompt += "\n\n---\nThe user asked about this specific file. Answer based on its content above."
+                    else:
+                        print(f"⚠️ [Smart Context] No exact match found for: {requested_path}")
+                
+                # 2. Also add semantically relevant files (if no exact match or as additional context)
+                if not found_exact_match:
+                    relevant_files = await indexer.search_files(
+                        project_id=request.project_id,
+                        query=request.message,
+                        limit=5
+                    )
                     
-                    system_prompt += "\n\n---\nUse the above codebase context to answer the user's question."
+                    if relevant_files:
+                        system_prompt += "\n\n🔍 **Relevant files from your codebase:**\n"
+                        
+                        for file_info in relevant_files:
+                            # Get file content
+                            content = await indexer.get_file_content(
+                                project_id=request.project_id,
+                                file_path=file_info["file_path"]
+                            )
+                            
+                            if content:
+                                # Truncate long files
+                                content_preview = content[:3000]
+                                if len(content) > 3000:
+                                    content_preview += "\n... (truncated)"
+                                
+                                system_prompt += f"\n\n📄 **{file_info['file_path']}** (similarity: {file_info['similarity']}):\n```{file_info['language']}\n{content_preview}\n```"
+                        
+                        system_prompt += "\n\n---\nUse the above codebase context to answer the user's question."
+                        
             except Exception as e:
                 print(f"⚠️ Smart Context error (continuing without): {e}")
+                import traceback
+                traceback.print_exc()
         # ========== END SMART CONTEXT ==========
         
         # Add current file context if provided
