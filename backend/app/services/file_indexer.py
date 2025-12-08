@@ -519,21 +519,21 @@ Imports: {', '.join(metadata.get('imports', []))}
 """.strip()
         
         embedding = vector_service.create_embedding(embedding_text)
-        
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
         # Get file name from path
         file_name = file_path.split("/")[-1]
         
         # Count lines
         line_count = content.count("\n") + 1
         
-        # Upsert into database
-        self.db.execute(text("""
+        # Upsert into database - use f-string for vector cast
+        self.db.execute(text(f"""
             INSERT INTO file_embeddings 
             (project_id, file_path, file_name, language, content, content_hash,
              file_size, line_count, embedding, metadata, indexed_at, updated_at)
             VALUES 
             (:project_id, :file_path, :file_name, :language, :content, :content_hash,
-             :file_size, :line_count, :embedding, :metadata, :now, :now)
+             :file_size, :line_count, '{embedding_str}'::vector, :metadata, :now, :now)
             ON CONFLICT (project_id, file_path) 
             DO UPDATE SET
                 content = EXCLUDED.content,
@@ -553,9 +553,8 @@ Imports: {', '.join(metadata.get('imports', []))}
             "content_hash": content_hash,
             "file_size": len(content.encode("utf-8")),
             "line_count": line_count,
-            "embedding": embedding,
             "metadata": json.dumps(metadata),
-            "now": datetime.utcnow()
+            "now": datetime.now(datetime.timezone.utc)
         })
         self.db.commit()
         
