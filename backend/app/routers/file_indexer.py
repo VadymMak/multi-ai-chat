@@ -14,12 +14,18 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
+import hashlib
+import json
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.memory.db import get_db
 from app.memory.models import Project
 from app.deps import get_current_user
-from app.services.file_indexer import FileIndexer
+from app.services.file_indexer import FileIndexer, SUPPORTED_EXTENSIONS, should_skip_file, extract_metadata
+from app.services import vector_service
+from datetime import datetime
+
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +370,163 @@ async def delete_project_index(
     except Exception as e:
         logger.exception(f"Failed to delete index: {e}")
         raise HTTPException(500, f"Failed to delete index: {str(e)}")
+    
+# ====================================================================
+# LOCAL FILES INDEXING (for VS Code Extension)
+# ====================================================================
+
+class LocalFile(BaseModel):
+    """Single file from local filesystem"""
+    path: str
+    content: str
+
+
+class IndexLocalFilesRequest(BaseModel):
+    """Request to index local files"""
+    project_id: int
+    files: List[LocalFile]
+
+
+class IndexLocalFilesResponse(BaseModel):
+    """Response from local indexing"""
+    success: bool
+    project_id: int
+    indexed: int
+    skipped: int
+    errors: int
+    message: str
+
+
+@router.post("/index-local", response_model=IndexLocalFilesResponse)
+async def index_local_files(
+    request: IndexLocalFilesRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Index files from local filesystem (sent by VS Code Extension).
+    
+    This endpoint does NOT require git_url - files are sent directly.
+    
+    Args:
+        project_id: Project ID
+        files: List of files with path and content
+    """
+    logger.info(f"📂 Local index request: project={request.project_id}, files={len(request.files)}")
+    
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == request.project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    # Index files
+    stats = {"indexed": 0, "skipped": 0, "errors": 0}
+    
+    for file_data in request.files:
+        try:
+            # Get language from extension
+            language = None
+            for ext, lang in SUPPORTED_EXTENSIONS.items():
+                if file_data.path.endswith(ext):
+                    language = lang
+                    break
+            
+            if not language:
+                stats["skipped"] += 1
+                continue
+            
+            # Skip files matching skip patterns
+            if should_skip_file(file_data.path):
+                stats["skipped"] += 1
+                continue
+            
+            # Compute hash
+            content_hash = hashlib.sha256(file_data.content.encode("utf-8")).hexdigest()
+            
+            # Check if unchanged
+            existing = db.execute(text("""
+                SELECT content_hash FROM file_embeddings
+                WHERE project_id = :project_id AND file_path = :file_path
+            """), {"project_id": request.project_id, "file_path": file_data.path}).fetchone()
+            
+            if existing and existing[0] == content_hash:
+                stats["skipped"] += 1
+                continue
+            
+            # Extract metadata
+            metadata = extract_metadata(file_data.content, language)
+            
+            # Generate embedding
+            embedding_text = f"""
+File: {file_data.path}
+Language: {language}
+Classes: {', '.join(metadata.get('classes', []))}
+Functions: {', '.join(metadata.get('functions', []))}
+Imports: {', '.join(metadata.get('imports', []))}
+
+{file_data.content[:8000]}
+""".strip()
+            
+            embedding = vector_service.create_embedding(embedding_text)
+            
+            # File info
+            file_name = file_data.path.split("/")[-1].split("\\")[-1]
+            line_count = file_data.content.count("\n") + 1
+            file_size = len(file_data.content.encode("utf-8"))
+            
+            # Upsert
+            db.execute(text("""
+                INSERT INTO file_embeddings 
+                (project_id, file_path, file_name, language, content, content_hash,
+                 file_size, line_count, embedding, metadata, indexed_at, updated_at)
+                VALUES 
+                (:project_id, :file_path, :file_name, :language, :content, :content_hash,
+                 :file_size, :line_count, :embedding, :metadata, :now, :now)
+                ON CONFLICT (project_id, file_path) 
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    content_hash = EXCLUDED.content_hash,
+                    file_size = EXCLUDED.file_size,
+                    line_count = EXCLUDED.line_count,
+                    embedding = EXCLUDED.embedding,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = EXCLUDED.updated_at
+            """), {
+                "project_id": request.project_id,
+                "file_path": file_data.path,
+                "file_name": file_name,
+                "language": language,
+                "content": file_data.content,
+                "content_hash": content_hash,
+                "file_size": file_size,
+                "line_count": line_count,
+                "embedding": embedding,
+                "metadata": json.dumps(metadata),
+                "now": datetime.utcnow()
+            })
+            db.commit()
+            
+            stats["indexed"] += 1
+            logger.debug(f"  ✅ {file_data.path}")
+            
+        except Exception as e:
+            stats["errors"] += 1
+            logger.error(f"  ❌ {file_data.path}: {e}")
+    
+    logger.info(f"✅ Local indexing complete: {stats}")
+    
+    return IndexLocalFilesResponse(
+        success=True,
+        project_id=request.project_id,
+        indexed=stats["indexed"],
+        skipped=stats["skipped"],
+        errors=stats["errors"],
+        message=f"Indexed {stats['indexed']} files, skipped {stats['skipped']}, errors {stats['errors']}"
+    )
 
 
 @router.get("/find-related/{project_id}")

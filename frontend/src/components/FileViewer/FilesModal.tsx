@@ -5,6 +5,7 @@ import FileTree from "./FileTree";
 import FileViewer from "./FileViewer";
 import type { FileNode, GeneratedFile } from "../../types/projects";
 import { downloadFile } from "../../services/fileApi";
+import JSZip from "jszip";
 
 interface FilesModalProps {
   isOpen: boolean;
@@ -112,18 +113,26 @@ export default function FilesModal({
     return convertToArray(root);
   };
 
-  const handleDownloadAll = () => {
+  const handleDownloadAll = async () => {
     if (generatedFiles.length === 0) return;
 
-    // Create a simple text file with all file paths and contents
-    const allContent = generatedFiles
-      .map(
-        (file) =>
-          `\n\n========== ${file.file_path} ==========\n\n${file.content}`
-      )
-      .join("\n");
+    const zip = new JSZip();
 
-    downloadFile(`${projectName}_all_files.txt`, allContent);
+    // Add each file to ZIP with correct folder structure
+    generatedFiles.forEach((file) => {
+      zip.file(file.file_path, file.content || "");
+    });
+
+    // Generate ZIP and download
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${projectName}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   if (!isOpen) return null;
