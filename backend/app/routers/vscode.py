@@ -244,15 +244,25 @@ async def debug_search(
         # ========== 3. CREATE QUERY EMBEDDING ==========
         print(f"🔮 [DEBUG] Creating embedding for query: '{query}'")
         
-        # Use the SAME pattern as store_message_with_embedding (which works!)
-        from openai import OpenAI
-        client = OpenAI(api_key=user_api_key)
+        # Use EXACT pattern from vector_service.py (which works!)
+        import httpx
         
-        embedding_response = client.embeddings.create(
-            input=query,
-            model="text-embedding-3-small"
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            trust_env=False  # Don't read proxy from environment
         )
-        query_embedding = embedding_response.data[0].embedding
+        
+        from openai import OpenAI
+        client = OpenAI(api_key=user_api_key, http_client=http_client)
+        
+        try:
+            embedding_response = client.embeddings.create(
+                input=query,
+                model="text-embedding-3-small"
+            )
+            query_embedding = embedding_response.data[0].embedding
+        finally:
+            http_client.close()
         
         query_embedding_info = {
             "query": query,
