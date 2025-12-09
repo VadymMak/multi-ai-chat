@@ -79,6 +79,9 @@ def format_relevant_files_with_content(
                 WHERE project_id = :project_id AND file_path = :file_path
             """), {"project_id": project_id, "file_path": path}).fetchone()
             
+            print(f"🔍 [DEBUG smart_context] File: {path}")
+            print(f"   Result exists: {result is not None}")
+
             if result and result[0]:
                 content = result[0]
                 

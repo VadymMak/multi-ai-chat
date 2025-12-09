@@ -599,6 +599,11 @@ async def ask_route(
             db=db,
             memory=memory
         )
+
+        print(f"🔍 [DEBUG ask.py] smart_context_text length: {len(smart_context_text)} chars")
+        print(f"🔍 [DEBUG ask.py] First 500 chars:\n{smart_context_text[:500]}")
+        print(f"🔍 [DEBUG ask.py] Contains 'pgvector': {'pgvector' in smart_context_text}")
+        print(f"🔍 [DEBUG ask.py] Contains '```': {'```' in smart_context_text}")  # Проверка есть ли код
         
         # Smart Context as system message
         hist_now = []
