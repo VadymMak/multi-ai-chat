@@ -10,10 +10,11 @@ ADDED: Diagnostic endpoint for debugging search_files() issue
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text  # ← FIXED: Removed print() that got merged here
 from pydantic import BaseModel
 from uuid import uuid4
-import os  # ← ADDED: For Railway proxy fix
+import os  
+import httpx
 import openai
 
 from app.deps import get_current_active_user, get_db
@@ -245,33 +246,18 @@ async def debug_search(
         # ========== 3. CREATE QUERY EMBEDDING ==========
         print(f"🔮 [DEBUG] Creating embedding for query: '{query}'")
         
-        # ▼▼▼ RAILWAY PROXY FIX START ▼▼▼
-        # Railway sets proxy env vars that break OpenAI client
-        # Temporarily clear them
-        old_http_proxy = os.environ.pop('HTTP_PROXY', None)
-        old_https_proxy = os.environ.pop('HTTPS_PROXY', None)
-        old_http_proxy_lower = os.environ.pop('http_proxy', None)
-        old_https_proxy_lower = os.environ.pop('https_proxy', None)
+        # Use httpx with proxies disabled (Railway fix)
+        http_client = httpx.Client(proxies=None, timeout=60.0)
         
         try:
-            # Use OpenAI v1.0+ client pattern
-            client = openai.OpenAI(api_key=user_api_key)
+            client = openai.OpenAI(api_key=user_api_key, http_client=http_client)
             embedding_response = client.embeddings.create(
                 input=query,
                 model="text-embedding-3-small"
             )
             query_embedding = embedding_response.data[0].embedding
         finally:
-            # Restore proxy settings for other services
-            if old_http_proxy:
-                os.environ['HTTP_PROXY'] = old_http_proxy
-            if old_https_proxy:
-                os.environ['HTTPS_PROXY'] = old_https_proxy
-            if old_http_proxy_lower:
-                os.environ['http_proxy'] = old_http_proxy_lower
-            if old_https_proxy_lower:
-                os.environ['https_proxy'] = old_https_proxy_lower
-        # ▲▲▲ RAILWAY PROXY FIX END ▲▲▲
+            http_client.close()
         
         query_embedding_info = {
             "query": query,
