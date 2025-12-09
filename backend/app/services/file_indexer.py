@@ -570,55 +570,84 @@ Imports: {', '.join(metadata.get('imports', []))}
         """
         Search files by semantic similarity.
         """
-        # Generate query embedding
-        query_embedding = vector_service.create_embedding(query)
+        import traceback
         
-        # Convert embedding to PostgreSQL vector string format
-        embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+        print(f"\n🔍 [search_files] Starting search...")
+        print(f"   project_id={project_id}")
+        print(f"   query={query[:50]}...")
+        print(f"   limit={limit}")
         
-        # Build query - use string formatting for vector to avoid :: conflict
-        if language:
-            sql = f"""
-                SELECT 
-                    id, file_path, file_name, language, line_count,
-                    1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
-                    metadata
-                FROM file_embeddings
-                WHERE project_id = :project_id
-                AND embedding IS NOT NULL
-                AND language = :language
-                ORDER BY embedding <=> '{embedding_str}'::vector
-                LIMIT :limit
-            """
-            params = {"project_id": project_id, "language": language, "limit": limit}
-        else:
-            sql = f"""
-                SELECT 
-                    id, file_path, file_name, language, line_count,
-                    1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
-                    metadata
-                FROM file_embeddings
-                WHERE project_id = :project_id
-                AND embedding IS NOT NULL
-                ORDER BY embedding <=> '{embedding_str}'::vector
-                LIMIT :limit
-            """
-            params = {"project_id": project_id, "limit": limit}
-        
-        results = self.db.execute(text(sql), params).fetchall()
-        
-        return [
-            {
-                "id": r[0],
-                "file_path": r[1],
-                "file_name": r[2],
-                "language": r[3],
-                "line_count": r[4],
-                "similarity": round(r[5], 4),
-                "metadata": r[6] if r[6] else {}
-            }
-            for r in results
-        ]
+        try:
+            # Generate query embedding
+            print(f"🔍 [search_files] Creating embedding for query...")
+            query_embedding = vector_service.create_embedding(query)
+            
+            if not query_embedding:
+                print(f"❌ [search_files] create_embedding returned empty!")
+                return []
+                
+            print(f"✅ [search_files] Embedding created, length={len(query_embedding)}")
+            
+            # Convert embedding to PostgreSQL vector string format
+            embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+            
+            # Build query
+            if language:
+                sql = f"""
+                    SELECT 
+                        id, file_path, file_name, language, line_count,
+                        1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
+                        metadata
+                    FROM file_embeddings
+                    WHERE project_id = :project_id
+                    AND embedding IS NOT NULL
+                    AND language = :language
+                    ORDER BY embedding <=> '{embedding_str}'::vector
+                    LIMIT :limit
+                """
+                params = {"project_id": project_id, "language": language, "limit": limit}
+            else:
+                sql = f"""
+                    SELECT 
+                        id, file_path, file_name, language, line_count,
+                        1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
+                        metadata
+                    FROM file_embeddings
+                    WHERE project_id = :project_id
+                    AND embedding IS NOT NULL
+                    ORDER BY embedding <=> '{embedding_str}'::vector
+                    LIMIT :limit
+                """
+                params = {"project_id": project_id, "limit": limit}
+            
+            print(f"🔍 [search_files] Executing SQL with params: {params}")
+            
+            results = self.db.execute(text(sql), params).fetchall()
+            
+            print(f"✅ [search_files] SQL returned {len(results)} rows")
+            
+            formatted = [
+                {
+                    "id": r[0],
+                    "file_path": r[1],
+                    "file_name": r[2],
+                    "language": r[3],
+                    "line_count": r[4],
+                    "similarity": round(r[5], 4),
+                    "metadata": r[6] if r[6] else {}
+                }
+                for r in results
+            ]
+            
+            if formatted:
+                print(f"✅ [search_files] Top: {formatted[0]['file_path']} ({formatted[0]['similarity']})")
+            
+            return formatted
+            
+        except Exception as e:
+            print(f"❌ [search_files] EXCEPTION: {e}")
+            traceback.print_exc()
+            return []
     
     async def get_file_content(
         self,
