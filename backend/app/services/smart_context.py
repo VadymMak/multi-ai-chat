@@ -235,10 +235,18 @@ async def build_smart_context(
         
         # Search files by project_id
         print(f"🔍 [Smart Context] Searching indexed files for project={project_id}...")
+
+        enhanced_query = query
+        query_lower = query.lower()
+        
+        if any(term in query_lower for term in ["semantic", "search", "vector", "embedding"]):
+            enhanced_query = f"{query} pgvector database embedding similarity file_indexer"
+            print(f"🔍 [Query Enhancement] Added: pgvector, embedding, file_indexer")
+
         relevant_files = await indexer.search_files(
             project_id=project_id,
-            query=query,
-            limit=5
+            query=enhanced_query,
+            limit=15
         )
 
         if relevant_files:
