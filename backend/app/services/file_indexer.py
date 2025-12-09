@@ -579,7 +579,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
             files = []
             for row in result:
-                metadata = json.loads(row.metadata) if row.metadata else {}
+                metadata = row.metadata if row.metadata else {}
                 files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
                              "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
                              "match_type": row.match_type, "metadata": metadata})
@@ -610,7 +610,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
             files = []
             for row in result:
-                metadata = json.loads(row.metadata) if row.metadata else {}
+                metadata = row.metadata if row.metadata else {}
                 files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
                              "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
                              "match_type": row.match_type, "metadata": metadata})
@@ -639,7 +639,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
             files = []
             for row in result:
-                metadata = json.loads(row.metadata) if row.metadata else {}
+                metadata = row.metadata if row.metadata else {}
                 files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
                              "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
                              "match_type": row.match_type, "metadata": metadata})
@@ -672,7 +672,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             result = db.execute(sql, {"project_id": project_id, "query_embedding": query_embedding, "limit": limit})
             files = []
             for row in result:
-                metadata = json.loads(row.metadata) if row.metadata else {}
+                metadata = row.metadata if row.metadata else {}
                 files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
                              "language": row.language, "line_count": row.line_count, 
                              "similarity": float(row.similarity), "match_type": row.match_type, "metadata": metadata})
