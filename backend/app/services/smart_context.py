@@ -45,9 +45,6 @@ def format_git_structure(git_data: Dict[str, Any]) -> str:
     return f"Repository: {git_url}\nFiles ({files_count}):\n{file_list}"
 
 
-# ============================================================
-# NEW: Format relevant code files from file_embeddings
-# ============================================================
 def format_relevant_files(files: List[Dict[str, Any]]) -> str:
     """Format relevant code files for context"""
     if not files:
@@ -97,7 +94,7 @@ async def build_smart_context(
     2. Recent 5 messages (immediate context)
     3. Summaries (high-level context)
     4. Git structure (if available)
-    5. Relevant code files (if indexed) ← NEW!
+    5. Relevant code files from file_embeddings (by project_id, NOT git_url!)
     """
     
     print(f"🎯 [Smart Context] Building for project={project_id}, role={role_id}, query={query[:50]}...")
@@ -150,7 +147,7 @@ async def build_smart_context(
     except Exception as e:
         print(f"⚠️ [Smart Context] Summaries failed: {e}")
     
-    # 4. Git structure (if exists)
+    # 4. Git structure (if exists) - OPTIONAL BONUS
     try:
         project = db.query(Project).filter_by(id=project_id).first()
         if project and project.git_url and project.project_structure:
@@ -160,37 +157,39 @@ async def build_smart_context(
             parts.append(f"📌 PROJECT STRUCTURE:\n{git_text}")
             print(f"✅ [Smart Context] Added Git structure ({len(git_data.get('files', []))} files)")
         else:
-            print(f"ℹ️ [Smart Context] No Git structure (project without Git)")
+            print(f"ℹ️ [Smart Context] No Git structure available")
     except Exception as e:
         print(f"⚠️ [Smart Context] Git structure failed: {e}")
     
     # ============================================================
-    # 5. Relevant code files from file_embeddings (NEW!)
+    # 5. Relevant code files from file_embeddings
+    # FIXED: Search by project_id ONLY, NOT by git_url!
+    # Source of truth = local hard drive → file_embeddings table
     # ============================================================
     try:
-        # Check if project has indexed files
-        project = db.query(Project).filter_by(id=project_id).first()
-        if project and project.git_url:
-            from app.services.file_indexer import FileIndexer
-            
-            indexer = FileIndexer(db)
-            # FIXED: await the async search_files method
-            relevant_files = await indexer.search_files(
-                project_id=project_id,
-                query=query,
-                limit=3
-            )
-            
-            if relevant_files:
-                files_text = format_relevant_files(relevant_files)
-                parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
-                print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files")
-            else:
-                print(f"ℹ️ [Smart Context] No indexed files found for query")
+        from app.services.file_indexer import FileIndexer
+        
+        indexer = FileIndexer(db)
+        
+        # Search files by project_id (no git_url check needed!)
+        print(f"🔍 [Smart Context] Searching indexed files for project={project_id}...")
+        relevant_files = await indexer.search_files(
+            project_id=project_id,
+            query=query,
+            limit=5  # Increased from 3 to 5 for better context
+        )
+        
+        if relevant_files:
+            files_text = format_relevant_files(relevant_files)
+            parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
+            print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files")
         else:
-            print(f"ℹ️ [Smart Context] Skipping file search (no Git URL)")
+            print(f"ℹ️ [Smart Context] No indexed files found for query")
+            
     except Exception as e:
-        print(f"⚠️ [Smart Context] File search skipped: {e}")
+        print(f"⚠️ [Smart Context] File search failed: {e}")
+        import traceback
+        traceback.print_exc()
     
     result = "\n\n".join(parts)
     print(f"✅ [Smart Context] Built context with {len(parts)} components")
