@@ -274,19 +274,16 @@ async def debug_search(
         # ========== 4. TEST SEARCH WITH QUERY EMBEDDING ==========
         print(f"🔎 [DEBUG] Testing search with query embedding...")
         
-        # Format embedding as pgvector string
-        embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
-        
-        # SQL search (same as search_files())
+        # SQL search (use CAST syntax like vector_service.py)
         search_sql = text("""
             SELECT 
                 file_path,
                 language,
-                1 - (embedding <=> :query_embedding::vector) as similarity
+                1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity
             FROM file_embeddings
             WHERE project_id = :project_id
                 AND embedding IS NOT NULL
-            ORDER BY embedding <=> :query_embedding::vector
+            ORDER BY embedding <=> CAST(:query_embedding AS vector)
             LIMIT 5
         """)
         
@@ -294,7 +291,7 @@ async def debug_search(
             search_sql,
             {
                 "project_id": project_id,
-                "query_embedding": embedding_str
+                "query_embedding": query_embedding  # Pass list directly!
             }
         ).fetchall()
         
@@ -333,11 +330,11 @@ async def debug_search(
                 SELECT 
                     file_path,
                     language,
-                    1 - (embedding <=> :target_embedding::vector) as similarity
+                    1 - (embedding <=> CAST(:target_embedding AS vector)) as similarity
                 FROM file_embeddings
                 WHERE project_id = :project_id
                     AND embedding IS NOT NULL
-                ORDER BY embedding <=> :target_embedding::vector
+                ORDER BY embedding <=> CAST(:target_embedding AS vector)
                 LIMIT 5
             """)
             
@@ -345,7 +342,7 @@ async def debug_search(
                 file_to_file_sql,
                 {
                     "project_id": project_id,
-                    "target_embedding": str(target_embedding)
+                    "target_embedding": target_embedding  # Pass list directly!
                 }
             ).fetchall()
             
@@ -368,15 +365,15 @@ async def debug_search(
                 text("""
                     SELECT 
                         file_path,
-                        1 - (embedding <=> :query_embedding::vector) as similarity
+                        1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity
                     FROM file_embeddings
                     WHERE project_id = :pid 
                         AND file_path ILIKE '%file_indexer%'
                         AND embedding IS NOT NULL
-                    ORDER BY embedding <=> :query_embedding::vector
+                    ORDER BY embedding <=> CAST(:query_embedding AS vector)
                     LIMIT 3
                 """),
-                {"pid": project_id, "query_embedding": embedding_str}
+                {"pid": project_id, "query_embedding": query_embedding}  # Pass list directly!
             ).fetchall()
             
             specific_file_check = [
