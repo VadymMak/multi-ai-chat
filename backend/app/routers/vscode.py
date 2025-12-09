@@ -244,8 +244,8 @@ async def debug_search(
         # ========== 3. CREATE QUERY EMBEDDING ==========
         print(f"🔮 [DEBUG] Creating embedding for query: '{query}'")
         
-        openai.api_key = user_api_key
-        embedding_response = openai.embeddings.create(
+        client = openai.OpenAI(api_key=user_api_key)
+        embedding_response = client.embeddings.create(
             input=query,
             model="text-embedding-3-small"
         )
