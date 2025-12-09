@@ -581,7 +581,8 @@ Imports: {', '.join(metadata.get('imports', []))}
             # Generate query embedding
             print(f"🔍 [search_files] Creating embedding for query...")
             query_embedding = vector_service.create_embedding(query)
-            
+            print(f"🔍 [search_files] Query embedding first 5 values: {query_embedding[:5]}")
+
             if not query_embedding:
                 print(f"❌ [search_files] create_embedding returned empty!")
                 return []
