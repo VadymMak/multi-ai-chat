@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy.orm import Session
@@ -554,101 +554,177 @@ Imports: {', '.join(metadata.get('imports', []))}
             "file_size": len(content.encode("utf-8")),
             "line_count": line_count,
             "metadata": json.dumps(metadata),
-            "now": datetime.now(datetime.timezone.utc)
+            "now": datetime.now(timezone.utc)
         })
         self.db.commit()
         
         return True
     
-    async def search_files(
-        self,
-        project_id: int,
-        query: str,
-        limit: int = 5,
-        language: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Search files by semantic similarity.
-        """
-        import traceback
+    async def search_by_filename(self, project_id: int, query: str, limit: int = 5, db: Session = None) -> List[Dict]:
+        """Search by filename using SQL LIKE"""
+        db = db or self.db
+        if not db:
+            return []
+        try:
+            search_pattern = f"%{query}%"
+            sql = text("""
+                SELECT id, file_path, file_name, language, line_count, metadata,
+                       1.0 as similarity, 'filename' as match_type
+                FROM file_embeddings
+                WHERE project_id = :project_id AND embedding IS NOT NULL
+                  AND (file_path ILIKE :pattern OR file_name ILIKE :pattern)
+                ORDER BY CASE WHEN file_name ILIKE :pattern THEN 1 ELSE 2 END, file_name
+                LIMIT :limit
+            """)
+            result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
+            files = []
+            for row in result:
+                metadata = json.loads(row.metadata) if row.metadata else {}
+                files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
+                             "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
+                             "match_type": row.match_type, "metadata": metadata})
+            print(f"[FILENAME] '{query}' → {len(files)} files")
+            return files
+        except Exception as e:
+            print(f"[ERROR] Filename search: {e}")
+            return []
         
-        print(f"\n🔍 [search_files] Starting search...")
-        print(f"   project_id={project_id}")
-        print(f"   query={query[:50]}...")
-        print(f"   limit={limit}")
+    async def search_by_symbol(self, project_id: int, query: str, limit: int = 5, db: Session = None) -> List[Dict]:
+        """Search for class/function names in metadata"""
+        db = db or self.db
+        if not db:
+            return []
+        try:
+            search_pattern = f"%{query}%"
+            sql = text("""
+                SELECT id, file_path, file_name, language, line_count, metadata,
+                       1.0 as similarity, 'symbol' as match_type
+                FROM file_embeddings
+                WHERE project_id = :project_id AND embedding IS NOT NULL
+                  AND (metadata->>'classes' ILIKE :pattern
+                       OR metadata->>'functions' ILIKE :pattern
+                       OR metadata->>'exports' ILIKE :pattern)
+                ORDER BY file_name
+                LIMIT :limit
+            """)
+            result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
+            files = []
+            for row in result:
+                metadata = json.loads(row.metadata) if row.metadata else {}
+                files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
+                             "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
+                             "match_type": row.match_type, "metadata": metadata})
+            print(f"[SYMBOL] '{query}' → {len(files)} files")
+            return files
+        except Exception as e:
+            print(f"[ERROR] Symbol search: {e}")
+            return []
+        
+    async def search_by_pattern(self, project_id: int, query: str, limit: int = 5, db: Session = None) -> List[Dict]:
+        """Search for code patterns"""
+        db = db or self.db
+        if not db:
+            return []
+        try:
+            search_pattern = f"%{query}%"
+            sql = text("""
+                SELECT id, file_path, file_name, language, line_count, metadata,
+                       0.9 as similarity, 'pattern' as match_type
+                FROM file_embeddings
+                WHERE project_id = :project_id AND embedding IS NOT NULL
+                  AND file_path ILIKE :pattern
+                ORDER BY file_name
+                LIMIT :limit
+            """)
+            result = db.execute(sql, {"project_id": project_id, "pattern": search_pattern, "limit": limit})
+            files = []
+            for row in result:
+                metadata = json.loads(row.metadata) if row.metadata else {}
+                files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
+                             "language": row.language, "line_count": row.line_count, "similarity": row.similarity,
+                             "match_type": row.match_type, "metadata": metadata})
+            print(f"[PATTERN] '{query}' → {len(files)} files")
+            return files
+        except Exception as e:
+            print(f"[ERROR] Pattern search: {e}")
+            return []
+    
+    async def search_semantic(self, project_id: int, query: str, limit: int = 5, db: Session = None) -> List[Dict]:
+        """Semantic search using pgvector"""
+        db = db or self.db
+        if not db:
+            print("[ERROR] No database session available")
+            return []
         
         try:
-            # Generate query embedding
-            print(f"🔍 [search_files] Creating embedding for query...")
+            # FIXED: Use vector_service module, not self.vector_service
             query_embedding = vector_service.create_embedding(query)
-            print(f"🔍 [search_files] Query embedding first 5 values: {query_embedding[:5]}")
-
-            if not query_embedding:
-                print(f"❌ [search_files] create_embedding returned empty!")
-                return []
-                
-            print(f"✅ [search_files] Embedding created, length={len(query_embedding)}")
             
-            # Convert embedding to PostgreSQL vector string format
-            embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
-            
-            # Build query
-            if language:
-                sql = f"""
-                    SELECT 
-                        id, file_path, file_name, language, line_count,
-                        1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
-                        metadata
-                    FROM file_embeddings
-                    WHERE project_id = :project_id
-                    AND embedding IS NOT NULL
-                    AND language = :language
-                    ORDER BY embedding <=> '{embedding_str}'::vector
-                    LIMIT :limit
-                """
-                params = {"project_id": project_id, "language": language, "limit": limit}
-            else:
-                sql = f"""
-                    SELECT 
-                        id, file_path, file_name, language, line_count,
-                        1 - (embedding <=> '{embedding_str}'::vector) AS similarity,
-                        metadata
-                    FROM file_embeddings
-                    WHERE project_id = :project_id
-                    AND embedding IS NOT NULL
-                    ORDER BY embedding <=> '{embedding_str}'::vector
-                    LIMIT :limit
-                """
-                params = {"project_id": project_id, "limit": limit}
-            
-            print(f"🔍 [search_files] Executing SQL with params: {params}")
-            
-            results = self.db.execute(text(sql), params).fetchall()
-            
-            print(f"✅ [search_files] SQL returned {len(results)} rows")
-            
-            formatted = [
-                {
-                    "id": r[0],
-                    "file_path": r[1],
-                    "file_name": r[2],
-                    "language": r[3],
-                    "line_count": r[4],
-                    "similarity": round(r[5], 4),
-                    "metadata": r[6] if r[6] else {}
-                }
-                for r in results
-            ]
-            
-            if formatted:
-                print(f"✅ [search_files] Top: {formatted[0]['file_path']} ({formatted[0]['similarity']})")
-            
-            return formatted
-            
+            sql = text("""
+                SELECT id, file_path, file_name, language, line_count, metadata,
+                       1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity,
+                       'semantic' as match_type
+                FROM file_embeddings
+                WHERE project_id = :project_id AND embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :limit
+            """)
+            result = db.execute(sql, {"project_id": project_id, "query_embedding": query_embedding, "limit": limit})
+            files = []
+            for row in result:
+                metadata = json.loads(row.metadata) if row.metadata else {}
+                files.append({"id": row.id, "file_path": row.file_path, "file_name": row.file_name,
+                             "language": row.language, "line_count": row.line_count, 
+                             "similarity": float(row.similarity), "match_type": row.match_type, "metadata": metadata})
+            print(f"[SEMANTIC] '{query}' → {len(files)} files")
+            return files
         except Exception as e:
-            print(f"❌ [search_files] EXCEPTION: {e}")
+            print(f"[ERROR] Semantic search: {e}")
+            import traceback
             traceback.print_exc()
             return []
+    
+    async def search_files(self, project_id: int, query: str, limit: int = 5, 
+                          language: Optional[str] = None, db: Session = None) -> List[Dict]:
+        """Intelligent search with query classification"""
+        from .query_classifier_with_logging import classify_and_log, QueryType
+        
+        db = db or self.db
+        if not db:
+            return await self.search_semantic(project_id, query, limit, db)
+        
+        try:
+            query_type = classify_and_log(query=query, project_id=project_id, db=db, 
+                                          user_id=None, enable_logging=True)
+            print(f"[CLASSIFIER] '{query}' → {query_type.value}")
+            
+            results = []
+            if query_type == QueryType.FILENAME:
+                results = await self.search_by_filename(project_id, query, limit, db)
+            elif query_type == QueryType.SYMBOL:
+                results = await self.search_by_symbol(project_id, query, limit, db)
+            elif query_type == QueryType.PATTERN:
+                results = await self.search_by_pattern(project_id, query, limit, db)
+            else:
+                results = await self.search_semantic(project_id, query, limit, db)
+            
+            if len(results) < 3 and query_type != QueryType.SEMANTIC:
+                print(f"[FALLBACK] Only {len(results)} results, trying semantic...")
+                semantic_results = await self.search_semantic(project_id, query, limit, db)
+                existing_paths = {r['file_path'] for r in results}
+                for sr in semantic_results:
+                    if sr['file_path'] not in existing_paths:
+                        results.append(sr)
+                        if len(results) >= limit:
+                            break
+            
+            print(f"[SEARCH] Total: {len(results)} results")
+            return results
+        except Exception as e:
+            print(f"[ERROR] Search failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return await self.search_semantic(project_id, query, limit, db)
     
     async def get_file_content(
         self,
