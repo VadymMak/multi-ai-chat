@@ -240,9 +240,27 @@ async def build_smart_context(
             query=query,
             limit=5
         )
-        
+
         if relevant_files:
-            # FIXED: Use new function that includes content!
+            # BOOST: Increase score for files with query terms in filename
+            query_words = query.lower().split()
+            
+            for f in relevant_files:
+                path = f.get("file_path", "").lower()
+                original_score = f.get("similarity", 0)
+                
+                # Check filename matches
+                matches = sum(1 for word in query_words if word in path)
+                
+                if matches > 0:
+                    # Boost by 0.2 per matching word (max 1.0)
+                    boosted_score = min(original_score + (matches * 0.2), 1.0)
+                    f["similarity"] = boosted_score
+                    print(f"🚀 [Boost] {path}: {original_score:.2f} → {boosted_score:.2f}")
+            
+            # Re-sort by boosted scores
+            relevant_files.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+       
             files_text = format_relevant_files_with_content(
                 files=relevant_files,
                 db=db,
