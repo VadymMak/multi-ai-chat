@@ -1,11 +1,12 @@
 """
 Smart Context Builder - Universal context engine.
-Uses existing services: vector_service + memory/manager + file_indexer.
+FIXED: Now includes actual file CONTENT, not just metadata!
 """
 
 import json
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 # Import existing services
 from app.services import vector_service
@@ -21,8 +22,8 @@ def format_recent(messages: List[Dict[str, Any]]) -> str:
     lines = []
     for msg in messages[-5:]:  # Last 5 only
         sender = msg.get("sender", "unknown")
-        text = msg.get("text", "")[:200]  # Truncate to 200 chars
-        lines.append(f"[{sender}]: {text}")
+        text_content = msg.get("text", "")[:200]  # Truncate to 200 chars
+        lines.append(f"[{sender}]: {text_content}")
     
     return "\n".join(lines)
 
@@ -45,34 +46,70 @@ def format_git_structure(git_data: Dict[str, Any]) -> str:
     return f"Repository: {git_url}\nFiles ({files_count}):\n{file_list}"
 
 
-def format_relevant_files(files: List[Dict[str, Any]]) -> str:
-    """Format relevant code files for context"""
+def format_relevant_files_with_content(
+    files: List[Dict[str, Any]], 
+    db: Session,
+    project_id: int,
+    max_content_chars: int = 4000
+) -> str:
+    """
+    Format relevant code files WITH actual content for AI context.
+    
+    FIXED: Previously only showed metadata, now shows real code!
+    """
     if not files:
         return "No relevant files found"
     
     lines = []
-    for f in files:
+    chars_used = 0
+    max_files = 3  # Limit to top 3 files to save tokens
+    
+    for f in files[:max_files]:
         path = f.get("file_path", "unknown")
         lang = f.get("language", "")
         similarity = f.get("similarity", 0)
-        metadata = f.get("metadata", {})
         
-        # Show file info with similarity percentage
-        lines.append(f"📄 {path} ({lang}, {similarity:.0%} relevant)")
+        # Header with file info
+        lines.append(f"📄 **{path}** ({lang}, {similarity:.0%} match)")
         
-        # Show key metadata (imports, exports, functions)
-        if metadata.get("imports"):
-            imports_list = metadata["imports"][:5]  # First 5 imports
-            lines.append(f"   imports: {', '.join(imports_list)}")
-        if metadata.get("exports"):
-            exports_list = metadata["exports"][:5]  # First 5 exports
-            lines.append(f"   exports: {', '.join(exports_list)}")
-        if metadata.get("functions"):
-            funcs_list = metadata["functions"][:5]  # First 5 functions
-            lines.append(f"   functions: {', '.join(funcs_list)}")
-        if metadata.get("classes"):
-            classes_list = metadata["classes"][:5]  # First 5 classes
-            lines.append(f"   classes: {', '.join(classes_list)}")
+        # Get actual content from DB
+        try:
+            result = db.execute(text("""
+                SELECT content FROM file_embeddings
+                WHERE project_id = :project_id AND file_path = :file_path
+            """), {"project_id": project_id, "file_path": path}).fetchone()
+            
+            if result and result[0]:
+                content = result[0]
+                
+                # Calculate remaining space
+                remaining_chars = max_content_chars - chars_used
+                
+                if remaining_chars > 500:  # Only add if we have space
+                    # Truncate content if needed
+                    if len(content) > remaining_chars:
+                        content = content[:remaining_chars] + "\n... (truncated)"
+                    
+                    lines.append(f"```{lang}")
+                    lines.append(content)
+                    lines.append("```")
+                    
+                    chars_used += len(content)
+                else:
+                    # Just show metadata if no space
+                    metadata = f.get("metadata", {})
+                    if metadata.get("functions"):
+                        lines.append(f"   functions: {', '.join(metadata['functions'][:5])}")
+                    if metadata.get("classes"):
+                        lines.append(f"   classes: {', '.join(metadata['classes'][:5])}")
+            else:
+                lines.append("   (content not available)")
+                
+        except Exception as e:
+            print(f"⚠️ [format_files] Failed to get content for {path}: {e}")
+            lines.append(f"   (error loading content)")
+        
+        lines.append("")  # Empty line between files
     
     return "\n".join(lines)
 
@@ -94,7 +131,7 @@ async def build_smart_context(
     2. Recent 5 messages (immediate context)
     3. Summaries (high-level context)
     4. Git structure (if available)
-    5. Relevant code files from file_embeddings (by project_id, NOT git_url!)
+    5. Relevant code files WITH CONTENT from file_embeddings
     """
     
     print(f"🎯 [Smart Context] Building for project={project_id}, role={role_id}, query={query[:50]}...")
@@ -162,27 +199,32 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] Git structure failed: {e}")
     
     # ============================================================
-    # 5. Relevant code files from file_embeddings
-    # FIXED: Search by project_id ONLY, NOT by git_url!
-    # Source of truth = local hard drive → file_embeddings table
+    # 5. Relevant code files WITH CONTENT
+    # FIXED: Now includes actual code, not just metadata!
     # ============================================================
     try:
         from app.services.file_indexer import FileIndexer
         
         indexer = FileIndexer(db)
         
-        # Search files by project_id (no git_url check needed!)
+        # Search files by project_id
         print(f"🔍 [Smart Context] Searching indexed files for project={project_id}...")
         relevant_files = await indexer.search_files(
             project_id=project_id,
             query=query,
-            limit=5  # Increased from 3 to 5 for better context
+            limit=5
         )
         
         if relevant_files:
-            files_text = format_relevant_files(relevant_files)
+            # FIXED: Use new function that includes content!
+            files_text = format_relevant_files_with_content(
+                files=relevant_files,
+                db=db,
+                project_id=project_id,
+                max_content_chars=4000  # ~1000 tokens for code
+            )
             parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
-            print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files")
+            print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files WITH content")
         else:
             print(f"ℹ️ [Smart Context] No indexed files found for query")
             
