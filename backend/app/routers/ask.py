@@ -667,18 +667,12 @@ async def ask_route(
                 "Do NOT include triple backticks or fenced code blocks under any circumstances."
             )
 
-        full_prompt = generate_prompt_from_db(
-            db=db,
-            project_id=None,
-            role_id=role_id,
-            system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
-            youtube_context=youtube_context_blocks,
-            web_context=[],
-            starter_reply="",
-            user_input=data.query,
-            max_memory_tokens=0,
-            canonical_context=None,
-        )
+        system_prompt = base_system + render_policy
+        if smart_context_text:
+            system_prompt += f"\n\n{smart_context_text}"
+            print(f"✅ [ask.py] Smart Context added to system_prompt ({len(smart_context_text)} chars)")
+
+        full_prompt = system_prompt  # Просто используй напрямую!
 
         # 5) Use Smart Context + current query
         history = hist_now + [{"role": "user", "content": data.query}]
@@ -920,18 +914,12 @@ async def ask_stream_route(
                     "Do NOT include triple backticks or fenced code blocks under any circumstances."
                 )
 
-            full_prompt = generate_prompt_from_db(
-                db=db,
-                project_id=None,
-                role_id=role_id,
-                system_prompt=base_system + render_policy + "\n\n" + smart_context_text,
-                youtube_context=[],
-                web_context=[],
-                starter_reply="",
-                user_input=data.query,
-                max_memory_tokens=0,
-                canonical_context=None,
-            )
+            system_prompt = base_system + render_policy
+            if smart_context_text:
+                system_prompt += f"\n\n{smart_context_text}"
+                print(f"✅ [ask-stream] Smart Context added to system_prompt ({len(smart_context_text)} chars)")
+
+            full_prompt = system_prompt
 
             # 4) Use Smart Context + current query
             history = hist_now + [{"role": "user", "content": data.query}]

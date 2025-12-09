@@ -596,31 +596,47 @@ Files: {len(files)}
             
             if relevant_files:
                 files_text = "\n\n## 📄 Relevant Code Files:\n\n"
+                
                 for f in relevant_files:
                     path = f.get("file_path", "unknown")
                     lang = f.get("language", "")
                     similarity = f.get("similarity", 0)
-                    metadata = f.get("metadata", {})
                     
                     files_text += f"**{path}** ({lang}, {similarity:.0%} relevant)\n"
                     
-                    if metadata.get("imports"):
-                        imports_list = metadata["imports"][:5]
-                        files_text += f"  - imports: {', '.join(imports_list)}\n"
-                    if metadata.get("exports"):
-                        exports_list = metadata["exports"][:5]
-                        files_text += f"  - exports: {', '.join(exports_list)}\n"
-                    if metadata.get("functions"):
-                        funcs_list = metadata["functions"][:5]
-                        files_text += f"  - functions: {', '.join(funcs_list)}\n"
-                    if metadata.get("classes"):
-                        classes_list = metadata["classes"][:5]
-                        files_text += f"  - classes: {', '.join(classes_list)}\n"
+                    # Try to load actual file content
+                    try:
+                        from sqlalchemy import text
+                        result = db.execute(text("""
+                            SELECT content FROM file_embeddings
+                            WHERE project_id = :project_id AND file_path = :file_path
+                        """), {"project_id": project_id_int, "file_path": path}).fetchone()
+                        
+                        if result and result[0]:
+                            content = result[0]
+                            # Limit to 500 chars per file
+                            if len(content) > 500:
+                                content = content[:500] + "\n... (truncated)"
+                            
+                            files_text += f"```{lang}\n{content}\n```\n\n"
+                        else:
+                            # Fallback to metadata if no content
+                            metadata = f.get("metadata", {})
+                            if metadata.get("functions"):
+                                funcs_list = metadata["functions"][:5]
+                                files_text += f"  - functions: {', '.join(funcs_list)}\n"
+                            if metadata.get("classes"):
+                                classes_list = metadata["classes"][:5]
+                                files_text += f"  - classes: {', '.join(classes_list)}\n"
+                            
+                    except Exception as content_err:
+                        print(f"⚠️ Could not load content for {path}: {content_err}")
                 
                 parts.append(files_text)
-                print(f"✅ Relevant code files: {len(relevant_files)} found")
+                print(f"✅ Relevant code files: {len(relevant_files)} with content")
             else:
                 print(f"ℹ️ No indexed files found for query")
+                
     except Exception as e:
         print(f"⚠️ File search failed: {e}")
     
@@ -1083,17 +1099,24 @@ async def _handle_debate_mode(
     
     system_prompt = "\n".join(system_prompt_parts) + render_policy
 
-    full_prompt = build_full_prompt(
-        system_prompt=system_prompt,
-        project_structure=project_structure,
-        memory_summaries=memory_summaries,
-        youtube_context=youtube_context,
-        web_context=web_context,
-        starter_reply=first_reply,
-        user_input=data.topic,
-        max_memory_tokens=600,
-        canonical_context=(canon_digest or None),
-    )
+    full_prompt_parts = [system_prompt]
+
+    if project_structure:
+        full_prompt_parts.append(f"\n\n## 🗂️ Project Structure\n{project_structure}")
+
+    if youtube_context:
+        yt_text = "\n".join(f"- {item}" for item in youtube_context)
+        full_prompt_parts.append(f"\n\n## 📺 YouTube Results\n{yt_text}")
+
+    if web_context:
+        web_text = "\n".join(f"- {item}" for item in web_context)
+        full_prompt_parts.append(f"\n\n## 🌐 Web Search Results\n{web_text}")
+
+    full_prompt_parts.append(f"\n\n## 💬 Previous AI Reply\n{first_reply}")
+    full_prompt_parts.append(f"\n\n## 📝 Your Question\n{data.topic}")
+
+    full_prompt = "\n".join(full_prompt_parts)
+    print(f"✅ [Debate] Full prompt built ({len(full_prompt)} chars)")
 
     try:
         final_reply_raw = await claude_with_retry([{"role": "user", "content": full_prompt}], api_key=anthropic_key)
