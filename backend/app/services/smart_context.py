@@ -15,17 +15,40 @@ from app.memory.models import Project
 
 
 def format_recent(messages: List[Dict[str, Any]]) -> str:
-    """Format recent messages for context"""
+    """
+    Format recent messages for context.
+    SKIP bad AI responses that say "context does not include"
+    """
     if not messages:
         return "No recent messages"
     
+    # Bad response patterns to skip
+    bad_patterns = [
+        "provided context does not include",
+        "context does not include",
+        "i don't see any information",
+        "the context doesn't contain",
+        "no specific information"
+    ]
+    
     lines = []
+    
     for msg in messages[-5:]:  # Last 5 only
         sender = msg.get("sender", "unknown")
-        text_content = msg.get("text", "")[:200]  # Truncate to 200 chars
-        lines.append(f"[{sender}]: {text_content}")
+        text = msg.get("text", "")
+        
+        # Skip bad AI responses
+        if sender in ["openai", "anthropic", "assistant"]:
+            text_lower = text.lower()
+            if any(pattern in text_lower for pattern in bad_patterns):
+                print(f"⏭️ [format_recent] Skipped bad response from {sender}")
+                continue
+        
+        # Truncate to 200 chars
+        text_preview = text[:200]
+        lines.append(f"[{sender}]: {text_preview}")
     
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "No relevant recent messages"
 
 
 def format_git_structure(git_data: Dict[str, Any]) -> str:
