@@ -13,8 +13,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text  # ← FIXED: Removed print() that got merged here
 from pydantic import BaseModel
 from uuid import uuid4
-import os  
-import httpx
 import openai
 
 from app.deps import get_current_active_user, get_db
@@ -246,18 +244,15 @@ async def debug_search(
         # ========== 3. CREATE QUERY EMBEDDING ==========
         print(f"🔮 [DEBUG] Creating embedding for query: '{query}'")
         
-        # Use httpx with proxies disabled (Railway fix)
-        http_client = httpx.Client(proxies=None, timeout=60.0)
+        # Use the SAME pattern as store_message_with_embedding (which works!)
+        from openai import OpenAI
+        client = OpenAI(api_key=user_api_key)
         
-        try:
-            client = openai.OpenAI(api_key=user_api_key, http_client=http_client)
-            embedding_response = client.embeddings.create(
-                input=query,
-                model="text-embedding-3-small"
-            )
-            query_embedding = embedding_response.data[0].embedding
-        finally:
-            http_client.close()
+        embedding_response = client.embeddings.create(
+            input=query,
+            model="text-embedding-3-small"
+        )
+        query_embedding = embedding_response.data[0].embedding
         
         query_embedding_info = {
             "query": query,
