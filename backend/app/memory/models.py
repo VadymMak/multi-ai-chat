@@ -72,6 +72,9 @@ class Project(Base):
     git_url = Column(String(500), nullable=True)
     git_updated_at = Column(DateTime, nullable=True)
     git_sync_status = Column(String(20), nullable=True)  # null | "syncing" | "synced" | "error"
+
+    # ✅ Folder-based auto-linking (for VS Code Extension)
+    folder_identifier = Column(String(16), unique=False, nullable=True, index=True)
     
     # ✅ Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)

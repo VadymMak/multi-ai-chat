@@ -40,6 +40,8 @@ const HeaderControls = lazy(() => import("../components/Chat/HeaderControls"));
 
 const knownRoles = getKnownRoles();
 
+//Test incremental index
+
 const wantsSummaryPdf = (s: string) =>
   /\bpdf\b/i.test(s) &&
   /\bsummary|summarise|summarize|summarization|summarisation\b/i.test(s);
