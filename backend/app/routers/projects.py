@@ -489,3 +489,35 @@ async def unlink_git_repository(
         "message": "Git repository unlinked",
         "previous_url": old_url
     }
+
+@router.get("/by-folder/{identifier}")
+async def get_project_by_folder(
+    identifier: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get project by folder identifier (for VS Code Extension auto-detection)
+    
+    Args:
+        identifier: SHA-256 hash of folder path (first 16 chars)
+    
+    Returns:
+        Project if found, 404 if not
+    """
+    project = db.query(Project).filter(
+        Project.folder_identifier == identifier,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found for this folder")
+    
+    return {
+        "id": project.id,
+        "name": project.name,
+        "description": project.description,
+        "folder_identifier": project.folder_identifier,
+        "git_url": project.git_url,
+        "created_at": project.created_at.isoformat() if project.created_at else None
+    }
