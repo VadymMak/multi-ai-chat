@@ -457,6 +457,27 @@ Imports: {', '.join(metadata.get('imports', []))}
             logger.error(f"  ❌ {file_data.path}: {e}")
     
     logger.info(f"✅ Local indexing complete: {stats}")
+
+    # ✅ UPDATE PROJECT STATUS (NEW)
+    if stats["indexed"] > 0:
+        # Get total files count
+        total_files = db.execute(text("""
+            SELECT COUNT(*) FROM file_embeddings
+            WHERE project_id = :project_id
+        """), {"project_id": request.project_id}).scalar()
+        
+        # Update project
+        db.execute(text("""
+            UPDATE projects 
+            SET indexed_at = :now, files_count = :count
+            WHERE id = :project_id
+        """), {
+            "now": datetime.utcnow(),
+            "count": total_files,
+            "project_id": request.project_id
+        })
+        db.commit()
+        logger.info(f"  📊 Updated project status: {total_files} files indexed")
     
     return IndexLocalFilesResponse(
         success=True,
@@ -558,7 +579,7 @@ async def find_related_files(
         raise HTTPException(500, f"Failed: {str(e)}")
     
 
-    # ====================================================================
+# ====================================================================
 # INCREMENTAL RE-INDEXING (NEW)
 # ====================================================================
 
@@ -682,6 +703,17 @@ Imports: {', '.join(metadata.get('imports', []))}
             embedding_id = result.fetchone()[0]
             logger.info(f"  ✅ Inserted: {request.file_path}")
         
+        db.commit()
+        
+        # ✅ UPDATE PROJECT indexed_at (NEW)
+        db.execute(text("""
+            UPDATE projects 
+            SET indexed_at = :now
+            WHERE id = :project_id
+        """), {
+            "now": datetime.utcnow(),
+            "project_id": request.project_id
+        })
         db.commit()
         
         return ReindexFileResponse(

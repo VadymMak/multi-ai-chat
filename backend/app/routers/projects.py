@@ -521,3 +521,42 @@ async def get_project_by_folder(
         "git_url": project.git_url,
         "created_at": project.created_at.isoformat() if project.created_at else None
     }
+
+@router.get("/{project_id}/index-status")
+async def get_project_index_status(
+    project_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get project indexing status (for VS Code Extension UI)
+    
+    Returns:
+        - indexed_at: Last indexing timestamp
+        - files_count: Number of indexed files
+        - status: not_indexed | indexed | stale
+    """
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    # Determine status
+    status = "not_indexed"
+    if project.indexed_at:
+        # Check if stale (older than 24 hours)
+        hours_since_index = (datetime.utcnow() - project.indexed_at).total_seconds() / 3600
+        if hours_since_index > 24:
+            status = "stale"
+        else:
+            status = "indexed"
+    
+    return {
+        "project_id": project.id,
+        "indexed_at": project.indexed_at.isoformat() if project.indexed_at else None,
+        "files_count": project.files_count or 0,
+        "status": status
+    }

@@ -75,6 +75,13 @@ class Project(Base):
 
     # ✅ Folder-based auto-linking (for VS Code Extension)
     folder_identifier = Column(String(16), unique=False, nullable=True, index=True)
+
+    # ✅ Folder-based auto-linking (for VS Code Extension)
+    folder_identifier = Column(String(16), unique=False, nullable=True, index=True)
+
+    # ✅ Index status (NEW - for UI)
+    indexed_at = Column(DateTime, nullable=True)
+    files_count = Column(Integer, default=0, nullable=False)
     
     # ✅ Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
