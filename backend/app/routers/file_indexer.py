@@ -26,62 +26,23 @@ from app.services.file_indexer import FileIndexer, SUPPORTED_EXTENSIONS, should_
 from app.services import vector_service
 from datetime import datetime
 
+from app.models import (
+    IndexProjectResponse,
+    SearchResult,
+    SearchResponse,
+    ProjectStats,
+    FileContentResponse,
+    LocalFile,
+    IndexLocalFilesRequest,
+    IndexLocalFilesResponse,
+    ReindexFileRequest,
+    ReindexFileResponse,
+)
+
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/file-indexer", tags=["file-indexer"])
-
-
-# ====================================================================
-# MODELS
-# ====================================================================
-
-class IndexProjectResponse(BaseModel):
-    """Response from indexing request"""
-    success: bool
-    project_id: int
-    message: str
-    stats: Optional[Dict[str, Any]] = None
-
-
-class SearchResult(BaseModel):
-    """Single search result"""
-    id: int
-    file_path: str
-    file_name: str
-    language: Optional[str]
-    line_count: int
-    similarity: float
-    metadata: Dict[str, Any]
-
-
-class SearchResponse(BaseModel):
-    """Response from search request"""
-    project_id: int
-    query: str
-    results: List[SearchResult]
-    total_results: int
-
-
-class ProjectStats(BaseModel):
-    """Project indexing statistics"""
-    project_id: int
-    total_files: int
-    languages: int
-    total_lines: int
-    total_size_kb: float
-    last_indexed: Optional[str]
-    by_language: Dict[str, int]
-
-
-class FileContentResponse(BaseModel):
-    """Response with file content"""
-    project_id: int
-    file_path: str
-    content: str
-    language: Optional[str]
-    line_count: int
-
 
 # ====================================================================
 # ENDPOINTS
@@ -375,28 +336,6 @@ async def delete_project_index(
 # LOCAL FILES INDEXING (for VS Code Extension)
 # ====================================================================
 
-class LocalFile(BaseModel):
-    """Single file from local filesystem"""
-    path: str
-    content: str
-
-
-class IndexLocalFilesRequest(BaseModel):
-    """Request to index local files"""
-    project_id: int
-    files: List[LocalFile]
-
-
-class IndexLocalFilesResponse(BaseModel):
-    """Response from local indexing"""
-    success: bool
-    project_id: int
-    indexed: int
-    skipped: int
-    errors: int
-    message: str
-
-
 @router.post("/index-local", response_model=IndexLocalFilesResponse)
 async def index_local_files(
     request: IndexLocalFilesRequest,
@@ -617,3 +556,145 @@ async def find_related_files(
     except Exception as e:
         logger.exception(f"Failed to find related files: {e}")
         raise HTTPException(500, f"Failed: {str(e)}")
+    
+
+    # ====================================================================
+# INCREMENTAL RE-INDEXING (NEW)
+# ====================================================================
+
+@router.post("/reindex-file", response_model=ReindexFileResponse)
+async def reindex_single_file(
+    request: ReindexFileRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Re-index a single file (incremental update).
+    
+    Much faster than full re-index!
+    Used by VS Code Extension when file changes are detected.
+    
+    Args:
+        project_id: Project ID
+        file_path: File path (relative to project root)
+        content: New file content
+    """
+    logger.info(f"🔄 Re-index file: project={request.project_id}, path={request.file_path}")
+    
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == request.project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        # Get language from extension
+        language = None
+        for ext, lang in SUPPORTED_EXTENSIONS.items():
+            if request.file_path.endswith(ext):
+                language = lang
+                break
+        
+        if not language:
+            raise HTTPException(400, f"Unsupported file type: {request.file_path}")
+        
+        # Compute hash
+        content_hash = hashlib.sha256(request.content.encode("utf-8")).hexdigest()
+        
+        # Extract metadata
+        metadata = extract_metadata(request.content, language)
+        
+        # Generate embedding
+        embedding_text = f"""
+File: {request.file_path}
+Language: {language}
+Classes: {', '.join(metadata.get('classes', []))}
+Functions: {', '.join(metadata.get('functions', []))}
+Imports: {', '.join(metadata.get('imports', []))}
+
+{request.content[:8000]}
+""".strip()
+        
+        embedding = vector_service.create_embedding(embedding_text)
+        
+        # File info
+        file_name = request.file_path.split("/")[-1].split("\\")[-1]
+        line_count = request.content.count("\n") + 1
+        file_size = len(request.content.encode("utf-8"))
+        
+        # Check if file exists
+        existing = db.execute(text("""
+            SELECT id FROM file_embeddings
+            WHERE project_id = :project_id AND file_path = :file_path
+        """), {"project_id": request.project_id, "file_path": request.file_path}).fetchone()
+        
+        if existing:
+            # Update existing
+            db.execute(text("""
+                UPDATE file_embeddings SET
+                    content = :content,
+                    content_hash = :content_hash,
+                    file_size = :file_size,
+                    line_count = :line_count,
+                    embedding = :embedding,
+                    metadata = :metadata,
+                    updated_at = :now
+                WHERE project_id = :project_id AND file_path = :file_path
+            """), {
+                "content": request.content,
+                "content_hash": content_hash,
+                "file_size": file_size,
+                "line_count": line_count,
+                "embedding": embedding,
+                "metadata": json.dumps(metadata),
+                "now": datetime.utcnow(),
+                "project_id": request.project_id,
+                "file_path": request.file_path
+            })
+            embedding_id = existing[0]
+            logger.info(f"  ✅ Updated: {request.file_path}")
+        else:
+            # Insert new
+            result = db.execute(text("""
+                INSERT INTO file_embeddings 
+                (project_id, file_path, file_name, language, content, content_hash,
+                 file_size, line_count, embedding, metadata, indexed_at, updated_at)
+                VALUES 
+                (:project_id, :file_path, :file_name, :language, :content, :content_hash,
+                 :file_size, :line_count, :embedding, :metadata, :now, :now)
+                RETURNING id
+            """), {
+                "project_id": request.project_id,
+                "file_path": request.file_path,
+                "file_name": file_name,
+                "language": language,
+                "content": request.content,
+                "content_hash": content_hash,
+                "file_size": file_size,
+                "line_count": line_count,
+                "embedding": embedding,
+                "metadata": json.dumps(metadata),
+                "now": datetime.utcnow()
+            })
+            embedding_id = result.fetchone()[0]
+            logger.info(f"  ✅ Inserted: {request.file_path}")
+        
+        db.commit()
+        
+        return ReindexFileResponse(
+            success=True,
+            project_id=request.project_id,
+            file_path=request.file_path,
+            message="File re-indexed successfully",
+            embedding_id=embedding_id
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Failed to re-index file: {e}")
+        raise HTTPException(500, f"Re-indexing failed: {str(e)}")
