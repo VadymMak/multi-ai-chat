@@ -572,7 +572,7 @@ def generate_unified_diff(
 async def call_openai_for_editing(
     prompt: str,
     api_key: str,
-    max_tokens: int = 3000
+    max_tokens: int = 8192
 ) -> str:
     """
     Call OpenAI GPT-4o for code editing/generation.
@@ -692,17 +692,33 @@ RULES:
 Generate the edited file:"""
 
         # Call AI
-        new_content = await call_openai_for_editing(prompt, user_api_key, 3000)
+        new_content = await call_openai_for_editing(prompt, user_api_key, 8192)
         
-        # Clean markdown if present
+        # Clean markdown (aggressive cleaning)
         new_content = new_content.strip()
-        if new_content.startswith("```"):
-            lines = new_content.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            new_content = "\n".join(lines)
+        
+        # Remove any preamble text before first code block
+        if "```" in new_content:
+            parts = new_content.split("```")
+            if len(parts) >= 3:  # Has opening and closing ```
+                # Get content between first ``` and second ```
+                code_block = parts[1]
+                # Remove language identifier line if present
+                lines = code_block.split("\n")
+                if lines and lines[0].strip() in ["typescript", "python", "javascript", "tsx", "jsx", "js", "ts", "py"]:
+                    lines = lines[1:]
+                new_content = "\n".join(lines).strip()
+            elif len(parts) == 2 and parts[0].strip() == "":
+                # Started with ```, just remove it
+                code_block = parts[1]
+                lines = code_block.split("\n")
+                if lines and lines[0].strip() in ["typescript", "python", "javascript", "tsx", "jsx", "js", "ts", "py"]:
+                    lines = lines[1:]
+                new_content = "\n".join(lines).strip()
+        
+        # Fallback: remove trailing ``` if exists
+        if new_content.endswith("```"):
+            new_content = new_content[:-3].strip()
         
         # Generate diff
         diff = generate_unified_diff(original_content, new_content, request.file_path)
@@ -801,17 +817,42 @@ RULES:
 Generate the file:"""
 
         # Call AI
-        content = await call_openai_for_editing(prompt, user_api_key, 3000)
+        content = await call_openai_for_editing(prompt, user_api_key, 8192)
         
-        # Clean markdown
+        # Clean markdown (aggressive cleaning)
         content = content.strip()
-        if content.startswith("```"):
+        
+        # Remove any preamble text before first code block
+        if "```" in content:
+            parts = content.split("```")
+            if len(parts) >= 3:  # Has opening and closing ```
+                # Get content between first ``` and second ```
+                code_block = parts[1]
+                # Remove language identifier line if present
+                lines = code_block.split("\n")
+                if lines and lines[0].strip() in ["typescript", "python", "javascript", "tsx", "jsx", "js", "ts", "py"]:
+                    lines = lines[1:]
+                content = "\n".join(lines).strip()
+            elif len(parts) == 2 and parts[0].strip() == "":
+                # Started with ```, just remove it
+                code_block = parts[1]
+                lines = code_block.split("\n")
+                if lines and lines[0].strip() in ["typescript", "python", "javascript", "tsx", "jsx", "js", "ts", "py"]:
+                    lines = lines[1:]
+                content = "\n".join(lines).strip()
+        
+        # Fallback: remove trailing ``` if exists
+        if content.endswith("```"):
+            content = content[:-3].strip()
+        
+        # Remove "FILE PATH:" prefix if AI added it
+        if content.startswith("FILE PATH:"):
             lines = content.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            content = "\n".join(lines)
+            # Skip lines until we hit actual code
+            for i, line in enumerate(lines):
+                if not line.strip().startswith("FILE PATH:") and line.strip():
+                    content = "\n".join(lines[i:]).strip()
+                    break
         
         # Suggest filename if needed
         final_file_path = request.file_path
