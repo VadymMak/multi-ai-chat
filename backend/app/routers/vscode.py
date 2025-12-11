@@ -709,9 +709,9 @@ Generate the edited file:"""
         
         # Calculate tokens
         tokens_used = {
-            "context": len(smart_context.split()) * 1.3,
-            "prompt": len(prompt.split()) * 1.3,
-            "response": len(new_content.split()) * 1.3,
+            "context": int(len(smart_context.split()) * 1.3),     
+            "prompt": int(len(prompt.split()) * 1.3),              
+            "response": int(len(new_content.split()) * 1.3),       
             "total": (len(prompt) + len(new_content)) // 4
         }
         
