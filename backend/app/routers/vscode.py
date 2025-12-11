@@ -495,3 +495,347 @@ async def list_indexed_files(
             status_code=500,
             detail=f"Error: {str(e)}"
         )
+    
+# ========================================================================
+# 🚀 SMART CLINE ENDPOINTS - Day 1 Implementation
+# Edit and create files with AI + Smart Context
+# ========================================================================
+
+import difflib
+
+
+# ========== REQUEST/RESPONSE MODELS ==========
+
+class EditFileRequest(BaseModel):
+    """Request to edit a file with AI assistance"""
+    project_id: int
+    file_path: str
+    instruction: str
+
+
+class EditFileResponse(BaseModel):
+    """Response with original, new content, and diff"""
+    success: bool
+    original_content: str
+    new_content: str
+    diff: str
+    tokens_used: Dict[str, int]
+    message: Optional[str] = None
+
+
+class CreateFileRequest(BaseModel):
+    """Request to create a new file with AI assistance"""
+    project_id: int
+    instruction: str
+    file_path: Optional[str] = None  # If None, AI suggests filename
+
+
+class CreateFileResponse(BaseModel):
+    """Response with new file content"""
+    success: bool
+    file_path: str
+    content: str
+    related_files: List[str]
+    tokens_used: int
+    message: Optional[str] = None
+
+
+# ========== HELPER FUNCTIONS ==========
+
+def generate_unified_diff(
+    original: str,
+    modified: str,
+    filename: str
+) -> str:
+    """
+    Generate unified diff format for preview.
+    Returns diff string that VS Code can display.
+    """
+    try:
+        original_lines = original.splitlines(keepends=True)
+        modified_lines = modified.splitlines(keepends=True)
+        
+        diff = difflib.unified_diff(
+            original_lines,
+            modified_lines,
+            fromfile=f"a/{filename}",
+            tofile=f"b/{filename}",
+            lineterm=""
+        )
+        
+        return "".join(diff)
+    except Exception as e:
+        print(f"⚠️ [Diff] Error generating diff: {e}")
+        return f"Error generating diff: {str(e)}"
+
+
+async def call_openai_for_editing(
+    prompt: str,
+    api_key: str,
+    max_tokens: int = 3000
+) -> str:
+    """
+    Call OpenAI GPT-4o for code editing/generation.
+    Returns AI response as string.
+    """
+    try:
+        import httpx
+        from openai import OpenAI
+        
+        # Use same pattern as in vector_service.py
+        http_client = httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            trust_env=False
+        )
+        
+        client = OpenAI(api_key=api_key, http_client=http_client)
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert code editor and generator."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=max_tokens
+            )
+            
+            return response.choices[0].message.content
+            
+        finally:
+            http_client.close()
+            
+    except Exception as e:
+        print(f"❌ [OpenAI] Error: {e}")
+        raise
+
+
+# ========== EDIT FILE ENDPOINT ==========
+
+@router.post("/edit-file", response_model=EditFileResponse)
+async def edit_file_with_ai(
+    request: EditFileRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Edit file with AI assistance using Smart Context.
+    """
+    try:
+        print(f"\n✏️ [Edit File] project={request.project_id}, file={request.file_path}")
+        
+        # Get user's OpenAI API key
+        user_api_key = get_openai_key(current_user, db, required=True)
+        
+        # Validate project
+        project = db.get(Project, request.project_id)
+        if not project:
+            raise HTTPException(404, f"Project {request.project_id} not found")
+        
+        # Read current file content
+        file_result = db.execute(
+            text("""
+                SELECT content, language
+                FROM file_embeddings
+                WHERE project_id = :project_id AND file_path = :file_path
+            """),
+            {"project_id": request.project_id, "file_path": request.file_path}
+        ).fetchone()
+        
+        if not file_result or not file_result[0]:
+            raise HTTPException(404, f"File '{request.file_path}' not found")
+        
+        original_content = file_result[0]
+        language = file_result[1] or "text"
+        
+        # Build Smart Context
+        memory = MemoryManager(db)
+        chat_session_id = str(uuid4())
+        
+        smart_context = await build_smart_context(
+            project_id=request.project_id,
+            role_id=1,
+            query=request.instruction,
+            session_id=chat_session_id,
+            db=db,
+            memory=memory
+        )
+        
+        # Build AI prompt
+        prompt = f"""Edit this file according to the instruction.
+
+FILE: {request.file_path}
+LANGUAGE: {language}
+
+CURRENT CONTENT:
+{original_content}
+
+INSTRUCTION:
+{request.instruction}
+
+PROJECT CONTEXT:
+{smart_context}
+
+RULES:
+1. Return ONLY the complete modified file content
+2. No markdown code blocks
+3. No explanations
+4. Maintain imports and style from project context
+
+Generate the edited file:"""
+
+        # Call AI
+        new_content = await call_openai_for_editing(prompt, user_api_key, 3000)
+        
+        # Clean markdown if present
+        new_content = new_content.strip()
+        if new_content.startswith("```"):
+            lines = new_content.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            new_content = "\n".join(lines)
+        
+        # Generate diff
+        diff = generate_unified_diff(original_content, new_content, request.file_path)
+        
+        # Calculate tokens
+        tokens_used = {
+            "context": len(smart_context.split()) * 1.3,
+            "prompt": len(prompt.split()) * 1.3,
+            "response": len(new_content.split()) * 1.3,
+            "total": (len(prompt) + len(new_content)) // 4
+        }
+        
+        return EditFileResponse(
+            success=True,
+            original_content=original_content,
+            new_content=new_content,
+            diff=diff,
+            tokens_used=tokens_used,
+            message="File edited successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [Edit File] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to edit file: {str(e)}")
+
+
+# ========== CREATE FILE ENDPOINT ==========
+
+@router.post("/create-file", response_model=CreateFileResponse)
+async def create_file_with_ai(
+    request: CreateFileRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create new file with AI assistance using Smart Context.
+    """
+    try:
+        print(f"\n📝 [Create File] project={request.project_id}")
+        
+        # Get user's OpenAI API key
+        user_api_key = get_openai_key(current_user, db, required=True)
+        
+        # Validate project
+        project = db.get(Project, request.project_id)
+        if not project:
+            raise HTTPException(404, f"Project {request.project_id} not found")
+        
+        # Build Smart Context
+        memory = MemoryManager(db)
+        chat_session_id = str(uuid4())
+        
+        smart_context = await build_smart_context(
+            project_id=request.project_id,
+            role_id=1,
+            query=request.instruction,
+            session_id=chat_session_id,
+            db=db,
+            memory=memory
+        )
+        
+        # Extract related files
+        related_files = []
+        try:
+            import re
+            file_pattern = r'📄 \*\*([^\*]+)\*\*'
+            matches = re.findall(file_pattern, smart_context)
+            related_files = matches[:5]
+        except:
+            pass
+        
+        # Build AI prompt
+        file_path_text = f"Create file: {request.file_path}" if request.file_path else "Suggest filename and create"
+        
+        prompt = f"""Create a new file according to the instruction.
+
+INSTRUCTION:
+{request.instruction}
+
+FILE PATH: {file_path_text}
+
+PROJECT CONTEXT:
+{smart_context}
+
+RULES:
+1. Return ONLY the file content
+2. Use imports and patterns from similar files
+3. No markdown code blocks
+4. No explanations
+5. Production-ready code
+
+Generate the file:"""
+
+        # Call AI
+        content = await call_openai_for_editing(prompt, user_api_key, 3000)
+        
+        # Clean markdown
+        content = content.strip()
+        if content.startswith("```"):
+            lines = content.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines)
+        
+        # Suggest filename if needed
+        final_file_path = request.file_path
+        if not final_file_path:
+            suggestion_prompt = f"Suggest filename for: {request.instruction}. Return ONLY filename."
+            suggested = await call_openai_for_editing(suggestion_prompt, user_api_key, 50)
+            final_file_path = suggested.strip().strip('"').strip("'")
+        
+        # Calculate tokens
+        tokens_used = (len(prompt) + len(content)) // 4
+        
+        return CreateFileResponse(
+            success=True,
+            file_path=final_file_path,
+            content=content,
+            related_files=related_files,
+            tokens_used=tokens_used,
+            message="File created successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [Create File] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to create file: {str(e)}")
