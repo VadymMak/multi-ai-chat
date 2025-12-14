@@ -708,7 +708,6 @@ Return ONLY JSON, no markdown."""
         )
         
         # 4. Parse analysis
-        import json
         try:
             # Remove markdown if present
             clean_response = analysis_response.strip()
