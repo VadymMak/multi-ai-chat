@@ -6,14 +6,18 @@ import { toast } from "../store/toastStore";
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
   const { login, isLoading } = useAuthStore();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError("");
 
     if (!username || !password) {
-      toast.error("Please fill in all fields");
+      const errorMsg = "Please fill in all fields";
+      setError(errorMsg);
+      toast.error(errorMsg);
       return;
     }
 
@@ -22,7 +26,10 @@ const LoginPage: React.FC = () => {
       toast.success("Welcome back!");
       navigate("/chat");
     } catch (error: any) {
-      toast.error(error.message || "Login failed");
+      const errorMsg = error.message || "Login failed";
+      setError(errorMsg);
+      toast.error(errorMsg);
+      console.error("Login error:", error);
     }
   };
 
@@ -45,6 +52,12 @@ const LoginPage: React.FC = () => {
         </div>
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+          {error && (
+            <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded relative">
+              <span className="block sm:inline">{error}</span>
+            </div>
+          )}
+
           <div className="space-y-4">
             <div>
               <label

@@ -4,6 +4,30 @@ import React from "react";
 import { Link } from "react-router-dom";
 
 const Landing: React.FC = () => {
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    // Clear any errors on mount
+    setError(null);
+  }, []);
+
+  if (error) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-100 to-blue-100 text-gray-800 p-6">
+        <div className="bg-red-100 border border-red-400 text-red-700 px-6 py-4 rounded-lg max-w-xl">
+          <h2 className="font-bold text-xl mb-2">Error</h2>
+          <p>{error}</p>
+          <button
+            onClick={() => setError(null)}
+            className="mt-4 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 transition"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-100 to-blue-100 text-gray-800 p-6">
       <h1 className="text-4xl font-bold mb-4">🧠 Multi-AI Assistant</h1>
