@@ -833,15 +833,36 @@ async def edit_file_with_ai(
             print("📄 Using content from database (indexed)")
         
         # ========== STEP 1: Collect Context with GPT-4o-mini ==========
-        context_data = await collect_editing_context_from_vscode(
-            project_id=request.project_id,
-            file_path=request.file_path,
-            current_content=original_content,
-            instruction=request.instruction,
-            db=db,
-            user_api_key=user_api_key
-        )
-        
+        print(f"🚀 [DEBUG] About to call collect_editing_context_from_vscode...")
+        print(f"   project_id={request.project_id}")
+        print(f"   file_path={request.file_path}")
+        print(f"   instruction={request.instruction[:50]}...")
+        print(f"   content_length={len(original_content)}")
+
+        try:
+            context_data = await collect_editing_context_from_vscode(
+                project_id=request.project_id,
+                file_path=request.file_path,
+                current_content=original_content,
+                instruction=request.instruction,
+                db=db,
+                user_api_key=user_api_key
+            )
+            print(f"✅ [DEBUG] collect_editing_context_from_vscode returned successfully")
+            print(f"   tokens_used={context_data.get('tokens_used', 0)}")
+            print(f"   related_files={len(context_data.get('related_files', {}))}")
+        except Exception as e:
+            print(f"❌ [DEBUG] collect_editing_context_from_vscode FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback
+            context_data = {
+                "current_file_content": original_content,
+                "related_files": {},
+                "analysis": {"reason": f"Failed: {str(e)}"},
+                "tokens_used": 0
+            }
+
         # ========== STEP 2: Build Prompt for Claude Sonnet 4.5 ==========
         print(f"🤖 [Step 2] Editing with Claude Sonnet 4.5...")
         
