@@ -14,6 +14,7 @@ from sqlalchemy import text  # ← FIXED: Removed print() that got merged here
 from pydantic import BaseModel
 from uuid import uuid4
 import openai
+import json
 
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User, Role, Project
