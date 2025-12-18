@@ -1,12 +1,13 @@
 """Security utilities for password validation and encryption"""
 from cryptography.fernet import Fernet
 from passlib.hash import bcrypt
-from datetime import datetime, timedelta
-from jose import JWTError, jwt, ExpiredSignatureError
+from datetime import datetime, timedelta, timezone
+from jose import JWTError, jwt
 from typing import Optional
 import logging
 import os
 import re
+import time
 
 from app.config.settings import settings
 
@@ -92,8 +93,12 @@ def create_access_token(data: dict) -> str:
     if 'sub' in to_encode:
         to_encode['sub'] = str(to_encode['sub'])
     
-    expire = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
-    to_encode.update({"exp": expire})
+    # FIX: Use UNIX timestamp for expiration (more reliable)
+    now_timestamp = int(time.time())
+    expire_seconds = settings.JWT_EXPIRATION_HOURS * 3600
+    expire_timestamp = now_timestamp + expire_seconds
+    
+    to_encode.update({"exp": expire_timestamp})
     
     try:
         encoded_jwt = jwt.encode(
@@ -101,7 +106,14 @@ def create_access_token(data: dict) -> str:
             settings.JWT_SECRET_KEY, 
             algorithm=settings.JWT_ALGORITHM
         )
+        
+        # Debug logging
+        expire_datetime = datetime.fromtimestamp(expire_timestamp)
         logger.info(f"✅ Token created for sub={to_encode.get('sub')}, expires in {settings.JWT_EXPIRATION_HOURS}h")
+        logger.debug(f"   Current time: {datetime.fromtimestamp(now_timestamp).isoformat()}")
+        logger.debug(f"   Expires at:   {expire_datetime.isoformat()}")
+        logger.debug(f"   Expire timestamp: {expire_timestamp}")
+        
         return encoded_jwt
     except Exception as e:
         logger.error(f"❌ Failed to create token: {e}")
@@ -112,8 +124,10 @@ def verify_token(token: str) -> Optional[dict]:
     try:
         # Log token info (first 30 chars only for security)
         logger.info(f"🔍 Verifying token: {token[:30]}...")
-        logger.debug(f"🔍 Using JWT_SECRET_KEY: {settings.JWT_SECRET_KEY[:20]}...")
-        logger.debug(f"🔍 Using JWT_ALGORITHM: {settings.JWT_ALGORITHM}")
+        
+        # Debug: Current time
+        now_timestamp = int(time.time())
+        logger.debug(f"🔍 Current timestamp: {now_timestamp} ({datetime.fromtimestamp(now_timestamp).isoformat()})")
         
         # Decode JWT token
         payload = jwt.decode(
@@ -122,14 +136,21 @@ def verify_token(token: str) -> Optional[dict]:
             algorithms=[settings.JWT_ALGORITHM]
         )
         
+        # Debug: Token expiration
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp:
+            exp_datetime = datetime.fromtimestamp(exp_timestamp)
+            time_left = exp_timestamp - now_timestamp
+            logger.debug(f"🔍 Token expires at: {exp_datetime.isoformat()}")
+            logger.debug(f"🔍 Time left: {time_left}s ({time_left/3600:.2f}h)")
+        
         logger.info(f"✅ Token verified successfully")
-        logger.debug(f"   Payload: {payload}")
         return payload
         
-    except ExpiredSignatureError:
+    except jwt.ExpiredSignatureError:  # FIX: Correct exception path
         logger.warning("⚠️ Token expired")
         return None
-    except jwt.JWTError as e:
+    except jwt.JWTError as e:  # FIX: Catch all JWT errors
         logger.error(f"❌ JWT verification failed: {type(e).__name__}: {str(e)}")
         return None
     except Exception as e:
