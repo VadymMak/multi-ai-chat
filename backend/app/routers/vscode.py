@@ -4,17 +4,16 @@ Full Smart Context using EXISTING services:
 - build_smart_context() from smart_context.py
 - MemoryManager from manager.py
 - store_message_with_embedding() from vector_service.py
-
-ADDED: Diagnostic endpoint for debugging search_files() issue
 """
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import text  # ← FIXED: Removed print() that got merged here
+from sqlalchemy import text
 from pydantic import BaseModel
 from uuid import uuid4
-import openai
 import json
+import re
+import difflib
 
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User, Role, Project
@@ -121,14 +120,228 @@ Respond with ONLY one word: EDIT, CREATE, or CHAT"""
         return "CHAT"
 
 
-async def edit_file_with_ai(request: EditFileRequest, current_user: User, db: Session):
-    """Placeholder for edit file functionality"""
-    raise NotImplementedError("edit_file_with_ai not implemented")
+async def edit_file_with_ai(
+    request: EditFileRequest, 
+    current_user: User, 
+    db: Session
+):
+    """
+    Edit file using AI with Smart Context.
+    Returns diff between original and new content.
+    """
+    try:
+        print(f"\n🔧 [EDIT] file={request.file_path}")
+        print(f"📝 [EDIT] instruction: {request.instruction[:100]}...")
+        
+        # Get user's API key
+        user_api_key = get_openai_key(current_user, db, required=True)
+        
+        # Initialize memory
+        memory = MemoryManager(db)
+        
+        # Build Smart Context
+        context = build_smart_context(
+            db=db,
+            user_id=current_user.id,
+            project_id=request.project_id,
+            role_id=None,
+            chat_session_id=None,
+            query=request.instruction,
+            include_files=True,
+            include_summaries=True,
+            max_recent_messages=5
+        )
+        
+        # Build prompt
+        prompt = f"""You are an expert code editor. Edit the file according to the instruction.
+
+CURRENT FILE ({request.file_path}):
+```
+{request.current_content}
+```
+
+INSTRUCTION:
+{request.instruction}
+
+PROJECT CONTEXT:
+{context}
+
+RULES:
+1. Return ONLY the complete modified file content
+2. Keep all correct imports based on project context
+3. Maintain code style and conventions
+4. Add comments if adding complex logic
+5. Do not include markdown code blocks in response
+
+Generate the edited file:"""
+
+        # Call AI
+        ai_response = ask_model(
+            messages=[
+                {"role": "system", "content": "You are an expert code editor."},
+                {"role": "user", "content": prompt}
+            ],
+            model_key="gpt-4o",
+            temperature=0.2,
+            max_tokens=3000,
+            api_key=user_api_key
+        )
+        
+        new_content = ai_response.strip()
+        
+        # Generate diff
+        diff = ''.join(difflib.unified_diff(
+            request.current_content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{request.file_path}",
+            tofile=f"b/{request.file_path}",
+            lineterm=''
+        ))
+        
+        print(f"✅ [EDIT] Generated {len(new_content)} chars, diff {len(diff)} chars")
+        
+        # Return response-like dict (not model instance)
+        return type('obj', (object,), {
+            'original_content': request.current_content,
+            'new_content': new_content,
+            'diff': diff,
+            'tokens_used': {'total': len(prompt.split()) + len(new_content.split())}
+        })()
+        
+    except Exception as e:
+        print(f"❌ [EDIT] Failed: {e}")
+        raise
 
 
-async def create_file_with_ai(request: CreateFileRequest, current_user: User, db: Session):
-    """Placeholder for create file functionality"""
-    raise NotImplementedError("create_file_with_ai not implemented")
+async def create_file_with_ai(
+    request: CreateFileRequest, 
+    current_user: User, 
+    db: Session
+):
+    """
+    Create new file using AI with Smart Context.
+    Suggests filename if not provided.
+    """
+    try:
+        print(f"\n📝 [CREATE] instruction: {request.instruction[:100]}...")
+        
+        # Get user's API key
+        user_api_key = get_openai_key(current_user, db, required=True)
+        
+        # Initialize memory
+        memory = MemoryManager(db)
+        
+        # Build Smart Context
+        context = build_smart_context(
+            db=db,
+            user_id=current_user.id,
+            project_id=request.project_id,
+            role_id=None,
+            chat_session_id=None,
+            query=request.instruction,
+            include_files=True,
+            include_summaries=True,
+            max_recent_messages=5
+        )
+        
+        # Analyze dependencies
+        dependencies_prompt = f"""Analyze what existing files this new file will depend on.
+
+INSTRUCTION:
+{request.instruction}
+
+PROJECT CONTEXT:
+{context}
+
+List 3-5 most relevant existing files that this new file will import from or depend on.
+Return as JSON array: ["path/to/file1.ts", "path/to/file2.ts"]
+"""
+
+        try:
+            deps_response = ask_model(
+                messages=[{"role": "user", "content": dependencies_prompt}],
+                model_key="gpt-4o-mini",
+                temperature=0.1,
+                max_tokens=200,
+                api_key=user_api_key
+            )
+            
+            # Parse dependencies
+            json_match = re.search(r'\[.*?\]', deps_response, re.DOTALL)
+            if json_match:
+                dependencies = json.loads(json_match.group(0))
+            else:
+                dependencies = []
+        except:
+            dependencies = []
+        
+        print(f"📦 [CREATE] Dependencies: {dependencies}")
+        
+        # Build creation prompt
+        if request.file_path:
+            file_instruction = f"Create file: {request.file_path}"
+        else:
+            file_instruction = "Create a new file (suggest appropriate filename)"
+        
+        prompt = f"""You are an expert code generator. {file_instruction}
+
+INSTRUCTION:
+{request.instruction}
+
+PROJECT CONTEXT:
+{context}
+
+DEPENDENCIES DETECTED:
+{json.dumps(dependencies, indent=2) if dependencies else "None"}
+
+RULES:
+1. Return ONLY the file content (no markdown, no explanations)
+2. Include all necessary imports based on project context
+3. Follow project's code style
+4. Add appropriate comments
+5. Make it production-ready
+
+{"If no filename provided, start with: FILENAME: path/to/file.ext" if not request.file_path else ""}
+
+Generate the file:"""
+
+        # Call AI
+        ai_response = ask_model(
+            messages=[
+                {"role": "system", "content": "You are an expert code generator."},
+                {"role": "user", "content": prompt}
+            ],
+            model_key="gpt-4o",
+            temperature=0.2,
+            max_tokens=3000,
+            api_key=user_api_key
+        )
+        
+        content = ai_response.strip()
+        
+        # Extract filename if AI suggested it
+        suggested_path = request.file_path
+        if not suggested_path and content.startswith("FILENAME:"):
+            lines = content.split('\n')
+            suggested_path = lines[0].replace("FILENAME:", "").strip()
+            content = '\n'.join(lines[1:]).strip()
+        
+        if not suggested_path:
+            suggested_path = "generated_file.txt"
+        
+        print(f"✅ [CREATE] Generated {suggested_path}, {len(content)} chars")
+        
+        # Return response-like dict
+        return type('obj', (object,), {
+            'file_path': suggested_path,
+            'new_content': content,
+            'dependencies': dependencies,
+            'tokens_used': {'total': len(prompt.split()) + len(content.split())}
+        })()
+        
+    except Exception as e:
+        print(f"❌ [CREATE] Failed: {e}")
+        raise
 
 
 @router.post("/chat", response_model=VSCodeChatResponse)
