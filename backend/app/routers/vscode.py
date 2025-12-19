@@ -144,7 +144,6 @@ async def edit_file_with_ai(
             db=db,
             project_id=request.project_id,
             role_id=None,
-            chat_session_id=None,
             query=request.instruction,
             include_files=True,
             include_summaries=True,
@@ -235,7 +234,6 @@ async def create_file_with_ai(
             db=db,
             project_id=request.project_id,
             role_id=None,
-            chat_session_id=None,
             query=request.instruction,
             include_files=True,
             include_summaries=True,
@@ -541,7 +539,6 @@ async def vscode_chat(
                 db=db,
                 project_id=project_id,  # ← используем локальную переменную
                 role_id=role_id,
-                chat_session_id=chat_session_id,
                 query=request.message,  # ← НЕ request.instruction!
                 include_files=True,
                 include_summaries=True,
