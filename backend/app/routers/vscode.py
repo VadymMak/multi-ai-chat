@@ -140,12 +140,13 @@ async def edit_file_with_ai(
         memory = MemoryManager(db)
         
         # Build Smart Context
-        context = build_smart_context(
-            db=db,
+        context = await build_smart_context(  # ← async!
             project_id=request.project_id,
-            role_id=None,
+            role_id=1,  # default role
             query=request.instruction,
-            max_recent_messages=5
+            session_id=str(uuid4()),  # временный session
+            db=db,
+            memory=memory  # уже есть выше!
         )
         
         # Build prompt
@@ -228,12 +229,13 @@ async def create_file_with_ai(
         memory = MemoryManager(db)
         
         # Build Smart Context
-        context = build_smart_context(
-            db=db,
+        context = await build_smart_context(  # ← async!
             project_id=request.project_id,
-            role_id=None,
+            role_id=1,  # default role
             query=request.instruction,
-            max_recent_messages=5
+            session_id=str(uuid4()),  # временный session
+            db=db,
+            memory=memory  # уже есть выше!
         )
         
         # Analyze dependencies
@@ -531,12 +533,13 @@ async def vscode_chat(
         
         # Build smart context
         try:
-            context = build_smart_context(
-                db=db,
+            context = await build_smart_context(  # ← async!
                 project_id=project_id,
                 role_id=role_id,
                 query=request.message,
-                max_recent_messages=10
+                session_id=chat_session_id,  # уже есть выше!
+                db=db,
+                memory=memory  # уже есть выше!
             )
         except Exception as e:
             print(f"⚠️ [VSCode] Failed to build smart context: {e}, using minimal context")
