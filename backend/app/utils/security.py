@@ -125,9 +125,11 @@ def verify_token(token: str) -> Optional[dict]:
         # Log token info (first 30 chars only for security)
         logger.info(f"🔍 Verifying token: {token[:30]}...")
         
-        # Debug: Current time
+        # ✅ CRITICAL: Current time in UTC
         now_timestamp = int(time.time())
-        logger.debug(f"🔍 Current timestamp: {now_timestamp} ({datetime.fromtimestamp(now_timestamp).isoformat()})")
+        now_datetime = datetime.utcnow()
+        logger.info(f"⏰ Server current time (UTC): {now_datetime.isoformat()}")
+        logger.info(f"⏰ Server current timestamp: {now_timestamp}")
         
         # Decode JWT token
         payload = jwt.decode(
@@ -136,21 +138,33 @@ def verify_token(token: str) -> Optional[dict]:
             algorithms=[settings.JWT_ALGORITHM]
         )
         
-        # Debug: Token expiration
+        logger.info(f"🔍 Payload decoded: {payload}")
+        
+        # Check expiration manually
         exp_timestamp = payload.get("exp")
         if exp_timestamp:
-            exp_datetime = datetime.fromtimestamp(exp_timestamp)
-            time_left = exp_timestamp - now_timestamp
-            logger.debug(f"🔍 Token expires at: {exp_datetime.isoformat()}")
-            logger.debug(f"🔍 Time left: {time_left}s ({time_left/3600:.2f}h)")
+            exp_datetime = datetime.utcfromtimestamp(exp_timestamp)
+            time_left_seconds = exp_timestamp - now_timestamp
+            time_left_hours = time_left_seconds / 3600
+            
+            logger.info(f"⏰ Token expires at (UTC): {exp_datetime.isoformat()}")
+            logger.info(f"⏰ Token exp timestamp: {exp_timestamp}")
+            logger.info(f"⏰ Time left: {time_left_seconds}s ({time_left_hours:.2f}h)")
+            
+            if exp_timestamp < now_timestamp:
+                logger.warning(f"⚠️ Token expired! exp={exp_timestamp} < now={now_timestamp}")
+                logger.warning(f"⚠️ Token was valid until: {exp_datetime.isoformat()}")
+                return None
+            else:
+                logger.info(f"✅ Token is valid for {time_left_hours:.2f} more hours")
         
         logger.info(f"✅ Token verified successfully")
         return payload
         
-    except jwt.ExpiredSignatureError:  # FIX: Correct exception path
-        logger.warning("⚠️ Token expired")
+    except jwt.ExpiredSignatureError:
+        logger.warning("⚠️ Token expired (JWT library check)")
         return None
-    except jwt.JWTError as e:  # FIX: Catch all JWT errors
+    except jwt.JWTError as e:
         logger.error(f"❌ JWT verification failed: {type(e).__name__}: {str(e)}")
         return None
     except Exception as e:
