@@ -142,7 +142,6 @@ async def edit_file_with_ai(
         # Build Smart Context
         context = build_smart_context(
             db=db,
-            user_id=current_user.id,
             project_id=request.project_id,
             role_id=None,
             chat_session_id=None,
@@ -234,7 +233,6 @@ async def create_file_with_ai(
         # Build Smart Context
         context = build_smart_context(
             db=db,
-            user_id=current_user.id,
             project_id=request.project_id,
             role_id=None,
             chat_session_id=None,
@@ -541,11 +539,10 @@ async def vscode_chat(
         try:
             context = build_smart_context(
                 db=db,
-                user_id=current_user.id,
-                project_id=project_id,
+                project_id=project_id,  # ← используем локальную переменную
                 role_id=role_id,
                 chat_session_id=chat_session_id,
-                query=request.message,
+                query=request.message,  # ← НЕ request.instruction!
                 include_files=True,
                 include_summaries=True,
                 max_recent_messages=10
