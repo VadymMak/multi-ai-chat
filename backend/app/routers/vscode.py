@@ -169,23 +169,70 @@ PROJECT CONTEXT:
 {context}
 
 CRITICAL RULES - READ CAREFULLY:
-1. Return the COMPLETE FULL file content with ALL existing code
-2. Include EVERY function, class, import, and line from the original
-3. Add your changes to the appropriate locations
-4. NEVER truncate, skip, or summarize any part of the file
-5. NEVER use placeholders like "... rest of code ..." or "# previous code here"
-6. The output must be approximately {original_lines} lines long
-7. The output must be a READY-TO-USE complete file
-8. Do not include markdown code blocks in response (no ```python)
-9. Maintain all code style and conventions
-10. Add comments only where you made changes
 
-WARNING: If you generate less than 70% of the original file length, 
-it will be rejected as incomplete.
+⚠️ MOST IMPORTANT RULE ⚠️
+You MUST return the COMPLETE file. This means EVERY SINGLE LINE from the original file must be present in your response.
 
-Expected output length: ~{original_chars} characters (minimum {int(original_chars * 0.7)} chars)
+FORBIDDEN - These will cause IMMEDIATE REJECTION:
+❌ "... rest of code ..."
+❌ "... (rest of the code)"
+❌ "# ... (previous code)"
+❌ "# ... rest of"
+❌ "# (code omitted)"
+❌ "# ... additional code"
+❌ "# remaining code unchanged"
+❌ ANY placeholder or ellipsis indicating skipped code
 
-Generate the COMPLETE edited file starting with all imports:"""
+REQUIRED:
+1. Start with ALL imports from the original file
+2. Include EVERY function, EVERY class, EVERY line
+3. Add your requested changes to the appropriate locations
+4. Keep everything else EXACTLY as it was
+5. Do not include markdown code blocks (no ```python)
+6. The output must be approximately {original_lines} lines
+7. The output must be approximately {original_chars} characters
+
+VERIFICATION:
+- Original file: {original_lines} lines, {original_chars} characters
+- Your output must be similar in length (minimum {int(original_chars * 0.7)} chars)
+- If you can't fit everything, respond with "FILE TOO LARGE" instead
+
+BAD EXAMPLE (will be rejected):
+```
+import something
+
+def my_function():
+    # Add error handling
+    try:
+        ...
+    except:
+        ...
+
+# ... rest of code ...  ← FORBIDDEN!
+```
+
+GOOD EXAMPLE:
+```
+import something
+import another_thing
+
+def my_function():
+    # Add error handling
+    try:
+        result = do_something()
+        return result
+    except Exception as e:
+        logger.error(f"Error: {{e}}")
+        raise
+
+def another_function():
+    # This function was in original - keeping it!
+    pass
+
+# ALL other functions from original file here...
+```
+
+Now generate the COMPLETE edited file with ALL {original_lines} lines:"""
         
         # ДОБАВИТЬ ПЕРЕД ask_model():
         # Динамически вычисляем нужный лимит токенов
