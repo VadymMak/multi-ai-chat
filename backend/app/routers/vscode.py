@@ -145,8 +145,6 @@ async def edit_file_with_ai(
             project_id=request.project_id,
             role_id=None,
             query=request.instruction,
-            include_files=True,
-            include_summaries=True,
             max_recent_messages=5
         )
         
@@ -235,8 +233,6 @@ async def create_file_with_ai(
             project_id=request.project_id,
             role_id=None,
             query=request.instruction,
-            include_files=True,
-            include_summaries=True,
             max_recent_messages=5
         )
         
@@ -537,11 +533,9 @@ async def vscode_chat(
         try:
             context = build_smart_context(
                 db=db,
-                project_id=project_id,  # ← используем локальную переменную
+                project_id=project_id,
                 role_id=role_id,
-                query=request.message,  # ← НЕ request.instruction!
-                include_files=True,
-                include_summaries=True,
+                query=request.message,
                 max_recent_messages=10
             )
         except Exception as e:
