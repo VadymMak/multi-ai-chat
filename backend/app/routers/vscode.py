@@ -148,11 +148,16 @@ async def edit_file_with_ai(
             db=db,
             memory=memory  # уже есть выше!
         )
+
+        original_lines = request.current_content.count('\n') + 1
+        original_chars = len(request.current_content)
         
         # Build prompt
         prompt = f"""You are an expert code editor. Edit the file according to the instruction.
 
 CURRENT FILE ({request.file_path}):
+- Total lines: {original_lines}
+- Total characters: {original_chars}
 ```
 {request.current_content}
 ```
@@ -163,14 +168,33 @@ INSTRUCTION:
 PROJECT CONTEXT:
 {context}
 
-RULES:
-1. Return ONLY the complete modified file content
-2. Keep all correct imports based on project context
-3. Maintain code style and conventions
-4. Add comments if adding complex logic
-5. Do not include markdown code blocks in response
+CRITICAL RULES - READ CAREFULLY:
+1. Return the COMPLETE FULL file content with ALL existing code
+2. Include EVERY function, class, import, and line from the original
+3. Add your changes to the appropriate locations
+4. NEVER truncate, skip, or summarize any part of the file
+5. NEVER use placeholders like "... rest of code ..." or "# previous code here"
+6. The output must be approximately {original_lines} lines long
+7. The output must be a READY-TO-USE complete file
+8. Do not include markdown code blocks in response (no ```python)
+9. Maintain all code style and conventions
+10. Add comments only where you made changes
 
-Generate the edited file:"""
+WARNING: If you generate less than 70% of the original file length, 
+it will be rejected as incomplete.
+
+Expected output length: ~{original_chars} characters (minimum {int(original_chars * 0.7)} chars)
+
+Generate the COMPLETE edited file starting with all imports:"""
+        
+        # ДОБАВИТЬ ПЕРЕД ask_model():
+        # Динамически вычисляем нужный лимит токенов
+        estimated_tokens = original_chars // 4
+        max_tokens_needed = int(estimated_tokens * 1.5)
+        max_tokens_needed = min(max_tokens_needed, 16000)
+        max_tokens_needed = max(max_tokens_needed, 4000)
+
+        print(f"🎯 [EDIT] Using max_tokens={max_tokens_needed} for file with {original_chars} chars")
 
         # Call AI
         ai_response = ask_model(
@@ -180,12 +204,62 @@ Generate the edited file:"""
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=max_tokens_needed,  # ← ВОТ ИЗМЕНЕНИЕ!
             api_key=user_api_key
         )
         
         new_content = ai_response.strip()
-        
+
+        # ========== ВАЛИДАЦИЯ ПОЛНОТЫ ФАЙЛА ==========
+        original_length = len(request.current_content)
+        new_length = len(new_content)
+        original_lines = request.current_content.count('\n') + 1
+        new_lines = new_content.count('\n') + 1
+
+        print(f"📊 [EDIT] Original: {original_length} chars, {original_lines} lines")
+        print(f"📊 [EDIT] Generated: {new_length} chars, {new_lines} lines")
+
+        # Проверка 1: Новый файл не должен быть намного короче
+        if new_length < original_length * 0.7:
+            error_msg = (
+                f"AI generated incomplete file!\n"
+                f"Original: {original_length} chars ({original_lines} lines)\n"
+                f"Generated: {new_length} chars ({new_lines} lines)\n"
+                f"Difference: {original_length - new_length} chars missing\n"
+                f"This is only {(new_length / original_length * 100):.1f}% of the original file.\n\n"
+                f"Please try with a more specific instruction or break down the task."
+            )
+            print(f"❌ [EDIT] {error_msg}")
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
+
+        # Проверка 2: Файл не должен содержать placeholders
+        placeholder_patterns = [
+            "... rest of code ...",
+            "... (rest of the code)",
+            "# ... (previous code)",
+            "# ... rest of",
+            "# (code omitted)",
+            "# ... additional code",
+        ]
+
+        for pattern in placeholder_patterns:
+            if pattern.lower() in new_content.lower():
+                error_msg = (
+                    f"AI generated file with placeholder text: '{pattern}'\n"
+                    f"This indicates an incomplete generation.\n"
+                    f"Please try again with a more specific instruction."
+                )
+                print(f"❌ [EDIT] {error_msg}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_msg
+                )
+
+        print(f"✅ [EDIT] Validation passed: File is complete")
+
         # Generate diff
         diff = ''.join(difflib.unified_diff(
             request.current_content.splitlines(keepends=True),
@@ -299,15 +373,21 @@ RULES:
 
 Generate the file:"""
 
-        # Call AI
+        # ✅ СТАЛО:
+        # Для CREATE mode используем стандартный лимит
+        # (у нас нет исходного файла для оценки размера)
+        max_tokens_needed = 4000  # Стандартный лимит для новых файлов
+
+        print(f"🎯 [CREATE] Using max_tokens={max_tokens_needed} for new file")
+
         ai_response = ask_model(
             messages=[
-                {"role": "system", "content": "You are an expert code generator."},
+                {"role": "system", "content": "You are an expert code editor."},
                 {"role": "user", "content": prompt}
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=max_tokens_needed,  # ← динамический лимит!
             api_key=user_api_key
         )
         
