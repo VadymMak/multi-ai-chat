@@ -25,6 +25,30 @@ from app.services.vector_service import store_message_with_embedding
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
+def normalize_code(text: str) -> str:
+    """
+    Normalize code for better SEARCH/REPLACE matching.
+    Removes trailing whitespace and empty lines at start/end.
+    """
+    if not text:
+        return text
+    
+    # Split into lines
+    lines = text.split('\n')
+    
+    # Remove trailing whitespace from each line
+    lines = [line.rstrip() for line in lines]
+    
+    # Remove empty lines at start
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    
+    # Remove empty lines at end
+    while lines and not lines[-1].strip():
+        lines.pop()
+    
+    return '\n'.join(lines)
+
 
 # Request/Response Models
 class VSCodeChatRequest(BaseModel):
@@ -266,18 +290,50 @@ Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
             print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
             print(f"   Searching for: {len(search_text)} chars")
             
-            # Check if search text exists in file
-            if search_text not in new_content:
-                print(f"⚠️ [EDIT] Search block not found in file:")
-                print(f"   Looking for: {search_text[:200]}...")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
-                )
+            # ✅ NEW: Try normalized matching
+            search_normalized = normalize_code(search_text)
+            content_normalized = normalize_code(new_content)
             
-            # Replace once (first occurrence)
-            new_content = new_content.replace(search_text, replace_text, 1)
-            print(f"✅ [EDIT] Applied replacement {i+1}: {len(search_text)} → {len(replace_text)} chars")
+            # Try exact match first
+            if search_text in new_content:
+                print(f"✅ [EDIT] Found exact match")
+                new_content = new_content.replace(search_text, replace_text, 1)
+                print(f"✅ [EDIT] Applied replacement {i+1}: {len(search_text)} → {len(replace_text)} chars")
+                continue
+            
+            # Try normalized match
+            if search_normalized in content_normalized:
+                print(f"✅ [EDIT] Found normalized match")
+                
+                # Find the actual position in original content
+                lines = new_content.split('\n')
+                search_lines = search_text.split('\n')
+                
+                # Find approximate location
+                found = False
+                for line_idx in range(len(lines) - len(search_lines) + 1):
+                    # Check if this section matches (normalized)
+                    section = '\n'.join(lines[line_idx:line_idx + len(search_lines)])
+                    if normalize_code(section) == search_normalized:
+                        # Replace this section
+                        lines[line_idx:line_idx + len(search_lines)] = replace_text.split('\n')
+                        new_content = '\n'.join(lines)
+                        found = True
+                        print(f"✅ [EDIT] Applied replacement {i+1} (normalized): {len(search_text)} → {len(replace_text)} chars")
+                        break
+                
+                if found:
+                    continue
+            
+            # ✅ FIX: This should be OUTSIDE the if blocks!
+            # If we reach here, nothing was found
+            print(f"⚠️ [EDIT] Search block not found in file:")
+            print(f"   Looking for (exact): {search_text[:200]}...")
+            print(f"   Looking for (normalized): {search_normalized[:200]}...")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
+            )
 
         # Generate diff
         diff = ''.join(difflib.unified_diff(

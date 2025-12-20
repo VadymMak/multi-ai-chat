@@ -1,4 +1,3 @@
-```python
 """
 VS Code Extension API endpoints.
 Full Smart Context using EXISTING services:
@@ -7,15 +6,14 @@ Full Smart Context using EXISTING services:
 - store_message_with_embedding() from vector_service.py
 """
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-from pydantic import BaseModel, ValidationError
+from sqlalchemy import text
+from pydantic import BaseModel
 from uuid import uuid4
 import json
 import re
 import difflib
-import logging
 
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User, Role, Project
@@ -24,9 +22,6 @@ from app.providers.factory import ask_model
 from app.utils.api_key_resolver import get_openai_key
 from app.services.smart_context import build_smart_context
 from app.services.vector_service import store_message_with_embedding
-
-# Initialize logger for error tracking
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
@@ -45,12 +40,12 @@ class VSCodeChatRequest(BaseModel):
 class VSCodeChatResponse(BaseModel):
     message: str
     chat_session_id: Optional[str] = None
-    response_type: str = "chat"
-    original_content: Optional[str] = None
-    new_content: Optional[str] = None
-    diff: Optional[str] = None
-    file_path: Optional[str] = None
-    tokens_used: Optional[Dict[str, int]] = None
+    response_type: str = "chat"  
+    original_content: Optional[str] = None  
+    new_content: Optional[str] = None  
+    diff: Optional[str] = None  
+    file_path: Optional[str] = None  
+    tokens_used: Optional[Dict[str, int]] = None  
 
 
 class EditFileRequest(BaseModel):
@@ -74,11 +69,12 @@ async def classify_user_intent(
 ) -> str:
     """
     Classify user intent using GPT-4o-mini.
+    
     Returns: "EDIT", "CREATE", or "CHAT"
     Cost: ~$0.0001 (very cheap!)
     """
-    try:
-        prompt = f"""Classify this user message into ONE category:
+    
+    prompt = f"""Classify this user message into ONE category:
 
 Message: "{message}"
 File is currently open: {has_file_open}
@@ -100,6 +96,7 @@ Rules:
 
 Respond with ONLY one word: EDIT, CREATE, or CHAT"""
 
+    try:
         classification = ask_model(
             messages=[{"role": "user", "content": prompt}],
             model_key="gpt-4o-mini",
@@ -110,6 +107,7 @@ Respond with ONLY one word: EDIT, CREATE, or CHAT"""
         
         result = classification.strip().upper()
         
+        # Validate result
         if result in ["EDIT", "CREATE", "CHAT"]:
             print(f"🎯 [Intent] '{message[:50]}...' → {result}")
             return result
@@ -118,8 +116,8 @@ Respond with ONLY one word: EDIT, CREATE, or CHAT"""
             return "CHAT"
             
     except Exception as e:
-        logger.error(f"Error classifying user intent: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error classifying user intent")
+        print(f"⚠️ [Intent] Classification failed: {e}, defaulting to CHAT")
+        return "CHAT"
 
 
 async def edit_file_with_ai(
@@ -133,26 +131,39 @@ async def edit_file_with_ai(
     """
     try:
         print(f"\n🔧 [EDIT] file={request.file_path}")
+    except Exception as e:
+        logger.error(f"Edit failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
         print(f"📝 [EDIT] instruction: {request.instruction[:100]}...")
         
+        # Get user's API key
         user_api_key = get_openai_key(current_user, db, required=True)
+        
+        # Initialize memory
         memory = MemoryManager(db)
         
-        context = await build_smart_context(
+        # Build Smart Context
+        context = await build_smart_context(  # ← async!
             project_id=request.project_id,
-            role_id=1,
+            role_id=1,  # default role
             query=request.instruction,
-            session_id=str(uuid4()),
+            session_id=str(uuid4()),  # временный session
             db=db,
-            memory=memory
+            memory=memory  # уже есть выше!
         )
+
+        original_lines = request.current_content.count('\n') + 1
+        original_chars = len(request.current_content)
         
-        prompt = f"""You are an expert code editor. Edit the file according to the instruction.
+        # Build prompt
+        prompt = f"""You are an expert code editor. You need to add the requested changes to a specific location in the file.
 
 CURRENT FILE ({request.file_path}):
-```
+Total lines: {original_lines}
+Total characters: {original_chars}
+
+FILE CONTENT:
 {request.current_content}
-```
 
 INSTRUCTION:
 {request.instruction}
@@ -160,28 +171,118 @@ INSTRUCTION:
 PROJECT CONTEXT:
 {context}
 
+TASK:
+Identify the EXACT location(s) where changes should be made and provide them in SEARCH/REPLACE format.
+
+FORMAT - Use this EXACT format:
+
+SEARCH:
+<<<
+[exact code to find - must match character-for-character]
+>>>
+
+REPLACE:
+<<<
+[new code with your changes]
+>>>
+
 RULES:
-1. Return ONLY the complete modified file content
-2. Keep all correct imports based on project context
-3. Maintain code style and conventions
-4. Add comments if adding complex logic
-5. Do not include markdown code blocks in response
+1. The SEARCH block must be EXACT - copy it character-for-character from the file
+2. Include enough context (5-10 lines) to uniquely identify the location
+3. The REPLACE block should have the same structure with your changes
+4. You can provide multiple SEARCH/REPLACE pairs if needed
+5. Keep indentation identical
+6. Do NOT modify anything outside SEARCH/REPLACE blocks
+7. Do NOT use markdown code blocks like ```python
 
-Generate the edited file:"""
+EXAMPLE:
 
+SEARCH:
+<<<
+async def edit_file_with_ai(
+    request: EditFileRequest, 
+    current_user: User, 
+    db: Session
+):
+    try:
+        print(f"File: {{request.file_path}}")
+>>>
+
+REPLACE:
+<<<
+async def edit_file_with_ai(
+    request: EditFileRequest, 
+    current_user: User, 
+    db: Session
+):
+    try:
+        print(f"File: {{request.file_path}}")
+    except Exception as e:
+        logger.error(f"Edit failed: {{str(e)}}")
+        raise HTTPException(500, detail=str(e))
+>>>
+
+Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
+        
+        # Dynamic max_tokens calculation
+        estimated_tokens = original_chars // 4
+        max_tokens_needed = int(estimated_tokens * 2.0)
+        max_tokens_needed = min(max_tokens_needed, 16000)
+        max_tokens_needed = max(max_tokens_needed, 6000)
+
+        print(f"🎯 [EDIT] Using max_tokens={max_tokens_needed} for file with {original_chars} chars")
+
+        # Call AI
         ai_response = ask_model(
             messages=[
-                {"role": "system", "content": "You are an expert code editor."},
+                {"role": "system", "content": "You are an expert code editor that provides precise SEARCH/REPLACE instructions."},
                 {"role": "user", "content": prompt}
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=2000,  # Smaller since only changes
             api_key=user_api_key
         )
-        
-        new_content = ai_response.strip()
-        
+
+        response_text = ai_response.strip()
+
+        # Parse SEARCH/REPLACE blocks
+        search_replace_pattern = r'SEARCH:\s*<<<\s*(.*?)\s*>>>\s*REPLACE:\s*<<<\s*(.*?)\s*>>>'
+        matches = re.findall(search_replace_pattern, response_text, re.DOTALL)
+
+        if not matches:
+            # Fallback: AI didn't follow format
+            print(f"⚠️ [EDIT] AI response didn't follow SEARCH/REPLACE format")
+            print(f"   Response: {response_text[:200]}...")
+            raise HTTPException(
+                status_code=400,
+                detail="AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction."
+            )
+
+        # Apply all SEARCH/REPLACE operations
+        new_content = request.current_content
+
+        for i, (search_block, replace_block) in enumerate(matches):
+            search_text = search_block.strip()
+            replace_text = replace_block.strip()
+            
+            print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
+            print(f"   Searching for: {len(search_text)} chars")
+            
+            # Check if search text exists in file
+            if search_text not in new_content:
+                print(f"⚠️ [EDIT] Search block not found in file:")
+                print(f"   Looking for: {search_text[:200]}...")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
+                )
+            
+            # Replace once (first occurrence)
+            new_content = new_content.replace(search_text, replace_text, 1)
+            print(f"✅ [EDIT] Applied replacement {i+1}: {len(search_text)} → {len(replace_text)} chars")
+
+        # Generate diff
         diff = ''.join(difflib.unified_diff(
             request.current_content.splitlines(keepends=True),
             new_content.splitlines(keepends=True),
@@ -189,19 +290,22 @@ Generate the edited file:"""
             tofile=f"b/{request.file_path}",
             lineterm=''
         ))
-        
-        print(f"✅ [EDIT] Generated {len(new_content)} chars, diff {len(diff)} chars")
-        
+
+        print(f"✅ [EDIT] Generated changes: {len(matches)} replacements, {len(diff)} chars diff")
+
+        # Return response
         return type('obj', (object,), {
             'original_content': request.current_content,
             'new_content': new_content,
             'diff': diff,
-            'tokens_used': {'total': len(prompt.split()) + len(new_content.split())}
+            'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
         })()
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error editing file: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error editing file")
+        print(f"❌ [EDIT] Failed: {e}")
+        raise
 
 
 async def create_file_with_ai(
@@ -216,107 +320,4 @@ async def create_file_with_ai(
     try:
         print(f"\n📝 [CREATE] instruction: {request.instruction[:100]}...")
         
-        user_api_key = get_openai_key(current_user, db, required=True)
-        memory = MemoryManager(db)
-        
-        context = await build_smart_context(
-            project_id=request.project_id,
-            role_id=1,
-            query=request.instruction,
-            session_id=str(uuid4()),
-            db=db,
-            memory=memory
-        )
-        
-        dependencies_prompt = f"""Analyze what existing files this new file will depend on.
-
-INSTRUCTION:
-{request.instruction}
-
-PROJECT CONTEXT:
-{context}
-
-List 3-5 most relevant existing files that this new file will import from or depend on.
-Return as JSON array: ["path/to/file1.ts", "path/to/file2.ts"]
-"""
-
-        try:
-            deps_response = ask_model(
-                messages=[{"role": "user", "content": dependencies_prompt}],
-                model_key="gpt-4o-mini",
-                temperature=0.1,
-                max_tokens=200,
-                api_key=user_api_key
-            )
-            
-            json_match = re.search(r'\[.*?\]', deps_response, re.DOTALL)
-            if json_match:
-                dependencies = json.loads(json_match.group(0))
-            else:
-                dependencies = []
-        except Exception as e:
-            logger.error(f"Error analyzing dependencies: {e}")
-            dependencies = []
-        
-        print(f"📦 [CREATE] Dependencies: {dependencies}")
-        
-        if request.file_path:
-            file_instruction = f"Create file: {request.file_path}"
-        else:
-            file_instruction = "Create a new file (suggest appropriate filename)"
-        
-        prompt = f"""You are an expert code generator. {file_instruction}
-
-INSTRUCTION:
-{request.instruction}
-
-PROJECT CONTEXT:
-{context}
-
-DEPENDENCIES DETECTED:
-{json.dumps(dependencies, indent=2) if dependencies else "None"}
-
-RULES:
-1. Return ONLY the file content (no markdown, no explanations)
-2. Include all necessary imports based on project context
-3. Follow project's code style
-4. Add appropriate comments
-5. Make it production-ready
-
-{"If no filename provided, start with: FILENAME: path/to/file.ext" if not request.file_path else ""}
-
-Generate the file:"""
-
-        ai_response = ask_model(
-            messages=[
-                {"role": "system", "content": "You are an expert code generator."},
-                {"role": "user", "content": prompt}
-            ],
-            model_key="gpt-4o",
-            temperature=0.2,
-            max_tokens=3000,
-            api_key=user_api_key
-        )
-        
-        content = ai_response.strip()
-        
-        suggested_path = request.file_path
-        if not suggested_path and content.startswith("FILENAME:"):
-            lines = content.split('\n')
-            suggested_path = lines[0].replace("FILENAME:", "").strip()
-            content = '\n'.join(lines[1:]).strip()
-        
-        if not suggested_path:
-            suggested_path = "generated_file.txt"
-        
-        print(f"✅ [CREATE] Generated {suggested_path}, {len(content)} chars")
-        
-        return type('obj', (object,), {
-            'file_path': suggested_path,
-            'new_content': content
-        })()
-        
-    except Exception as e:
-        logger.error(f"Error creating file: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error creating file")
-```
+     
