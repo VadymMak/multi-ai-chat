@@ -153,14 +153,14 @@ async def edit_file_with_ai(
         original_chars = len(request.current_content)
         
         # Build prompt
-        prompt = f"""You are an expert code editor. Edit the file according to the instruction.
+        prompt = f"""You are an expert code editor. You need to add the requested changes to a specific location in the file.
 
 CURRENT FILE ({request.file_path}):
-- Total lines: {original_lines}
-- Total characters: {original_chars}
-```
+Total lines: {original_lines}
+Total characters: {original_chars}
+
+FILE CONTENT:
 {request.current_content}
-```
 
 INSTRUCTION:
 {request.instruction}
@@ -168,144 +168,115 @@ INSTRUCTION:
 PROJECT CONTEXT:
 {context}
 
-CRITICAL RULES - READ CAREFULLY:
+TASK:
+Identify the EXACT location(s) where changes should be made and provide them in SEARCH/REPLACE format.
 
-⚠️ MOST IMPORTANT RULE ⚠️
-You MUST return the COMPLETE file. This means EVERY SINGLE LINE from the original file must be present in your response.
+FORMAT - Use this EXACT format:
 
-FORBIDDEN - These will cause IMMEDIATE REJECTION:
-❌ "... rest of code ..."
-❌ "... (rest of the code)"
-❌ "# ... (previous code)"
-❌ "# ... rest of"
-❌ "# (code omitted)"
-❌ "# ... additional code"
-❌ "# remaining code unchanged"
-❌ ANY placeholder or ellipsis indicating skipped code
+SEARCH:
+<
+[exact code to find - must match character-for-character]
+>>>
 
-REQUIRED:
-1. Start with ALL imports from the original file
-2. Include EVERY function, EVERY class, EVERY line
-3. Add your requested changes to the appropriate locations
-4. Keep everything else EXACTLY as it was
-5. Do not include markdown code blocks (no ```python)
-6. The output must be approximately {original_lines} lines
-7. The output must be approximately {original_chars} characters
+REPLACE:
+<
+[new code with your changes]
+>>>
 
-VERIFICATION:
-- Original file: {original_lines} lines, {original_chars} characters
-- Your output must be similar in length (minimum {int(original_chars * 0.7)} chars)
-- If you can't fit everything, respond with "FILE TOO LARGE" instead
+RULES:
+1. The SEARCH block must be EXACT - copy it character-for-character from the file
+2. Include enough context (5-10 lines) to uniquely identify the location
+3. The REPLACE block should have the same structure with your changes
+4. You can provide multiple SEARCH/REPLACE pairs if needed
+5. Keep indentation identical
+6. Do NOT modify anything outside SEARCH/REPLACE blocks
 
-BAD EXAMPLE (will be rejected):
-```
-import something
+EXAMPLE:
 
-def my_function():
-    # Add error handling
+SEARCH:
+<
+async def edit_file_with_ai(
+    request: EditFileRequest, 
+    current_user: User, 
+    db: Session
+):
     try:
-        ...
-    except:
-        ...
+        print(f"File: " + request.file_path)
+>>>
 
-# ... rest of code ...  ← FORBIDDEN!
-```
-
-GOOD EXAMPLE:
-```
-import something
-import another_thing
-
-def my_function():
-    # Add error handling
+REPLACE:
+<
+async def edit_file_with_ai(
+    request: EditFileRequest, 
+    current_user: User, 
+    db: Session
+):
     try:
-        result = do_something()
-        return result
+        print(f"File: " + request.file_path)
     except Exception as e:
-        logger.error(f"Error: {{e}}")
-        raise
+        logger.error(f"Edit failed: " + str(e))
+        raise HTTPException(500, detail=str(e))
+>>>
 
-def another_function():
-    # This function was in original - keeping it!
-    pass
-
-# ALL other functions from original file here...
-```
-
-Now generate the COMPLETE edited file with ALL {original_lines} lines:"""
+Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
         
-        # ДОБАВИТЬ ПЕРЕД ask_model():
-        # Динамически вычисляем нужный лимит токенов
+        # Dynamic max_tokens calculation
         estimated_tokens = original_chars // 4
         max_tokens_needed = int(estimated_tokens * 2.0)
         max_tokens_needed = min(max_tokens_needed, 16000)
-        max_tokens_needed = max(max_tokens_needed, 4000)
+        max_tokens_needed = max(max_tokens_needed, 6000)
 
         print(f"🎯 [EDIT] Using max_tokens={max_tokens_needed} for file with {original_chars} chars")
 
         # Call AI
         ai_response = ask_model(
             messages=[
-                {"role": "system", "content": "You are an expert code editor."},
+                {"role": "system", "content": "You are an expert code editor that provides precise SEARCH/REPLACE instructions."},
                 {"role": "user", "content": prompt}
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=max_tokens_needed,  # ← ВОТ ИЗМЕНЕНИЕ!
+            max_tokens=2000,  # Smaller since only changes
             api_key=user_api_key
         )
-        
-        new_content = ai_response.strip()
 
-        # ========== ВАЛИДАЦИЯ ПОЛНОТЫ ФАЙЛА ==========
-        original_length = len(request.current_content)
-        new_length = len(new_content)
-        original_lines = request.current_content.count('\n') + 1
-        new_lines = new_content.count('\n') + 1
+        response_text = ai_response.strip()
 
-        print(f"📊 [EDIT] Original: {original_length} chars, {original_lines} lines")
-        print(f"📊 [EDIT] Generated: {new_length} chars, {new_lines} lines")
+        # Parse SEARCH/REPLACE blocks
+        search_replace_pattern = r'SEARCH:\s*<<<\s*(.*?)\s*>>>\s*REPLACE:\s*<<<\s*(.*?)\s*>>>'
+        matches = re.findall(search_replace_pattern, response_text, re.DOTALL)
 
-        # Проверка 1: Новый файл не должен быть намного короче
-        if new_length < original_length * 0.7:
-            error_msg = (
-                f"AI generated incomplete file!\n"
-                f"Original: {original_length} chars ({original_lines} lines)\n"
-                f"Generated: {new_length} chars ({new_lines} lines)\n"
-                f"Difference: {original_length - new_length} chars missing\n"
-                f"This is only {(new_length / original_length * 100):.1f}% of the original file.\n\n"
-                f"Please try with a more specific instruction or break down the task."
-            )
-            print(f"❌ [EDIT] {error_msg}")
+        if not matches:
+            # Fallback: AI didn't follow format
+            print(f"⚠️ [EDIT] AI response didn't follow SEARCH/REPLACE format")
+            print(f"   Response: {response_text[:200]}...")
             raise HTTPException(
                 status_code=400,
-                detail=error_msg
+                detail="AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction."
             )
 
-        # Проверка 2: Файл не должен содержать placeholders
-        placeholder_patterns = [
-            "... rest of code ...",
-            "... (rest of the code)",
-            "# ... (previous code)",
-            "# ... rest of",
-            "# (code omitted)",
-            "# ... additional code",
-        ]
+        # Apply all SEARCH/REPLACE operations
+        new_content = request.current_content
 
-        for pattern in placeholder_patterns:
-            if pattern.lower() in new_content.lower():
-                error_msg = (
-                    f"AI generated file with placeholder text: '{pattern}'\n"
-                    f"This indicates an incomplete generation.\n"
-                    f"Please try again with a more specific instruction."
-                )
-                print(f"❌ [EDIT] {error_msg}")
+        for i, (search_block, replace_block) in enumerate(matches):
+            search_text = search_block.strip()
+            replace_text = replace_block.strip()
+            
+            print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
+            print(f"   Searching for: {len(search_text)} chars")
+            
+            # Check if search text exists in file
+            if search_text not in new_content:
+                print(f"⚠️ [EDIT] Search block not found in file:")
+                print(f"   Looking for: {search_text[:200]}...")
                 raise HTTPException(
                     status_code=400,
-                    detail=error_msg
+                    detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
                 )
-
-        print(f"✅ [EDIT] Validation passed: File is complete")
+            
+            # Replace once (first occurrence)
+            new_content = new_content.replace(search_text, replace_text, 1)
+            print(f"✅ [EDIT] Applied replacement {i+1}: {len(search_text)} → {len(replace_text)} chars")
 
         # Generate diff
         diff = ''.join(difflib.unified_diff(
@@ -315,17 +286,22 @@ Now generate the COMPLETE edited file with ALL {original_lines} lines:"""
             tofile=f"b/{request.file_path}",
             lineterm=''
         ))
-        
-        print(f"✅ [EDIT] Generated {len(new_content)} chars, diff {len(diff)} chars")
-        
-        # Return response-like dict (not model instance)
+
+        print(f"✅ [EDIT] Generated changes: {len(matches)} replacements, {len(diff)} chars diff")
+
+        # Return response
         return type('obj', (object,), {
             'original_content': request.current_content,
             'new_content': new_content,
             'diff': diff,
-            'tokens_used': {'total': len(prompt.split()) + len(new_content.split())}
+            'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
         })()
         
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ [EDIT] Failed: {e}")
+        raise
     except Exception as e:
         print(f"❌ [EDIT] Failed: {e}")
         raise
