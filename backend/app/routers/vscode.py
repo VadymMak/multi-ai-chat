@@ -174,12 +174,12 @@ Identify the EXACT location(s) where changes should be made and provide them in 
 FORMAT - Use this EXACT format:
 
 SEARCH:
-<
+<<<
 [exact code to find - must match character-for-character]
 >>>
 
 REPLACE:
-<
+<<<
 [new code with your changes]
 >>>
 
@@ -190,31 +190,32 @@ RULES:
 4. You can provide multiple SEARCH/REPLACE pairs if needed
 5. Keep indentation identical
 6. Do NOT modify anything outside SEARCH/REPLACE blocks
+7. Do NOT use markdown code blocks like ```python
 
 EXAMPLE:
 
 SEARCH:
-<
+<<<
 async def edit_file_with_ai(
     request: EditFileRequest, 
     current_user: User, 
     db: Session
 ):
     try:
-        print(f"File: " + request.file_path)
+        print(f"File: {{request.file_path}}")
 >>>
 
 REPLACE:
-<
+<<<
 async def edit_file_with_ai(
     request: EditFileRequest, 
     current_user: User, 
     db: Session
 ):
     try:
-        print(f"File: " + request.file_path)
+        print(f"File: {{request.file_path}}")
     except Exception as e:
-        logger.error(f"Edit failed: " + str(e))
+        logger.error(f"Edit failed: {{str(e)}}")
         raise HTTPException(500, detail=str(e))
 >>>
 
@@ -298,9 +299,6 @@ Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
         })()
         
     except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ [EDIT] Failed: {e}")
         raise
     except Exception as e:
         print(f"❌ [EDIT] Failed: {e}")
