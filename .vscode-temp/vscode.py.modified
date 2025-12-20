@@ -1,9 +1,10 @@
 """
-VS Code Extension API endpoints.
-Full Smart Context using EXISTING services:
-- build_smart_context() from smart_context.py
-- MemoryManager from manager.py
-- store_message_with_embedding() from vector_service.py
+This module defines the API endpoints for VS Code Extensions to interact with the backend services.
+It leverages existing services to provide a full smart context for editing, creating, and chatting functionalities.
+Key components include:
+- build_smart_context() from smart_context.py for context-aware operations
+- MemoryManager from manager.py for managing user memory
+- store_message_with_embedding() from vector_service.py for storing messages with embeddings
 """
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -131,9 +132,6 @@ async def edit_file_with_ai(
     """
     try:
         print(f"\n🔧 [EDIT] file={request.file_path}")
-    except Exception as e:
-        logger.error(f"Edit failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
         print(f"📝 [EDIT] instruction: {request.instruction[:100]}...")
         
         # Get user's API key

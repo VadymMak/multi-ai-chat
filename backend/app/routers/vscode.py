@@ -243,6 +243,11 @@ async def edit_file_with_ai(
         raise HTTPException(500, detail=str(e))
 >>>
 
+CRITICAL: Keep SEARCH blocks SMALL (5-15 lines)!
+- Find the SMALLEST unique section around the change location
+- Do NOT copy the entire file
+- Include only immediate surrounding context
+
 Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
         
         # Dynamic max_tokens calculation
@@ -261,7 +266,7 @@ Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=2000,  # Smaller since only changes
+            max_tokens=max_tokens_needed,  # Smaller since only changes
             api_key=user_api_key
         )
 
@@ -718,7 +723,7 @@ async def vscode_chat(
                 ],
                 model_key="gpt-4o",
                 temperature=0.7,
-                max_tokens=2000,
+                max_tokens=4000,
                 api_key=user_api_key
             )
         except Exception as e:
