@@ -237,7 +237,7 @@ Now generate the COMPLETE edited file with ALL {original_lines} lines:"""
         # ДОБАВИТЬ ПЕРЕД ask_model():
         # Динамически вычисляем нужный лимит токенов
         estimated_tokens = original_chars // 4
-        max_tokens_needed = int(estimated_tokens * 1.5)
+        max_tokens_needed = int(estimated_tokens * 2.0)
         max_tokens_needed = min(max_tokens_needed, 16000)
         max_tokens_needed = max(max_tokens_needed, 4000)
 
