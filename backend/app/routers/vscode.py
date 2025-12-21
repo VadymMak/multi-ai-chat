@@ -59,6 +59,7 @@ class VSCodeChatRequest(BaseModel):
     filePath: Optional[str] = None
     fileContent: Optional[str] = None
     selectedText: Optional[str] = None
+    mode: Optional[str] = None
 
 
 class VSCodeChatResponse(BaseModel):
@@ -573,15 +574,20 @@ async def vscode_chat(
         # ========== CLASSIFY USER INTENT ==========
         has_file_open = bool(request.filePath and request.fileContent)
         
-        try:
-            intent = await classify_user_intent(
-                message=request.message,
-                has_file_open=has_file_open,
-                user_api_key=user_api_key
-            )
-        except Exception as e:
-            print(f"❌ [VSCode] Intent classification failed: {e}, defaulting to CHAT")
-            intent = "CHAT"
+        # ✅ Use mode from frontend if provided, otherwise classify
+        if request.mode:
+            intent = request.mode.upper()
+            print(f"🎯 [Intent] Using frontend mode: {intent}")
+        else:
+            try:
+                intent = await classify_user_intent(
+                    message=request.message,
+                    has_file_open=has_file_open,
+                    user_api_key=user_api_key
+                )
+            except Exception as e:
+                print(f"❌ [VSCode] Intent classification failed: {e}, defaulting to CHAT")
+                intent = "CHAT"
         
         # ========== ROUTE TO EDIT MODE ==========
         if intent == "EDIT" and has_file_open and project_id:

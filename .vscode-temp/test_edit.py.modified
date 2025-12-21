@@ -7,5 +7,9 @@ def hello():
         return False
 
 def goodbye():
-    print("Goodbye")
-    return False
+    try:
+        print("Goodbye")
+        return False
+    except Exception as e:
+        print(f"An error occurred in goodbye: {e}")
+        return False
