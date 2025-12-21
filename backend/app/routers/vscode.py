@@ -178,78 +178,86 @@ async def edit_file_with_ai(
         original_chars = len(request.current_content)
         
         # Build prompt
-        prompt = f"""You are an expert code editor. You need to add the requested changes to a specific location in the file.
+        # Build prompt with STRICT formatting rules
+        prompt = f"""You are an expert code editor. Your ONLY job is to provide SEARCH/REPLACE instructions.
 
-CURRENT FILE ({request.file_path}):
-Total lines: {original_lines}
-Total characters: {original_chars}
+CURRENT FILE: {request.file_path}
+Lines: {original_lines} | Characters: {original_chars}
 
-FILE CONTENT:
+=== FILE CONTENT ===
 {request.current_content}
 
-INSTRUCTION:
+=== USER INSTRUCTION ===
 {request.instruction}
 
-PROJECT CONTEXT:
+=== PROJECT CONTEXT ===
 {context}
 
-TASK:
-Identify the EXACT location(s) where changes should be made and provide them in SEARCH/REPLACE format.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL FORMAT RULES - FOLLOW EXACTLY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-FORMAT - Use this EXACT format:
+1. ❌ DO NOT use markdown (no ```python or ```)
+2. ❌ DO NOT add headers like "### SEARCH/REPLACE 1"
+3. ❌ DO NOT add explanations before/after
+4. ✅ USE ONLY this EXACT format:
 
 SEARCH:
 <<<
-[exact code to find - must match character-for-character]
+[exact code from file - copy character-for-character]
 >>>
 
 REPLACE:
 <<<
-[new code with your changes]
+[modified code with your changes]
 >>>
 
-RULES:
-1. The SEARCH block must be EXACT - copy it character-for-character from the file
-2. Include enough context (5-10 lines) to uniquely identify the location
-3. The REPLACE block should have the same structure with your changes
-4. You can provide multiple SEARCH/REPLACE pairs if needed
-5. Keep indentation identical
-6. Do NOT modify anything outside SEARCH/REPLACE blocks
-7. Do NOT use markdown code blocks like ```python
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SEARCH BLOCK RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-EXAMPLE:
+1. Copy EXACT text from file (character-for-character)
+2. Include 5-10 lines of context (not more!)
+3. Keep ALL whitespace, indentation, quotes EXACTLY as in file
+4. If code has multiple locations - provide ONE block for MAIN location only
+5. Test mentally: Can I find this EXACT text in file above? If NO - try again!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE (CORRECT):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SEARCH:
 <<<
-async def edit_file_with_ai(
-    request: EditFileRequest, 
-    current_user: User, 
-    db: Session
-):
-    try:
-        print(f"File: {{request.file_path}}")
+    def get_user_by_id(self, user_id):
+        
+        if user_id in self.cache:
+            return self.cache[user_id]
+        query = f"SELECT * FROM users WHERE id = {{user_id}}"
+        result = self.db.execute(query)
 >>>
 
 REPLACE:
 <<<
-async def edit_file_with_ai(
-    request: EditFileRequest, 
-    current_user: User, 
-    db: Session
-):
-    try:
-        print(f"File: {{request.file_path}}")
-    except Exception as e:
-        logger.error(f"Edit failed: {{str(e)}}")
-        raise HTTPException(500, detail=str(e))
+    def get_user_by_id(self, user_id):
+        
+        try:
+            if user_id in self.cache:
+                return self.cache[user_id]
+            query = f"SELECT * FROM users WHERE id = {{user_id}}"
+            result = self.db.execute(query)
+            return result
+        except Exception as e:
+            raise Exception(f"Failed to get user {{user_id}}: {{e}}")
 >>>
 
-CRITICAL: Keep SEARCH blocks SMALL (5-15 lines)!
-- Find the SMALLEST unique section around the change location
-- Do NOT copy the entire file
-- Include only immediate surrounding context
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NOW GENERATE YOUR SEARCH/REPLACE BLOCKS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
+Focus on: {request.instruction}
+Provide 1-2 SEARCH/REPLACE blocks maximum.
+Response must start with "SEARCH:" immediately.
+"""
         
         # Dynamic max_tokens calculation
         estimated_tokens = original_chars // 4
@@ -272,10 +280,38 @@ Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
         )
 
         response_text = ai_response.strip()
+        print(f"\n{'='*80}")
+        print(f"🤖 [AI RESPONSE] Length: {len(response_text)} chars")
+        print(f"🤖 [AI RESPONSE] First 500 chars:")
+        print(response_text[:500])
+        print(f"{'='*80}\n")
 
-        # Parse SEARCH/REPLACE blocks
+        # ✅ НОВОЕ: Улучшенный парсинг с fallback
+        
+        # Шаг 1: Убрать markdown если есть
+        cleaned_text = response_text
+        cleaned_text = re.sub(r'```python\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'```typescript\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'```\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'#{1,6}\s+.*?\n', '', cleaned_text)  # Remove headers
+        
+        print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
+        
+        # Шаг 2: Попытка 1 - стандартный формат с <<< >>>
         search_replace_pattern = r'SEARCH:\s*<<<\s*(.*?)\s*>>>\s*REPLACE:\s*<<<\s*(.*?)\s*>>>'
-        matches = re.findall(search_replace_pattern, response_text, re.DOTALL)
+        matches = re.findall(search_replace_pattern, cleaned_text, re.DOTALL)
+        
+        if matches:
+            print(f"✅ [PARSE] Found {len(matches)} blocks with <<< >>> format")
+        
+        # Шаг 3: Попытка 2 - формат без <<< >>> (fallback)
+        if not matches:
+            print(f"⚠️ [PARSE] Standard format failed, trying fallback...")
+            search_replace_pattern = r'SEARCH:\s*\n(.*?)\n\s*REPLACE:\s*\n(.*?)(?=\n\s*SEARCH:|\Z)'
+            matches = re.findall(search_replace_pattern, cleaned_text, re.DOTALL)
+            
+            if matches:
+                print(f"✅ [PARSE] Found {len(matches)} blocks with fallback format")
 
         if not matches:
             # Fallback: AI didn't follow format
