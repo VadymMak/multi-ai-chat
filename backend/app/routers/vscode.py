@@ -421,15 +421,33 @@ async def create_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
-        # Build Smart Context
-        context = await build_smart_context(  # ← async!
-            project_id=request.project_id,
-            role_id=1,  # default role
-            query=request.instruction,
-            session_id=str(uuid4()),  # временный session
-            db=db,
-            memory=memory  # уже есть выше!
-        )
+        # ✅ НОВОЕ: Для EDIT mode НЕ используем Smart Context
+        # Проблема: Smart Context добавляет код из ДРУГИХ файлов,
+        # AI путается и ищет код не в том файле!
+        
+        # Вместо Smart Context используем ТОЛЬКО recent messages
+        try:
+            recent_msgs = memory.get_recent_messages(
+                role_id=1,
+                project_id=str(request.project_id),
+                session_id=str(uuid4()),
+                limit=3,
+                for_display=False
+            )
+            
+            if recent_msgs:
+                context = "Recent conversation:\n"
+                for msg in recent_msgs:
+                    context += f"[{msg.sender}]: {msg.text[:200]}...\n"
+            else:
+                context = "No recent conversation."
+                
+        except Exception as e:
+            print(f"⚠️ [EDIT] Could not load recent messages: {e}")
+            context = "No context available."
+        
+        print(f"📋 [EDIT] Context length: {len(context)} chars")
+        print(f"📋 [EDIT] Context preview: {context[:300]}...")
         
         # Analyze dependencies
         dependencies_prompt = f"""Analyze what existing files this new file will depend on.
