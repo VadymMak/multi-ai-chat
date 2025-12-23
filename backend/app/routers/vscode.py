@@ -655,6 +655,15 @@ async def vscode_chat(
                 intent = "CHAT"
         
         # ========== ROUTE TO EDIT MODE ==========
+        print(f"\n{'='*80}")
+        print(f"🔍 [DEBUG] EDIT mode check:")
+        print(f"   intent: {intent}")
+        print(f"   has_file_open: {has_file_open}")
+        print(f"   filePath: {request.filePath}")
+        print(f"   fileContent length: {len(request.fileContent) if request.fileContent else 0}")
+        print(f"   project_id: {project_id}")
+        print(f"{'='*80}\n")
+
         if intent == "EDIT" and has_file_open and project_id:
             print(f"🎯 [Intent] EDIT mode activated!")
             
@@ -713,7 +722,17 @@ async def vscode_chat(
                 )
                 
             except Exception as e:
-                print(f"❌ [EDIT mode] Failed: {e}")
+                print(f"\n{'='*80}")
+                print(f"❌ [EDIT mode] EXCEPTION CAUGHT:")
+                print(f"   Error type: {type(e).__name__}")
+                print(f"   Error message: {str(e)}")
+                print(f"{'='*80}\n")
+                
+                import traceback
+                print(f"❌ [EDIT mode] Full traceback:")
+                traceback.print_exc()
+                print(f"{'='*80}\n")
+                
                 # Fall through to normal chat mode
                 intent = "CHAT"
         
