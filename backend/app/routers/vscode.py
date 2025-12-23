@@ -690,6 +690,15 @@ async def vscode_chat(
                         store_message_with_embedding(db, ai_entry.id, ai_msg)
                     except Exception as e:
                         print(f"⚠️ [Memory] AI store failed: {e}")
+
+                # CRITICAL: Log the EXACT response before returning
+                print(f"\n{'='*80}")
+                print(f"🚀 [RESPONSE] BEFORE RETURN:")
+                print(f"   response_type: {edit_response.__dict__.get('response_type', 'MISSING')}")
+                print(f"   original_content: {len(edit_response.original_content) if edit_response.original_content else 'None'}")
+                print(f"   new_content: {len(edit_response.new_content) if edit_response.new_content else 'None'}")
+                print(f"   diff: {len(edit_response.diff) if edit_response.diff else 'None'}")
+                print(f"{'='*80}\n")
                 
                 # Return edit response
                 return VSCodeChatResponse(
