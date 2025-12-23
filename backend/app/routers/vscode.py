@@ -173,7 +173,6 @@ async def edit_file_with_ai(
             recent_msgs = memory.retrieve_messages(
                 role_id=1,
                 project_id=str(request.project_id),
-                session_id=str(uuid4()),
                 limit=5,
                 for_display=False,
                 user_id=None
