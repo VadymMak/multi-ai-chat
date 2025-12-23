@@ -416,9 +416,11 @@ Response must start with "SEARCH:" immediately.
 
         # Return response
         return type('obj', (object,), {
+            'response_type': 'edit',  # ✅ ADD THIS!
             'original_content': request.current_content,
             'new_content': new_content,
             'diff': diff,
+            'file_path': request.file_path,  # ✅ ADD THIS TOO!
             'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
         })()
         
@@ -555,8 +557,11 @@ Generate the file:"""
         print(f"✅ [CREATE] Generated {suggested_path}, {len(content)} chars")
         
         return type('obj', (object,), {
+            'response_type': 'create',  # ✅ ADD THIS!
             'file_path': suggested_path,
             'new_content': content,
+            'original_content': None,  # ✅ ADD THIS!
+            'diff': None,  # ✅ ADD THIS!
             'dependencies': dependencies,
             'tokens_used': {'total': len(prompt.split()) + len(content.split())}
         })()
