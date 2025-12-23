@@ -1,10 +1,9 @@
 """
-This module defines the API endpoints for VS Code Extensions to interact with the backend services.
-It leverages existing services to provide a full smart context for editing, creating, and chatting functionalities.
-Key components include:
-- build_smart_context() from smart_context.py for context-aware operations
-- MemoryManager from manager.py for managing user memory
-- store_message_with_embedding() from vector_service.py for storing messages with embeddings
+VS Code Extension API endpoints.
+Full Smart Context using EXISTING services:
+- build_smart_context() from smart_context.py
+- MemoryManager from manager.py
+- store_message_with_embedding() from vector_service.py
 """
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,6 +25,30 @@ from app.services.vector_service import store_message_with_embedding
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
+def normalize_code(text: str) -> str:
+    """
+    Normalize code for better SEARCH/REPLACE matching.
+    Removes trailing whitespace and empty lines at start/end.
+    """
+    if not text:
+        return text
+    
+    # Split into lines
+    lines = text.split('\n')
+    
+    # Remove trailing whitespace from each line
+    lines = [line.rstrip() for line in lines]
+    
+    # Remove empty lines at start
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    
+    # Remove empty lines at end
+    while lines and not lines[-1].strip():
+        lines.pop()
+    
+    return '\n'.join(lines)
+
 
 # Request/Response Models
 class VSCodeChatRequest(BaseModel):
@@ -36,6 +59,7 @@ class VSCodeChatRequest(BaseModel):
     filePath: Optional[str] = None
     fileContent: Optional[str] = None
     selectedText: Optional[str] = None
+    mode: Optional[str] = None
 
 
 class VSCodeChatResponse(BaseModel):
@@ -140,87 +164,122 @@ async def edit_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
-        # Build Smart Context
-        context = await build_smart_context(  # ← async!
-            project_id=request.project_id,
-            role_id=1,  # default role
-            query=request.instruction,
-            session_id=str(uuid4()),  # временный session
-            db=db,
-            memory=memory  # уже есть выше!
-        )
+        # ✅ НОВОЕ: Для EDIT mode НЕ используем Smart Context
+        # Проблема: Smart Context добавляет код из ДРУГИХ файлов,
+        # AI путается и ищет код не в том файле!
+        
+        # Вместо Smart Context используем ТОЛЬКО recent messages
+        try:
+            recent_msgs = memory.get_recent_messages(
+                role_id=1,
+                project_id=str(request.project_id),
+                session_id=str(uuid4()),
+                limit=3,
+                for_display=False
+            )
+            
+            if recent_msgs:
+                context = "Recent conversation:\n"
+                for msg in recent_msgs:
+                    context += f"[{msg.sender}]: {msg.text[:200]}...\n"
+            else:
+                context = "No recent conversation."
+                
+        except Exception as e:
+            print(f"⚠️ [EDIT] Could not load recent messages: {e}")
+            context = "No context available."
+        
+        print(f"📋 [EDIT] Context length: {len(context)} chars")
+        print(f"📋 [EDIT] Context preview: {context[:300]}...")
 
         original_lines = request.current_content.count('\n') + 1
         original_chars = len(request.current_content)
         
         # Build prompt
-        prompt = f"""You are an expert code editor. You need to add the requested changes to a specific location in the file.
+        # Build prompt with STRICT formatting rules
+        prompt = f"""You are an expert code editor. Your ONLY job is to provide SEARCH/REPLACE instructions.
 
-CURRENT FILE ({request.file_path}):
-Total lines: {original_lines}
-Total characters: {original_chars}
+CURRENT FILE: {request.file_path}
+Lines: {original_lines} | Characters: {original_chars}
 
-FILE CONTENT:
+=== FILE CONTENT ===
 {request.current_content}
 
-INSTRUCTION:
+=== USER INSTRUCTION ===
 {request.instruction}
 
-PROJECT CONTEXT:
+=== PROJECT CONTEXT ===
 {context}
 
-TASK:
-Identify the EXACT location(s) where changes should be made and provide them in SEARCH/REPLACE format.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL FORMAT RULES - FOLLOW EXACTLY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-FORMAT - Use this EXACT format:
+1. ❌ DO NOT use markdown (no ```python or ```)
+2. ❌ DO NOT add headers like "### SEARCH/REPLACE 1"
+3. ❌ DO NOT add explanations before/after
+4. ✅ USE ONLY this EXACT format:
 
 SEARCH:
 <<<
-[exact code to find - must match character-for-character]
+[exact code from file - copy character-for-character]
 >>>
 
 REPLACE:
 <<<
-[new code with your changes]
+[modified code with your changes]
 >>>
 
-RULES:
-1. The SEARCH block must be EXACT - copy it character-for-character from the file
-2. Include enough context (5-10 lines) to uniquely identify the location
-3. The REPLACE block should have the same structure with your changes
-4. You can provide multiple SEARCH/REPLACE pairs if needed
-5. Keep indentation identical
-6. Do NOT modify anything outside SEARCH/REPLACE blocks
-7. Do NOT use markdown code blocks like ```python
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SEARCH BLOCK RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-EXAMPLE:
+1. Copy EXACT text from file (character-for-character)
+2. Include 5-10 lines of context (not more!)
+3. Keep ALL whitespace, indentation, quotes EXACTLY as in file
+4. If code has multiple locations - provide ONE block for MAIN location only
+5. Test mentally: Can I find this EXACT text in file above? If NO - try again!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE (CORRECT):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SEARCH:
 <<<
-async def edit_file_with_ai(
-    request: EditFileRequest, 
-    current_user: User, 
-    db: Session
-):
-    try:
-        print(f"File: {{request.file_path}}")
+    def get_user_by_id(self, user_id):
+        
+        if user_id in self.cache:
+            return self.cache[user_id]
+        query = f"SELECT * FROM users WHERE id = {{user_id}}"
+        try:
+            result = self.db.execute(query)
+            return result
+        except Exception as e:
+            raise Exception(f"Failed to execute query: {e}")
 >>>
 
 REPLACE:
 <<<
-async def edit_file_with_ai(
-    request: EditFileRequest, 
-    current_user: User, 
-    db: Session
-):
-    try:
-        print(f"File: {{request.file_path}}")
-    except Exception as e:
-        logger.error(f"Edit failed: {{str(e)}}")
-        raise HTTPException(500, detail=str(e))
+    def get_user_by_id(self, user_id):
+        
+        try:
+            if user_id in self.cache:
+                return self.cache[user_id]
+            query = f"SELECT * FROM users WHERE id = {{user_id}}"
+            result = self.db.execute(query)
+            return result
+        except Exception as e:
+            raise Exception(f"Failed to get user {{user_id}}: {{e}}")
 >>>
 
-Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NOW GENERATE YOUR SEARCH/REPLACE BLOCKS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Focus on: {request.instruction}
+Provide 1-2 SEARCH/REPLACE blocks maximum.
+Response must start with "SEARCH:" immediately.
+"""
         
         # Dynamic max_tokens calculation
         estimated_tokens = original_chars // 4
@@ -238,84 +297,22 @@ Now provide the SEARCH/REPLACE blocks for: {request.instruction}"""
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=2000,  # Smaller since only changes
+            max_tokens=max_tokens_needed,  # Smaller since only changes
             api_key=user_api_key
         )
 
         response_text = ai_response.strip()
+        print(f"\n{'='*80}")
+        print(f"🤖 [AI RESPONSE] Length: {len(response_text)} chars")
+        print(f"🤖 [AI RESPONSE] First 500 chars:")
+        print(response_text[:500])
+        print(f"{'='*80}\n")
 
-        # Parse SEARCH/REPLACE blocks
-        search_replace_pattern = r'SEARCH:\s*<<<\s*(.*?)\s*>>>\s*REPLACE:\s*<<<\s*(.*?)\s*>>>'
-        matches = re.findall(search_replace_pattern, response_text, re.DOTALL)
-
-        if not matches:
-            # Fallback: AI didn't follow format
-            print(f"⚠️ [EDIT] AI response didn't follow SEARCH/REPLACE format")
-            print(f"   Response: {response_text[:200]}...")
-            raise HTTPException(
-                status_code=400,
-                detail="AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction."
-            )
-
-        # Apply all SEARCH/REPLACE operations
-        new_content = request.current_content
-
-        for i, (search_block, replace_block) in enumerate(matches):
-            search_text = search_block.strip()
-            replace_text = replace_block.strip()
-            
-            print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
-            print(f"   Searching for: {len(search_text)} chars")
-            
-            # Check if search text exists in file
-            if search_text not in new_content:
-                print(f"⚠️ [EDIT] Search block not found in file:")
-                print(f"   Looking for: {search_text[:200]}...")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
-                )
-            
-            # Replace once (first occurrence)
-            new_content = new_content.replace(search_text, replace_text, 1)
-            print(f"✅ [EDIT] Applied replacement {i+1}: {len(search_text)} → {len(replace_text)} chars")
-
-        # Generate diff
-        diff = ''.join(difflib.unified_diff(
-            request.current_content.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=f"a/{request.file_path}",
-            tofile=f"b/{request.file_path}",
-            lineterm=''
-        ))
-
-        print(f"✅ [EDIT] Generated changes: {len(matches)} replacements, {len(diff)} chars diff")
-
-        # Return response
-        return type('obj', (object,), {
-            'original_content': request.current_content,
-            'new_content': new_content,
-            'diff': diff,
-            'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
-        })()
+        # ✅ НОВОЕ: Улучшенный парсинг с fallback
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ [EDIT] Failed: {e}")
-        raise
-
-
-async def create_file_with_ai(
-    request: CreateFileRequest, 
-    current_user: User, 
-    db: Session
-):
-    """
-    Create new file using AI with Smart Context.
-    Suggests filename if not provided.
-    """
-    try:
-        print(f"\n📝 [CREATE] instruction: {request.instruction[:100]}...")
-        
-     
+        # Шаг 1: Убрать markdown если есть
+        cleaned_text = response_text
+        cleaned_text = re.sub(r'```python\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'```typescript\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'```\s*', '', cleaned_text)
+        cleaned_text = re.sub(r'#{1,6}\s+.*?\n', '', cleaned_text)  #

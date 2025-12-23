@@ -170,25 +170,33 @@ async def edit_file_with_ai(
         
         # Вместо Smart Context используем ТОЛЬКО recent messages
         try:
-            recent_msgs = memory.retrieve_messages(
-                role_id=1,
+            result = memory.retrieve_messages(
                 project_id=str(request.project_id),
+                role_id=1,
                 limit=5,
                 for_display=False,
                 user_id=None
             )
             
-            if recent_msgs:
-                context = "Recent conversation:\n"
-                for msg in recent_msgs:
-                    context += f"[{msg.sender}]: {msg.text[:200]}...\n"
+            # ✅ retrieve_messages returns Dict with 'messages' key
+            if result and isinstance(result, dict) and 'messages' in result:
+                messages = result['messages']
+                if messages and len(messages) > 0:
+                    context = "Recent conversation:\n"
+                    for msg in messages:
+                        # msg is a dict: {'sender': '...', 'text': '...'}
+                        sender = msg.get('sender', 'unknown')
+                        text = msg.get('text', '')
+                        context += f"[{sender}]: {text[:200]}...\n"
+                else:
+                    context = "No recent conversation."
             else:
                 context = "No recent conversation."
                 
         except Exception as e:
             print(f"⚠️ [EDIT] Could not load recent messages: {e}")
             context = "No context available."
-        
+
         print(f"📋 [EDIT] Context length: {len(context)} chars")
         print(f"📋 [EDIT] Context preview: {context[:300]}...")
 
