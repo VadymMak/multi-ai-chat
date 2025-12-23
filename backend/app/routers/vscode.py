@@ -170,12 +170,13 @@ async def edit_file_with_ai(
         
         # Вместо Smart Context используем ТОЛЬКО recent messages
         try:
-            recent_msgs = memory.get_recent_messages(
+            recent_msgs = memory.retrieve_messages(
                 role_id=1,
                 project_id=str(request.project_id),
                 session_id=str(uuid4()),
-                limit=3,
-                for_display=False
+                limit=5,
+                for_display=False,
+                user_id=None
             )
             
             if recent_msgs:
