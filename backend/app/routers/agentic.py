@@ -340,15 +340,11 @@ async def execute_step(
             )
             
         elif step["action"] == "edit":
-            if not request.file_content:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="file_content required for edit action"
-                )
+            # ✅ Don't check here - _execute_edit_step will try to get from DB
             result = await _execute_edit_step(
                 step=step,
                 plan=plan,
-                file_content=request.file_content,
+                file_content=request.file_content,  # May be None - will try DB
                 user_api_key=user_api_key,
                 db=db,
                 memory=memory
