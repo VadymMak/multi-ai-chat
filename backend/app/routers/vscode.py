@@ -5,7 +5,7 @@ Full Smart Context using EXISTING services:
 - MemoryManager from manager.py
 - store_message_with_embedding() from vector_service.py
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -50,6 +50,10 @@ def normalize_code(text: str) -> str:
     return '\n'.join(lines)
 
 
+# ✅ Context Mode Type
+ContextModeType = Literal['selection', 'file', 'project']
+
+
 # Request/Response Models
 class VSCodeChatRequest(BaseModel):
     message: str
@@ -60,6 +64,9 @@ class VSCodeChatRequest(BaseModel):
     fileContent: Optional[str] = None
     selectedText: Optional[str] = None
     mode: Optional[str] = None
+    # ✅ NEW: Context mode from frontend
+    context_mode: Optional[ContextModeType] = 'file'
+    use_smart_context: Optional[bool] = False
 
 
 class VSCodeChatResponse(BaseModel):
@@ -78,6 +85,9 @@ class EditFileRequest(BaseModel):
     file_path: str
     instruction: str
     current_content: str
+    # ✅ NEW: Context mode
+    context_mode: Optional[ContextModeType] = 'file'
+    use_smart_context: Optional[bool] = False
 
 
 class CreateFileRequest(BaseModel):
@@ -85,6 +95,9 @@ class CreateFileRequest(BaseModel):
     instruction: str
     file_path: Optional[str] = None
     current_content: Optional[str] = None
+    # ✅ NEW: Context mode
+    context_mode: Optional[ContextModeType] = 'file'
+    use_smart_context: Optional[bool] = False
 
 
 async def classify_user_intent(
@@ -145,6 +158,86 @@ Respond with ONLY one word: EDIT, CREATE, or CHAT"""
         return "CHAT"
 
 
+async def build_context_for_mode(
+    context_mode: ContextModeType,
+    use_smart_context: bool,
+    project_id: int,
+    role_id: int,
+    query: str,
+    session_id: str,
+    db: Session,
+    memory: MemoryManager,
+    file_content: Optional[str] = None,
+    selected_text: Optional[str] = None,
+    file_path: Optional[str] = None
+) -> str:
+    """
+    ✅ NEW: Build context based on selected context mode.
+    
+    - selection: Only selected text
+    - file: Full file content (default)
+    - project: Use Smart Context (pgvector search)
+    """
+    
+    print(f"🔍 [Context] Building context for mode: {context_mode}")
+    
+    context_parts = []
+    
+    # ========== SELECTION MODE ==========
+    if context_mode == 'selection':
+        if selected_text:
+            context_parts.append(f"=== Selected Code ===\n{selected_text}")
+            print(f"✂️ [Context] Selection mode: {len(selected_text)} chars")
+        else:
+            # Fallback to file if no selection
+            print(f"⚠️ [Context] No selection, falling back to file mode")
+            if file_content:
+                context_parts.append(f"=== Current File: {file_path} ===\n{file_content}")
+    
+    # ========== FILE MODE (Default) ==========
+    elif context_mode == 'file':
+        if file_content:
+            context_parts.append(f"=== Current File: {file_path} ===\n{file_content}")
+            print(f"📄 [Context] File mode: {len(file_content)} chars")
+        else:
+            print(f"⚠️ [Context] No file content available")
+    
+    # ========== PROJECT MODE (Smart Context) ==========
+    elif context_mode == 'project' or use_smart_context:
+        print(f"📁 [Context] Project mode: Using Smart Context (pgvector)")
+        
+        try:
+            # Use existing build_smart_context function
+            smart_context = await build_smart_context(
+                project_id=project_id,
+                role_id=role_id,
+                query=query,
+                session_id=session_id,
+                db=db,
+                memory=memory
+            )
+            context_parts.append(smart_context)
+            print(f"🧠 [Context] Smart Context built: {len(smart_context)} chars")
+            
+        except Exception as e:
+            print(f"❌ [Context] Smart Context failed: {e}")
+            # Fallback to file mode
+            if file_content:
+                context_parts.append(f"=== Current File: {file_path} ===\n{file_content}")
+        
+        # Still include current file for reference in project mode
+        if file_content and context_mode == 'project':
+            # Add current file but mark it clearly
+            context_parts.append(f"\n=== ACTIVE FILE: {file_path} ===\n{file_content[:3000]}")
+    
+    # Combine all context parts
+    final_context = "\n\n".join(context_parts) if context_parts else "No context available."
+    
+    print(f"📋 [Context] Final context: {len(final_context)} chars for mode '{context_mode}'")
+    
+    return final_context
+
+
 async def edit_file_with_ai(
     request: EditFileRequest, 
     current_user: User, 
@@ -157,6 +250,7 @@ async def edit_file_with_ai(
     try:
         print(f"\n🔧 [EDIT] file={request.file_path}")
         print(f"📝 [EDIT] instruction: {request.instruction[:100]}...")
+        print(f"🔍 [EDIT] context_mode: {request.context_mode}")
         
         # Get user's API key
         user_api_key = get_openai_key(current_user, db, required=True)
@@ -164,38 +258,20 @@ async def edit_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
-        # ✅ НОВОЕ: Для EDIT mode НЕ используем Smart Context
-        # Проблема: Smart Context добавляет код из ДРУГИХ файлов,
-        # AI путается и ищет код не в том файле!
-        
-        # Вместо Smart Context используем ТОЛЬКО recent messages
-        try:
-            result = memory.retrieve_messages(
-                project_id=str(request.project_id),
-                role_id=1,
-                limit=5,
-                for_display=False,
-                user_id=None
-            )
-            
-            # ✅ retrieve_messages returns Dict with 'messages' key
-            if result and isinstance(result, dict) and 'messages' in result:
-                messages = result['messages']
-                if messages and len(messages) > 0:
-                    context = "Recent conversation:\n"
-                    for msg in messages:
-                        # msg is a dict: {'sender': '...', 'text': '...'}
-                        sender = msg.get('sender', 'unknown')
-                        text = msg.get('text', '')
-                        context += f"[{sender}]: {text[:200]}...\n"
-                else:
-                    context = "No recent conversation."
-            else:
-                context = "No recent conversation."
-                
-        except Exception as e:
-            print(f"⚠️ [EDIT] Could not load recent messages: {e}")
-            context = "No context available."
+        # ✅ Build context based on mode
+        context = await build_context_for_mode(
+            context_mode=request.context_mode or 'file',
+            use_smart_context=request.use_smart_context or False,
+            project_id=request.project_id,
+            role_id=1,
+            query=request.instruction,
+            session_id=str(uuid4()),
+            db=db,
+            memory=memory,
+            file_content=request.current_content,
+            selected_text=None,  # For EDIT we use full file
+            file_path=request.file_path
+        )
 
         print(f"📋 [EDIT] Context length: {len(context)} chars")
         print(f"📋 [EDIT] Context preview: {context[:300]}...")
@@ -203,7 +279,6 @@ async def edit_file_with_ai(
         original_lines = request.current_content.count('\n') + 1
         original_chars = len(request.current_content)
         
-        # Build prompt
         # Build prompt with STRICT formatting rules
         prompt = f"""You are an expert code editor. Your ONLY job is to provide SEARCH/REPLACE instructions.
 
@@ -301,7 +376,7 @@ Response must start with "SEARCH:" immediately.
             ],
             model_key="gpt-4o",
             temperature=0.2,
-            max_tokens=max_tokens_needed,  # Smaller since only changes
+            max_tokens=max_tokens_needed,
             api_key=user_api_key
         )
 
@@ -312,7 +387,7 @@ Response must start with "SEARCH:" immediately.
         print(response_text[:500])
         print(f"{'='*80}\n")
 
-        # ✅ НОВОЕ: Улучшенный парсинг с fallback
+        # ✅ Улучшенный парсинг с fallback
         
         # Шаг 1: Убрать markdown если есть
         cleaned_text = response_text
@@ -358,7 +433,7 @@ Response must start with "SEARCH:" immediately.
             print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
             print(f"   Searching for: {len(search_text)} chars")
             
-            # ✅ NEW: Try normalized matching
+            # ✅ Try normalized matching
             search_normalized = normalize_code(search_text)
             content_normalized = normalize_code(new_content)
             
@@ -393,7 +468,6 @@ Response must start with "SEARCH:" immediately.
                 if found:
                     continue
             
-            # ✅ FIX: This should be OUTSIDE the if blocks!
             # If we reach here, nothing was found
             print(f"⚠️ [EDIT] Search block not found in file:")
             print(f"   Looking for (exact): {search_text[:200]}...")
@@ -416,11 +490,11 @@ Response must start with "SEARCH:" immediately.
 
         # Return response
         return type('obj', (object,), {
-            'response_type': 'edit',  # ✅ ADD THIS!
+            'response_type': 'edit',
             'original_content': request.current_content,
             'new_content': new_content,
             'diff': diff,
-            'file_path': request.file_path,  # ✅ ADD THIS TOO!
+            'file_path': request.file_path,
             'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
         })()
         
@@ -442,6 +516,7 @@ async def create_file_with_ai(
     """
     try:
         print(f"\n📝 [CREATE] instruction: {request.instruction[:100]}...")
+        print(f"🔍 [CREATE] context_mode: {request.context_mode}")
         
         # Get user's API key
         user_api_key = get_openai_key(current_user, db, required=True)
@@ -449,20 +524,21 @@ async def create_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
-        # ✅ Build Smart Context for CREATE mode
-        # (For CREATE we CAN use Smart Context to find examples and patterns)
-        try:
-            context = await build_smart_context(
-                project_id=request.project_id,
-                role_id=1,
-                query=request.instruction,
-                session_id=str(uuid4()),
-                db=db,
-                memory=memory
-            )
-        except Exception as e:
-            print(f"⚠️ [CREATE] Could not build context: {e}")
-            context = "No context available."
+        # ✅ Build context based on mode
+        # For CREATE, we typically want project context to find patterns
+        context = await build_context_for_mode(
+            context_mode=request.context_mode or 'project',  # Default to project for CREATE
+            use_smart_context=request.use_smart_context or True,  # Default to true for CREATE
+            project_id=request.project_id,
+            role_id=1,
+            query=request.instruction,
+            session_id=str(uuid4()),
+            db=db,
+            memory=memory,
+            file_content=request.current_content,
+            selected_text=None,
+            file_path=request.file_path
+        )
         
         print(f"📋 [CREATE] Context length: {len(context)} chars")
         
@@ -557,11 +633,11 @@ Generate the file:"""
         print(f"✅ [CREATE] Generated {suggested_path}, {len(content)} chars")
         
         return type('obj', (object,), {
-            'response_type': 'create',  # ✅ ADD THIS!
+            'response_type': 'create',
             'file_path': suggested_path,
             'new_content': content,
-            'original_content': None,  # ✅ ADD THIS!
-            'diff': None,  # ✅ ADD THIS!
+            'original_content': None,
+            'diff': None,
             'dependencies': dependencies,
             'tokens_used': {'total': len(prompt.split()) + len(content.split())}
         })()
@@ -584,6 +660,11 @@ async def vscode_chat(
     - build_smart_context() for pgvector search + recent + summaries + files
     - MemoryManager for conversation storage
     - store_message_with_embedding() for future semantic search
+    
+    ✅ NEW: Supports context_mode parameter:
+    - 'selection': Only selected text
+    - 'file': Full file content (default)
+    - 'project': Use Smart Context (pgvector search)
     """
     
     try:
@@ -604,6 +685,12 @@ async def vscode_chat(
         # ========== VALIDATE PROJECT & ROLE ==========
         project_id = request.project_id
         role_id = request.role_id or 1  # Default role
+        
+        # ✅ Get context mode from request
+        context_mode = request.context_mode or 'file'
+        use_smart_context = request.use_smart_context or (context_mode == 'project')
+        
+        print(f"\n🔌 [VSCode] /chat context_mode={context_mode} use_smart_context={use_smart_context}")
         
         if project_id:
             try:
@@ -667,6 +754,7 @@ async def vscode_chat(
         print(f"   filePath: {request.filePath}")
         print(f"   fileContent length: {len(request.fileContent) if request.fileContent else 0}")
         print(f"   project_id: {project_id}")
+        print(f"   context_mode: {context_mode}")
         print(f"{'='*80}\n")
 
         if intent == "EDIT" and has_file_open and project_id:
@@ -678,7 +766,10 @@ async def vscode_chat(
                     project_id=project_id,
                     file_path=request.filePath,
                     instruction=request.message,
-                    current_content=request.fileContent
+                    current_content=request.fileContent,
+                    # ✅ Pass context mode
+                    context_mode=context_mode,
+                    use_smart_context=use_smart_context
                 )
                 
                 edit_response = await edit_file_with_ai(edit_request, current_user, db)
@@ -751,7 +842,10 @@ async def vscode_chat(
                     project_id=project_id,
                     instruction=request.message,
                     file_path=None,  # Let AI suggest
-                    current_content=None
+                    current_content=None,
+                    # ✅ Pass context mode (default to project for CREATE)
+                    context_mode='project' if context_mode == 'project' else context_mode,
+                    use_smart_context=True  # Always use smart context for CREATE
                 )
                 
                 create_response = await create_file_with_ai(create_request, current_user, db)
@@ -797,33 +891,27 @@ async def vscode_chat(
         # ========== NORMAL CHAT MODE ==========
         print(f"💬 [Intent] CHAT mode - providing explanation/help")
         
-        # Build smart context
-        try:
-            context = await build_smart_context(  # ← async!
-                project_id=project_id,
-                role_id=role_id,
-                query=request.message,
-                session_id=chat_session_id,  # уже есть выше!
-                db=db,
-                memory=memory  # уже есть выше!
-            )
-        except Exception as e:
-            print(f"⚠️ [VSCode] Failed to build smart context: {e}, using minimal context")
-            context = f"User message: {request.message}"
-        
-        # Add current file context if available
-        if request.filePath and request.fileContent:
-            context += f"\n\n=== Current File: {request.filePath} ===\n{request.fileContent[:2000]}"
-        
-        if request.selectedText:
-            context += f"\n\n=== Selected Text ===\n{request.selectedText}"
+        # ✅ Build context based on mode
+        context = await build_context_for_mode(
+            context_mode=context_mode,
+            use_smart_context=use_smart_context,
+            project_id=project_id,
+            role_id=role_id,
+            query=request.message,
+            session_id=chat_session_id,
+            db=db,
+            memory=memory,
+            file_content=request.fileContent,
+            selected_text=request.selectedText,
+            file_path=request.filePath
+        )
         
         # Call AI
         try:
             ai_response = ask_model(
                 messages=[
                     {"role": "system", "content": "You are a helpful coding assistant integrated into VS Code."},
-                    {"role": "user", "content": context}
+                    {"role": "user", "content": f"{context}\n\nUser question: {request.message}"}
                 ],
                 model_key="gpt-4o",
                 temperature=0.7,
