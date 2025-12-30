@@ -547,30 +547,45 @@ Generate the file content:"""
 async def _execute_edit_step(
     step: Dict,
     plan: Dict,
-    file_content: Optional[str],  # ✅ Changed to Optional
+    file_content: Optional[str],
     user_api_key: str,
     db: Session,
     memory: MemoryManager
 ) -> Dict:
     """Execute an EDIT step - modify existing file"""
     
-    # ✅ If no file_content provided, try to get from database
-    if not file_content and step.get("file_path"):
+    file_path = step.get("file_path", "")
+    file_name = file_path.split('/')[-1] if file_path else ""
+    
+    # ✅ FIRST: Check if file was created in previous steps of this plan
+    if not file_content:
+        for prev_step in plan["steps"]:
+            if prev_step["status"] == "completed" and prev_step.get("result"):
+                result = prev_step["result"]
+                prev_file_path = prev_step.get("file_path", "")
+                # Check if this is the file we need (exact or partial match)
+                if result.get("new_content") and (
+                    prev_file_path == file_path or 
+                    prev_file_path.endswith(file_name)
+                ):
+                    file_content = result["new_content"]
+                    print(f"📄 [EXECUTE] Got file content from previous step: {prev_file_path}")
+                    break
+    
+    # ✅ SECOND: Try to get from database if still no content
+    if not file_content and file_path:
         from sqlalchemy import text
         
-        file_path = step["file_path"]
-        file_name = file_path.split('/')[-1]  # Get just filename
         project_id = plan.get("project_id")
-        
         print(f"🔍 [EXECUTE] Looking for file in DB: {file_path} (project={project_id})")
         
-        # Try exact match first using raw SQL
+        # Try exact match first
         result = db.execute(
             text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path = :fpath LIMIT 1"),
             {"pid": project_id, "fpath": file_path}
         ).fetchone()
         
-        # If not found, try partial match (filename only)
+        # If not found, try partial match
         if not result:
             result = db.execute(
                 text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path LIKE :pattern LIMIT 1"),
@@ -581,16 +596,16 @@ async def _execute_edit_step(
             file_content = result[0]
             print(f"📄 [EXECUTE] Got file content from DB: {file_path} ({len(file_content)} chars)")
         else:
-            print(f"⚠️ [EXECUTE] File not found in index: {file_path}")
+            print(f"⚠️ [EXECUTE] File not found in DB: {file_path}")
     
     # ✅ If still no content, raise error
     if not file_content:
         raise HTTPException(
             status_code=400, 
-            detail=f"Cannot edit file: content not provided and file not found in index: {step.get('file_path')}"
+            detail=f"Cannot edit file: content not provided and file not found in index: {file_path}"
         )
     
-    # Build context from previous steps
+    # Build context from previous steps (for AI prompt)
     previous_files = []
     for prev_step in plan["steps"]:
         if prev_step["status"] == "completed" and prev_step.get("result"):
