@@ -556,10 +556,10 @@ async def _execute_edit_step(
     
     # ✅ If no file_content provided, try to get from database
     if not file_content and step.get("file_path"):
-        from app.models import FileEmbedding
+        from app.memory.models import FileEmbedding
         
         file_path = step["file_path"]
-        file_name = file_path.split('/')[-1]  # Get just filename
+        file_name = file_path.split('/')[-1]  
         
         # Try exact match first
         file_record = db.query(FileEmbedding).filter(
