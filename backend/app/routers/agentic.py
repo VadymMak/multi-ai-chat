@@ -551,12 +551,45 @@ Generate the file content:"""
 async def _execute_edit_step(
     step: Dict,
     plan: Dict,
-    file_content: str,
+    file_content: Optional[str],  # ✅ Changed to Optional
     user_api_key: str,
     db: Session,
     memory: MemoryManager
 ) -> Dict:
     """Execute an EDIT step - modify existing file"""
+    
+    # ✅ If no file_content provided, try to get from database
+    if not file_content and step.get("file_path"):
+        from app.models import FileEmbedding
+        
+        file_path = step["file_path"]
+        file_name = file_path.split('/')[-1]  # Get just filename
+        
+        # Try exact match first
+        file_record = db.query(FileEmbedding).filter(
+            FileEmbedding.project_id == plan.get("project_id"),
+            FileEmbedding.file_path == file_path
+        ).first()
+        
+        # If not found, try partial match (filename only)
+        if not file_record:
+            file_record = db.query(FileEmbedding).filter(
+                FileEmbedding.project_id == plan.get("project_id"),
+                FileEmbedding.file_path.endswith(file_name)
+            ).first()
+        
+        if file_record:
+            file_content = file_record.content
+            print(f"📄 [EXECUTE] Got file content from DB: {file_path} ({len(file_content)} chars)")
+        else:
+            print(f"⚠️ [EXECUTE] File not found in index: {file_path}")
+    
+    # ✅ If still no content, raise error
+    if not file_content:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot edit file: content not provided and file not found in index: {step.get('file_path')}"
+        )
     
     # Build context from previous steps
     previous_files = []
