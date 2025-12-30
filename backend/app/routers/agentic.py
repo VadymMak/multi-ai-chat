@@ -556,26 +556,29 @@ async def _execute_edit_step(
     
     # ✅ If no file_content provided, try to get from database
     if not file_content and step.get("file_path"):
-        from app.memory.models import FileEmbedding
+        from sqlalchemy import text
         
         file_path = step["file_path"]
-        file_name = file_path.split('/')[-1]  
+        file_name = file_path.split('/')[-1]  # Get just filename
+        project_id = plan.get("project_id")
         
-        # Try exact match first
-        file_record = db.query(FileEmbedding).filter(
-            FileEmbedding.project_id == plan.get("project_id"),
-            FileEmbedding.file_path == file_path
-        ).first()
+        print(f"🔍 [EXECUTE] Looking for file in DB: {file_path} (project={project_id})")
+        
+        # Try exact match first using raw SQL
+        result = db.execute(
+            text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path = :fpath LIMIT 1"),
+            {"pid": project_id, "fpath": file_path}
+        ).fetchone()
         
         # If not found, try partial match (filename only)
-        if not file_record:
-            file_record = db.query(FileEmbedding).filter(
-                FileEmbedding.project_id == plan.get("project_id"),
-                FileEmbedding.file_path.endswith(file_name)
-            ).first()
+        if not result:
+            result = db.execute(
+                text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path LIKE :pattern LIMIT 1"),
+                {"pid": project_id, "pattern": f"%{file_name}"}
+            ).fetchone()
         
-        if file_record:
-            file_content = file_record.content
+        if result:
+            file_content = result[0]
             print(f"📄 [EXECUTE] Got file content from DB: {file_path} ({len(file_content)} chars)")
         else:
             print(f"⚠️ [EXECUTE] File not found in index: {file_path}")
