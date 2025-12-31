@@ -7,6 +7,7 @@ File: backend/app/routers/agentic.py
 from typing import Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from pydantic import BaseModel
 from uuid import uuid4
 from datetime import datetime
@@ -152,58 +153,74 @@ async def plan_task(
         # Add current file context if provided
         if request.file_path and request.file_content:
             context += f"\n\n=== Current File: {request.file_path} ===\n{request.file_content[:3000]}"
+
+        # Query all file paths from file_embeddings
+        file_paths_result = db.execute(
+            text("""
+                SELECT file_path 
+                FROM file_embeddings 
+                WHERE project_id = :pid
+                ORDER BY file_path
+            """),
+            {"pid": request.project_id}
+        ).fetchall()
+
+        # Format as list for AI
+        project_files_list = "\n".join([row[0] for row in file_paths_result]) if file_paths_result else "No files indexed"
+        files_count = len(file_paths_result)
+
+        print(f"📋 [PLAN] Found {files_count} files in project")
+        # ============ END PHASE 0 FIX ============
         
         # Build planning prompt
         prompt = f"""You are an expert software architect. Break down this task into specific, executable steps.
 
-TASK:
-{request.task}
+        TASK:
+        {request.task}
 
-PROJECT CONTEXT:
-{context}
+        === EXISTING PROJECT FILES ({files_count} files) ===
+        {project_files_list}
+        === END OF FILE LIST ===
 
-RULES:
-1. Each step must be ONE of these actions:
-   - "create": Create a new file
-   - "edit": Modify an existing file
-   - "delete": Delete a file
-   - "command": Run a terminal command (npm install, etc.)
+        PROJECT CONTEXT (relevant files):
+        {context}
 
-2. Order steps by dependencies (create base files first)
-3. Keep steps focused (one file per step for create/edit)
-4. Include realistic file paths based on project structure
-5. Maximum 10 steps
+        CRITICAL RULES:
+        1. For "edit" action: Use ONLY file paths from the EXISTING PROJECT FILES list above!
+        2. For "create" action: Follow existing folder structure from the file list
+        3. Do NOT invent paths like "src/app.js" - use actual paths from the list!
 
-Return ONLY a JSON array with this EXACT format (no markdown, no explanation):
-[
-  {{
-    "step_num": 1,
-    "action": "create",
-    "file_path": "src/services/AuthService.ts",
-    "description": "Create authentication service with login/logout methods",
-    "dependencies": [],
-    "estimated_complexity": "medium"
-  }},
-  {{
-    "step_num": 2,
-    "action": "edit",
-    "file_path": "src/models/User.ts",
-    "description": "Add passwordHash and lastLogin fields to User model",
-    "dependencies": ["src/services/AuthService.ts"],
-    "estimated_complexity": "low"
-  }},
-  {{
-    "step_num": 3,
-    "action": "command",
-    "file_path": null,
-    "description": "Install required dependencies",
-    "command": "npm install jsonwebtoken bcrypt",
-    "dependencies": [],
-    "estimated_complexity": "low"
-  }}
-]
+        4. Each step must be ONE of these actions:
+        - "create": Create a new file (path should follow existing structure)
+        - "edit": Modify an existing file (MUST exist in the list above!)
+        - "delete": Delete a file
+        - "command": Run a terminal command (npm install, etc.)
 
-Generate the plan now:"""
+        5. Order steps by dependencies (create base files first)
+        6. Keep steps focused (one file per step for create/edit)
+        7. Maximum 10 steps
+
+        Return ONLY a JSON array with this EXACT format (no markdown, no explanation):
+        [
+        {{
+            "step_num": 1,
+            "action": "create",
+            "file_path": "backend/app/services/auth_service.py",
+            "description": "Create authentication service with login/logout methods",
+            "dependencies": [],
+            "estimated_complexity": "medium"
+        }},
+        {{
+            "step_num": 2,
+            "action": "edit",
+            "file_path": "backend/app/routers/users.py",
+            "description": "Add authentication endpoints",
+            "dependencies": ["backend/app/services/auth_service.py"],
+            "estimated_complexity": "low"
+        }}
+        ]
+
+        Generate the plan now:"""
 
         # Call AI for planning
         ai_response = ask_model(
