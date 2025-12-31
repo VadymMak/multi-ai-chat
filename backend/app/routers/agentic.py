@@ -266,6 +266,18 @@ async def plan_task(
             )
             validated_steps.append(validated_step)
         
+        # ============ PHASE 0.1: Auto-correct EDIT action for non-existent files ============
+        existing_paths = set(row[0] for row in file_paths_result)
+        
+        for step in validated_steps:
+            if step.action == "edit":
+                file_path = step.file_path or ""
+                if file_path and file_path not in existing_paths:
+                    print(f"⚠️ [PLAN] Auto-correcting: {file_path} EDIT → CREATE (file not in project)")
+                    step.action = "create"
+                    step.description = f"[Auto-converted] {step.description}"
+        # ============ END PHASE 0.1 ============
+        
         # Generate plan ID and store
         plan_id = str(uuid4())[:8]
         
