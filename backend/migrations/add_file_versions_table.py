@@ -134,7 +134,7 @@ def migrate():
 
 
 def main():
-    """Main entry point"""
+    """Main entry point - auto mode for CI/CD"""
     print("\n" + "=" * 80)
     print("DATABASE MIGRATION: file_versions")
     print("=" * 80)
@@ -144,15 +144,9 @@ def main():
     print("  • Track change source (user/ai_edit/ai_create/ai_fix)")
     print("  • Link to Agentic Plans (plan_id, step_num)")
     print("  • Enable rollback to any version")
-    print("\n⚠️  This will modify the database structure!")
     print("=" * 80)
     
-    response = input("\nContinue with migration? (yes/no): ").strip().lower()
-    
-    if response not in ['yes', 'y']:
-        print("\n❌ Migration cancelled by user")
-        return 1
-    
+    # Auto-run in CI/CD (no input needed)
     success = migrate()
     
     if success:
