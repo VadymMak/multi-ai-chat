@@ -400,7 +400,7 @@ Response must start with "SEARCH:" immediately.
         print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
         
         # Шаг 2: Попытка 1 - стандартный формат с <<< >>>
-        search_replace_pattern = r'SEARCH:\s*<<<\s*(.*?)\s*>>>\s*REPLACE:\s*<<<\s*(.*?)\s*>>>'
+        search_replace_pattern = r'SEARCH:\s*<<<\n?(.*?)>>>[ \t]*\n*REPLACE:\s*<<<\n?(.*?)>>>'
         matches = re.findall(search_replace_pattern, cleaned_text, re.DOTALL)
         
         if matches:
