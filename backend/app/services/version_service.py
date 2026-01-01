@@ -7,13 +7,11 @@ import difflib
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
-
-from app.memory.models import FileVersion
+from sqlalchemy import text
 
 
 class VersionService:
-    """Service for managing file versions"""
+    """Service for managing file versions - uses raw SQL"""
     
     def __init__(self, db: Session):
         self.db = db
@@ -30,110 +28,112 @@ class VersionService:
         plan_id: Optional[str] = None,
         step_num: Optional[int] = None,
         previous_content: Optional[str] = None
-    ) -> FileVersion:
+    ) -> Dict[str, Any]:
         """
         Create new version of a file
-        
-        Args:
-            file_id: ID from file_embeddings
-            content: Full file content
-            change_type: 'create', 'edit', 'delete', 'rollback'
-            change_source: 'user', 'ai_edit', 'ai_create', 'ai_fix'
-            change_message: Description of change
-            user_id: User who made change (if user)
-            ai_model: AI model used (if AI)
-            plan_id: Agentic plan ID (if from plan)
-            step_num: Step number in plan
-            previous_content: Previous content for diff generation
         """
         
         # Get next version number
-        last_version = self.db.query(FileVersion).filter(
-            FileVersion.file_id == file_id
-        ).order_by(desc(FileVersion.version_number)).first()
+        result = self.db.execute(text("""
+            SELECT version_number FROM file_versions 
+            WHERE file_id = :file_id 
+            ORDER BY version_number DESC 
+            LIMIT 1
+        """), {"file_id": file_id}).fetchone()
         
-        version_number = (last_version.version_number + 1) if last_version else 1
+        version_number = (result[0] + 1) if result else 1
         
         # Generate diff if previous content provided
         diff = None
         if previous_content is not None:
             diff = self._generate_diff(previous_content, content)
         
-        # Create version
-        version = FileVersion(
-            file_id=file_id,
-            version_number=version_number,
-            content=content,
-            diff_from_previous=diff,
-            change_type=change_type,
-            change_source=change_source,
-            change_message=change_message,
-            user_id=user_id,
-            ai_model=ai_model,
-            plan_id=plan_id,
-            step_num=step_num
-        )
-        
-        self.db.add(version)
+        # Insert new version
+        self.db.execute(text("""
+            INSERT INTO file_versions 
+            (file_id, version_number, content, diff_from_previous, change_type, 
+             change_source, change_message, user_id, ai_model, plan_id, step_num, created_at)
+            VALUES 
+            (:file_id, :version_number, :content, :diff, :change_type,
+             :change_source, :change_message, :user_id, :ai_model, :plan_id, :step_num, NOW())
+        """), {
+            "file_id": file_id,
+            "version_number": version_number,
+            "content": content,
+            "diff": diff,
+            "change_type": change_type,
+            "change_source": change_source,
+            "change_message": change_message,
+            "user_id": user_id,
+            "ai_model": ai_model,
+            "plan_id": plan_id,
+            "step_num": step_num
+        })
         self.db.commit()
-        self.db.refresh(version)
         
-        return version
+        return {
+            "file_id": file_id,
+            "version_number": version_number,
+            "change_type": change_type,
+            "change_source": change_source
+        }
     
-    def get_versions(
-        self,
-        file_id: int,
-        limit: int = 50
-    ) -> List[FileVersion]:
+    def get_versions(self, file_id: int, limit: int = 50) -> List[Dict]:
         """Get version history for a file (newest first)"""
         
-        return self.db.query(FileVersion).filter(
-            FileVersion.file_id == file_id
-        ).order_by(desc(FileVersion.version_number)).limit(limit).all()
+        results = self.db.execute(text("""
+            SELECT id, file_id, version_number, change_type, change_source, 
+                   change_message, user_id, ai_model, plan_id, step_num, created_at,
+                   (diff_from_previous IS NOT NULL) as has_diff
+            FROM file_versions 
+            WHERE file_id = :file_id 
+            ORDER BY version_number DESC 
+            LIMIT :limit
+        """), {"file_id": file_id, "limit": limit}).fetchall()
+        
+        return [self._row_to_dict(r) for r in results]
     
-    def get_version(
-        self,
-        file_id: int,
-        version_number: int
-    ) -> Optional[FileVersion]:
+    def get_version(self, file_id: int, version_number: int) -> Optional[Dict]:
         """Get specific version of a file"""
         
-        return self.db.query(FileVersion).filter(
-            FileVersion.file_id == file_id,
-            FileVersion.version_number == version_number
-        ).first()
+        result = self.db.execute(text("""
+            SELECT id, file_id, version_number, content, diff_from_previous,
+                   change_type, change_source, change_message, user_id, 
+                   ai_model, plan_id, step_num, created_at
+            FROM file_versions 
+            WHERE file_id = :file_id AND version_number = :version_number
+        """), {"file_id": file_id, "version_number": version_number}).fetchone()
+        
+        return self._row_to_dict_full(result) if result else None
     
-    def get_latest_version(self, file_id: int) -> Optional[FileVersion]:
+    def get_latest_version(self, file_id: int) -> Optional[Dict]:
         """Get latest version of a file"""
         
-        return self.db.query(FileVersion).filter(
-            FileVersion.file_id == file_id
-        ).order_by(desc(FileVersion.version_number)).first()
-    
-    def rollback(
-        self,
-        file_id: int,
-        to_version: int,
-        user_id: Optional[int] = None
-    ) -> FileVersion:
-        """
-        Rollback file to a previous version
-        Creates NEW version with old content (preserves history)
-        """
+        result = self.db.execute(text("""
+            SELECT id, file_id, version_number, content, diff_from_previous,
+                   change_type, change_source, change_message, user_id, 
+                   ai_model, plan_id, step_num, created_at
+            FROM file_versions 
+            WHERE file_id = :file_id 
+            ORDER BY version_number DESC 
+            LIMIT 1
+        """), {"file_id": file_id}).fetchone()
         
-        # Get target version
+        return self._row_to_dict_full(result) if result else None
+    
+    def rollback(self, file_id: int, to_version: int, user_id: Optional[int] = None) -> Dict:
+        """Rollback file to a previous version - creates NEW version"""
+        
         target = self.get_version(file_id, to_version)
         if not target:
             raise ValueError(f"Version {to_version} not found for file {file_id}")
         
-        # Get current content for diff
         latest = self.get_latest_version(file_id)
-        previous_content = latest.content if latest else None
+        previous_content = latest["content"] if latest else None
         
-        # Create new version with rollback content
         return self.create_version(
             file_id=file_id,
-            content=target.content,
+            content=target["content"],
             change_type="rollback",
             change_source="user",
             change_message=f"Rollback to version {to_version}",
@@ -141,12 +141,7 @@ class VersionService:
             previous_content=previous_content
         )
     
-    def get_diff_between(
-        self,
-        file_id: int,
-        from_version: int,
-        to_version: int
-    ) -> str:
+    def get_diff_between(self, file_id: int, from_version: int, to_version: int) -> str:
         """Get diff between two versions"""
         
         v_from = self.get_version(file_id, from_version)
@@ -155,38 +150,49 @@ class VersionService:
         if not v_from or not v_to:
             raise ValueError("One or both versions not found")
         
-        return self._generate_diff(v_from.content, v_to.content)
+        return self._generate_diff(v_from["content"], v_to["content"])
     
     def _generate_diff(self, old: str, new: str) -> str:
-        """Generate unified diff between two contents"""
+        """Generate unified diff"""
         
         old_lines = old.splitlines(keepends=True)
         new_lines = new.splitlines(keepends=True)
         
-        diff = difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile='before',
-            tofile='after',
-            lineterm=''
-        )
-        
+        diff = difflib.unified_diff(old_lines, new_lines, fromfile='before', tofile='after', lineterm='')
         return ''.join(diff)
     
-    def to_dict(self, version: FileVersion) -> Dict[str, Any]:
-        """Convert version to dictionary for API response"""
-        
+    def _row_to_dict(self, row) -> Dict[str, Any]:
+        """Convert row to dict (without content)"""
         return {
-            "id": version.id,
-            "file_id": version.file_id,
-            "version_number": version.version_number,
-            "change_type": version.change_type,
-            "change_source": version.change_source,
-            "change_message": version.change_message,
-            "user_id": version.user_id,
-            "ai_model": version.ai_model,
-            "plan_id": version.plan_id,
-            "step_num": version.step_num,
-            "created_at": version.created_at.isoformat() if version.created_at else None,
-            "has_diff": version.diff_from_previous is not None
+            "id": row[0],
+            "file_id": row[1],
+            "version_number": row[2],
+            "change_type": row[3],
+            "change_source": row[4],
+            "change_message": row[5],
+            "user_id": row[6],
+            "ai_model": row[7],
+            "plan_id": row[8],
+            "step_num": row[9],
+            "created_at": row[10].isoformat() if row[10] else None,
+            "has_diff": row[11]
+        }
+    
+    def _row_to_dict_full(self, row) -> Dict[str, Any]:
+        """Convert row to dict (with content)"""
+        return {
+            "id": row[0],
+            "file_id": row[1],
+            "version_number": row[2],
+            "content": row[3],
+            "diff_from_previous": row[4],
+            "change_type": row[5],
+            "change_source": row[6],
+            "change_message": row[7],
+            "user_id": row[8],
+            "ai_model": row[9],
+            "plan_id": row[10],
+            "step_num": row[11],
+            "created_at": row[12].isoformat() if row[12] else None,
+            "has_diff": row[4] is not None
         }
