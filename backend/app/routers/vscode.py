@@ -399,13 +399,38 @@ Response must start with "SEARCH:" immediately.
         
         print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
         
-        # Шаг 2: Попытка 1 - стандартный формат с <<< >>>
-        search_replace_pattern = r'SEARCH:\s*<<<\n?(.*?)>>>[ \t]*\n*REPLACE:\s*<<<\n?(.*?)>>>'
-        matches = re.findall(search_replace_pattern, cleaned_text, re.DOTALL)
-        
+        # Шаг 2: Надёжный парсер SEARCH/REPLACE блоков
+        def parse_search_replace_blocks(text: str):
+            """Parse SEARCH/REPLACE blocks reliably"""
+            blocks = []
+            
+            # Split by SEARCH:
+            parts = re.split(r'SEARCH:\s*', text, flags=re.IGNORECASE)
+            
+            for part in parts[1:]:  # Skip first empty part
+                # Find <<< >>> for search block
+                search_match = re.search(r'<<<\n?([\s\S]*?)>>>', part)
+                if not search_match:
+                    continue
+                    
+                search_text = search_match.group(1)
+                
+                # Find REPLACE block after search
+                after_search = part[search_match.end():]
+                replace_match = re.search(r'REPLACE:\s*<<<\n?([\s\S]*?)>>>', after_search, re.IGNORECASE)
+                
+                if replace_match:
+                    replace_text = replace_match.group(1)
+                    blocks.append((search_text, replace_text))
+                    print(f"   📦 Block: SEARCH={len(search_text)} chars, REPLACE={len(replace_text)} chars")
+            
+            return blocks
+
+        matches = parse_search_replace_blocks(cleaned_text)
+
         if matches:
-            print(f"✅ [PARSE] Found {len(matches)} blocks with <<< >>> format")
-        
+            print(f"✅ [PARSE] Found {len(matches)} blocks")
+                
         # Шаг 3: Попытка 2 - формат без <<< >>> (fallback)
         if not matches:
             print(f"⚠️ [PARSE] Standard format failed, trying fallback...")
