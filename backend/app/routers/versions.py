@@ -58,7 +58,7 @@ async def get_file_versions(
     service = VersionService(db)
     versions = service.get_versions(file_id, limit=limit)
     
-    return [service.to_dict(v) for v in versions]
+    return versions  # Already List[Dict]
 
 
 @router.get("/file/{file_id}/version/{version_number}", response_model=VersionContentResponse)
@@ -76,11 +76,7 @@ async def get_version(
     if not version:
         raise HTTPException(404, f"Version {version_number} not found")
     
-    result = service.to_dict(version)
-    result["content"] = version.content
-    result["diff_from_previous"] = version.diff_from_previous
-    
-    return result
+    return version  # Already Dict with content
 
 
 @router.get("/file/{file_id}/latest", response_model=VersionContentResponse)
@@ -97,11 +93,7 @@ async def get_latest_version(
     if not version:
         raise HTTPException(404, "No versions found for this file")
     
-    result = service.to_dict(version)
-    result["content"] = version.content
-    result["diff_from_previous"] = version.diff_from_previous
-    
-    return result
+    return version  # Already Dict with content
 
 
 @router.post("/file/{file_id}/rollback", response_model=VersionResponse)
@@ -121,7 +113,7 @@ async def rollback_file(
             to_version=request.to_version,
             user_id=current_user.id
         )
-        return service.to_dict(version)
+        return version  # Already Dict
     except ValueError as e:
         raise HTTPException(404, str(e))
 
