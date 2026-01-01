@@ -22,6 +22,7 @@ from app.providers.factory import ask_model
 from app.utils.api_key_resolver import get_openai_key
 from app.services.smart_context import build_smart_context
 from app.services.vector_service import store_message_with_embedding
+from app.services.version_service import VersionService
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
@@ -488,6 +489,30 @@ Response must start with "SEARCH:" immediately.
 
         print(f"✅ [EDIT] Generated changes: {len(matches)} replacements, {len(diff)} chars diff")
 
+        # ✅ Create version for this edit
+        try:
+            # Get file_id from file_embeddings
+            file_record = db.execute(
+                text("SELECT id FROM file_embeddings WHERE project_id = :pid AND file_path = :path"),
+                {"pid": request.project_id, "path": request.file_path}
+            ).fetchone()
+            
+            if file_record:
+                version_service = VersionService(db)
+                version_service.create_version(
+                    file_id=file_record[0],
+                    content=new_content,
+                    change_type="edit",
+                    change_source="ai_edit",
+                    change_message=request.instruction[:200],
+                    user_id=current_user.id,
+                    ai_model="gpt-4o",
+                    previous_content=request.current_content
+                )
+                print(f"📝 [VERSION] Created version for {request.file_path}")
+        except Exception as e:
+            print(f"⚠️ [VERSION] Failed to create version: {e}")
+
         # Return response
         return type('obj', (object,), {
             'response_type': 'edit',
@@ -631,7 +656,31 @@ Generate the file:"""
             suggested_path = "generated_file.txt"
         
         print(f"✅ [CREATE] Generated {suggested_path}, {len(content)} chars")
-        
+
+        # ✅ Create version for new file (will be version 1)
+        try:
+            # First check if file exists in file_embeddings
+            file_record = db.execute(
+                text("SELECT id FROM file_embeddings WHERE project_id = :pid AND file_path = :path"),
+                {"pid": request.project_id, "path": suggested_path}
+            ).fetchone()
+            
+            if file_record:
+                version_service = VersionService(db)
+                version_service.create_version(
+                    file_id=file_record[0],
+                    content=content,
+                    change_type="create",
+                    change_source="ai_create",
+                    change_message=request.instruction[:200],
+                    user_id=current_user.id,
+                    ai_model="gpt-4o",
+                    previous_content=None
+                )
+                print(f"📝 [VERSION] Created version 1 for {suggested_path}")
+        except Exception as e:
+            print(f"⚠️ [VERSION] Failed to create version: {e}")
+
         return type('obj', (object,), {
             'response_type': 'create',
             'file_path': suggested_path,

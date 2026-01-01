@@ -26,6 +26,7 @@ __all__ = [
     "Attachment",
     "User",
     "UserAPIKey",
+    "FileVersion",
 ]
 
 # ✅ Role table
@@ -336,6 +337,41 @@ class User(Base):
     def hash_password(password: str) -> str:
         """Hash password with bcrypt"""
         return bcrypt.hash(password)
+    
+# ✅ File Version (our own Git for tracking changes)
+class FileVersion(Base):
+    __tablename__ = "file_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("file_embeddings.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    
+    # Content
+    content = Column(Text, nullable=False)
+    diff_from_previous = Column(Text, nullable=True)
+    
+    # Change metadata
+    change_type = Column(String(20), nullable=False)      # 'create', 'edit', 'delete', 'rollback'
+    change_source = Column(String(20), nullable=False)    # 'user', 'ai_edit', 'ai_create', 'ai_fix'
+    change_message = Column(Text, nullable=True)
+    
+    # Who made change
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    ai_model = Column(String(50), nullable=True)
+    
+    # Link to Agentic Plan
+    plan_id = Column(String(100), nullable=True)
+    step_num = Column(Integer, nullable=True)
+    
+    # Timestamp
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_file_version_unique", "file_id", "version_number", unique=True),
+    )
+
+    def __repr__(self) -> str:
+        return f"<FileVersion file_id={self.file_id} v{self.version_number} source={self.change_source}>"
 
 
 # ✅ User API Keys (encrypted)
