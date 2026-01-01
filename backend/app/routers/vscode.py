@@ -395,7 +395,7 @@ Response must start with "SEARCH:" immediately.
         cleaned_text = re.sub(r'```python\s*', '', cleaned_text)
         cleaned_text = re.sub(r'```typescript\s*', '', cleaned_text)
         cleaned_text = re.sub(r'```\s*', '', cleaned_text)
-        cleaned_text = re.sub(r'#{1,6}\s+.*?\n', '', cleaned_text)  # Remove headers
+        
         
         print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
         
