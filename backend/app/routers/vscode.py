@@ -433,11 +433,18 @@ Response must start with "SEARCH:" immediately.
             
             print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
             print(f"   Searching for: {len(search_text)} chars")
-            
+
+            # ✅ SPECIAL CASE: Empty search = prepend to file
+            if not search_text.strip():
+                print(f"✅ [EDIT] Empty SEARCH block = prepend to file")
+                new_content = replace_text + "\n" + new_content
+                print(f"✅ [EDIT] Prepended {len(replace_text)} chars to file")
+                continue
+
             # ✅ Try normalized matching
             search_normalized = normalize_code(search_text)
             content_normalized = normalize_code(new_content)
-            
+
             # Try exact match first
             if search_text in new_content:
                 print(f"✅ [EDIT] Found exact match")
