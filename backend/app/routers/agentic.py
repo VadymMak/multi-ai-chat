@@ -559,9 +559,10 @@ async def save_dependencies(
             )
             saved += 1
         except Exception as e:
+            db.rollback()  # <-- CRITICAL: Reset transaction after error
             error_msg = f"{dep.source_file} -> {dep.target_file}: {str(e)}"
             errors.append(error_msg)
-            print(f"❌ [DEPS] {error_msg}")  # Log each error
+            print(f"❌ [DEPS] {error_msg}")
     
     db.commit()
     
