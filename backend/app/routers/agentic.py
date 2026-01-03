@@ -72,6 +72,28 @@ class ExecuteStepResponse(BaseModel):
     result: Optional[Dict] = None
     plan_completed: bool = False
 
+# ==================== DEPENDENCY MODELS ====================
+
+class FileDependencyItem(BaseModel):
+    """Single file dependency"""
+    source_file: str
+    target_file: str
+    dependency_type: str  # 'import', 'require', 'dynamic', 'from'
+    imports_what: List[str]
+
+
+class SaveDependenciesRequest(BaseModel):
+    """Request to save file dependencies"""
+    project_id: int
+    dependencies: List[FileDependencyItem]
+
+
+class SaveDependenciesResponse(BaseModel):
+    """Response from saving dependencies"""
+    success: bool
+    saved: int
+    errors: List[str] = []
+
 
 # ==================== IN-MEMORY STORAGE ====================
 # TODO: Move to database for production
@@ -488,6 +510,66 @@ async def cancel_plan(
     plan["status"] = "cancelled"
     
     return {"success": True, "plan_id": plan_id, "status": "cancelled"}
+
+
+# ==================== DEPENDENCIES ENDPOINT ====================
+
+@router.post("/save-dependencies", response_model=SaveDependenciesResponse)
+async def save_dependencies(
+    request: SaveDependenciesRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Save file dependencies to file_dependencies table.
+    Called by VS Code Extension after indexing.
+    """
+    saved = 0
+    errors = []
+    
+    print(f"\n🔗 [DEPS] Saving {len(request.dependencies)} dependencies for project {request.project_id}")
+    
+    # Clear old dependencies for this project first
+    try:
+        db.execute(
+            text("DELETE FROM file_dependencies WHERE project_id = :pid"),
+            {"pid": request.project_id}
+        )
+        db.commit()
+        print(f"🔗 [DEPS] Cleared old dependencies")
+    except Exception as e:
+        errors.append(f"Failed to clear old deps: {str(e)}")
+    
+    # Insert new dependencies
+    for dep in request.dependencies:
+        try:
+            db.execute(
+                text("""
+                    INSERT INTO file_dependencies 
+                    (project_id, source_file, target_file, dependency_type, imports_what, created_at)
+                    VALUES (:pid, :src, :tgt, :dtype, :what, NOW())
+                """),
+                {
+                    "pid": request.project_id,
+                    "src": dep.source_file,
+                    "tgt": dep.target_file,
+                    "dtype": dep.dependency_type,
+                    "what": json.dumps(dep.imports_what)
+                }
+            )
+            saved += 1
+        except Exception as e:
+            errors.append(f"{dep.source_file}: {str(e)}")
+    
+    db.commit()
+    
+    print(f"✅ [DEPS] Saved {saved} dependencies, {len(errors)} errors")
+    
+    return SaveDependenciesResponse(
+        success=len(errors) == 0,
+        saved=saved,
+        errors=errors[:10]  # Limit errors in response
+    )
 
 
 # ==================== STEP EXECUTION HELPERS ====================
