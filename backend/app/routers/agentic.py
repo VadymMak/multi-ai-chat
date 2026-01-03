@@ -559,7 +559,9 @@ async def save_dependencies(
             )
             saved += 1
         except Exception as e:
-            errors.append(f"{dep.source_file}: {str(e)}")
+            error_msg = f"{dep.source_file} -> {dep.target_file}: {str(e)}"
+            errors.append(error_msg)
+            print(f"❌ [DEPS] {error_msg}")  # Log each error
     
     db.commit()
     
