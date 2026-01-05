@@ -1,4 +1,9 @@
 // src/pages/ChatPage.tsx
+
+// This component is the main chat interface for the AI assistant application,
+// handling user input, AI responses, and various chat functionalities such as
+// file uploads, PDF exporting, and session management.
+
 import React, {
   useEffect,
   useRef,
@@ -7,9 +12,6 @@ import React, {
   lazy,
   Suspense,
 } from "react";
-
-print('test');
-
 import { v4 as uuidv4 } from "uuid";
 import { useModelStore, ModelProvider } from "../store/modelStore";
 import { useChatStore } from "../store/chatStore";

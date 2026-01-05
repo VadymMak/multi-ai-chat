@@ -632,6 +632,14 @@ RULES:
 
 Generate the file content:"""
 
+    # Smart token calculation for CREATE
+    context_tokens = len(prompt) // 4
+    min_output_tokens = 4000  # CREATE needs space for new file
+    model_limit = 16384  # gpt-4o output limit
+    smart_max_tokens = min(max(min_output_tokens, 4000), model_limit)
+    
+    print(f"📊 [CREATE] Context: ~{context_tokens} tokens, Max output: {smart_max_tokens}")
+
     ai_response = ask_model(
         messages=[
             {"role": "system", "content": "You are an expert code generator. Return only code."},
@@ -639,7 +647,7 @@ Generate the file content:"""
         ],
         model_key="gpt-4o",
         temperature=0.2,
-        max_tokens=4000,
+        max_tokens=smart_max_tokens,
         api_key=user_api_key
     )
     
@@ -815,6 +823,20 @@ RULES:
 
 Return ONLY the complete modified file content:"""
 
+    # Smart token calculation for EDIT
+    file_tokens = len(file_content) // 4
+    context_tokens = len(prompt) // 4
+    buffer_tokens = 500  # Extra space for additions
+    
+    # Output needs at least file size + buffer
+    min_output_tokens = file_tokens + buffer_tokens
+    model_limit = 16384  # gpt-4o output limit
+    
+    # Smart max_tokens: at least 4096, enough for file, but not more than model allows
+    smart_max_tokens = min(max(min_output_tokens, 4096), model_limit)
+    
+    print(f"📊 [EDIT] File: ~{file_tokens} tokens, Context: ~{context_tokens} tokens, Max output: {smart_max_tokens}")
+
     ai_response = ask_model(
         messages=[
             {"role": "system", "content": "You are an expert code editor. Return only the complete modified file."},
@@ -822,7 +844,7 @@ Return ONLY the complete modified file content:"""
         ],
         model_key="gpt-4o",
         temperature=0.2,
-        max_tokens=8000,
+        max_tokens=smart_max_tokens,
         api_key=user_api_key
     )
     
