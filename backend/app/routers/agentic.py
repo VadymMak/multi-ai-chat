@@ -670,6 +670,7 @@ async def _execute_edit_step(
     
     file_path = step.get("file_path", "")
     file_name = file_path.split('/')[-1] if file_path else ""
+    project_id = plan.get("project_id")
     
     # ✅ FIRST: Check if file was created in previous steps of this plan
     if not file_content:
@@ -688,9 +689,6 @@ async def _execute_edit_step(
     
     # ✅ SECOND: Try to get from database if still no content
     if not file_content and file_path:
-        from sqlalchemy import text
-        
-        project_id = plan.get("project_id")
         print(f"🔍 [EXECUTE] Looking for file in DB: {file_path} (project={project_id})")
         
         # Try exact match first
@@ -719,6 +717,69 @@ async def _execute_edit_step(
             detail=f"Cannot edit file: content not provided and file not found in index: {file_path}"
         )
     
+    # ============ NEW: Get file dependencies from graph ============
+    dependent_files_context = ""
+    
+    if file_path and project_id:
+        try:
+            # Strip extension for matching (api.ts -> api)
+            file_name_no_ext = file_name.replace('.ts', '').replace('.tsx', '').replace('.js', '').replace('.jsx', '').replace('.py', '')
+            
+            # 1. Files that THIS file imports (dependencies)
+            imports_result = db.execute(
+                text("""
+                    SELECT fd.target_file, fd.imports_what
+                    FROM file_dependencies fd
+                    WHERE fd.project_id = :pid AND fd.source_file = :fpath
+                    LIMIT 5
+                """),
+                {"pid": project_id, "fpath": file_path}
+            ).fetchall()
+            
+            # 2. Files that IMPORT this file (dependents)
+            importers_result = db.execute(
+                text("""
+                    SELECT fd.source_file, fd.imports_what, fe.content
+                    FROM file_dependencies fd
+                    LEFT JOIN file_embeddings fe ON fe.project_id = fd.project_id 
+                        AND fe.file_path = fd.source_file
+                    WHERE fd.project_id = :pid 
+                        AND (fd.target_file LIKE :pattern1 OR fd.target_file LIKE :pattern2)
+                    LIMIT 5
+                """),
+                {
+                    "pid": project_id, 
+                    "pattern1": f"%/{file_name_no_ext}",
+                    "pattern2": f"%{file_name_no_ext}%"
+                }
+            ).fetchall()
+            
+            # Build context string
+            if imports_result:
+                dependent_files_context += "\n\n=== THIS FILE IMPORTS ===\n"
+                for row in imports_result:
+                    target, imports_what = row
+                    dependent_files_context += f"• {target}: {imports_what}\n"
+            
+            if importers_result:
+                dependent_files_context += "\n=== FILES THAT IMPORT THIS FILE (don't break their imports!) ===\n"
+                for row in importers_result:
+                    source, imports_what, content = row
+                    dependent_files_context += f"\n--- {source} (uses: {imports_what}) ---\n"
+                    if content:
+                        # Show only first 300 chars to save tokens
+                        dependent_files_context += f"{content[:300]}...\n"
+            
+            imports_count = len(imports_result) if imports_result else 0
+            importers_count = len(importers_result) if importers_result else 0
+            
+            if imports_count > 0 or importers_count > 0:
+                print(f"🔗 [EXECUTE] Dependencies: {imports_count} imports, {importers_count} importers")
+        
+        except Exception as e:
+            print(f"⚠️ [EXECUTE] Failed to get dependencies: {e}")
+    # ============ END NEW ============
+    
     # Build context from previous steps (for AI prompt)
     previous_files = []
     for prev_step in plan["steps"]:
@@ -741,7 +802,7 @@ CURRENT FILE CONTENT:
 ```
 {file_content}
 ```
-
+{dependent_files_context}
 {"RELATED FILES (already created):" if previous_files else ""}
 {chr(10).join([f"--- {f['path']} ---{chr(10)}{f['content']}" for f in previous_files])}
 
@@ -750,6 +811,7 @@ RULES:
 2. Keep existing functionality intact
 3. Add imports if needed
 4. Follow existing code style
+5. Don't remove or rename exports that other files depend on!
 
 Return ONLY the complete modified file content:"""
 
