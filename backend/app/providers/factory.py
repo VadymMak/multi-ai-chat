@@ -162,7 +162,12 @@ def ask_model(
     provider = info["provider"]
     model = info["model"]
     temp = float(info.get("temperature", temperature))
-    out_tokens = int(info.get("max_tokens", max_tokens))
+    # Use passed max_tokens if explicitly provided (not default 4096)
+    # Otherwise fall back to registry value
+    registry_tokens = int(info.get("max_tokens", 4096))
+    out_tokens = max_tokens if max_tokens != 4096 else registry_tokens
+
+    print(f"📊 [TOKENS] Requested: {max_tokens}, Registry: {registry_tokens}, Using: {out_tokens}")
 
     norm_messages = _ensure_user_last(_normalize_messages(messages))
     sys_prompt = (system_prompt or "").strip() or None
