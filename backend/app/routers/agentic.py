@@ -799,29 +799,71 @@ async def _execute_edit_step(
                     "content": result["new_content"][:1000]
                 })
     
-    # Build prompt for edit
+    # Detect language for syntax hints
+    language = "typescript"
+    if file_path.endswith(".py"):
+        language = "python"
+    elif file_path.endswith(".js"):
+        language = "javascript"
+    elif file_path.endswith(".tsx"):
+        language = "tsx"
+    elif file_path.endswith(".jsx"):
+        language = "jsx"
+    
+    # Calculate file stats for AI awareness
+    file_lines = len(file_content.split('\n'))
+    file_chars = len(file_content)
+    
+    # Build prompt for edit - IMPROVED VERSION
     prompt = f"""You are an expert code editor. Modify this file according to the instruction.
 
 TASK: {plan["task"]}
 STEP: {step["description"]}
-FILE TO EDIT: {step["file_path"]}
+FILE TO EDIT: {step["file_path"]} ({file_lines} lines, {file_chars} chars)
 
 CURRENT FILE CONTENT:
-```
+```{language}
 {file_content}
 ```
 {dependent_files_context}
 {"RELATED FILES (already created):" if previous_files else ""}
 {chr(10).join([f"--- {f['path']} ---{chr(10)}{f['content']}" for f in previous_files])}
 
-RULES:
-1. Return the COMPLETE modified file (not just changes)
-2. Keep existing functionality intact
-3. Add imports if needed
-4. Follow existing code style
-5. Don't remove or rename exports that other files depend on!
+═══════════════════════════════════════════════════════════════
+CRITICAL RULES - YOU MUST FOLLOW ALL OF THESE:
+═══════════════════════════════════════════════════════════════
 
-Return ONLY the complete modified file content:"""
+1. RETURN THE COMPLETE FILE - every single line from start to end
+2. Do NOT truncate or skip ANY code - no "// ..." or "// rest of code"
+3. Do NOT use placeholders like "// existing code here" or "// остальной код"
+4. VERIFY all brackets match: count {{ and }} - they MUST be equal
+5. VERIFY all parentheses match: count ( and ) - they MUST be equal
+6. Keep ALL existing imports - do not remove any
+7. Keep ALL existing exports - do not remove or rename any
+8. Keep ALL existing functions/components that are not being modified
+9. Only modify what the task specifically requires
+10. Preserve the exact code style (indentation, quotes, semicolons)
+
+QUALITY CHECK before returning:
+- Is every line from the original file present (unless intentionally removed)?
+- Are all brackets/braces balanced?
+- Did I keep all imports?
+- Did I keep all exports?
+- Is the component/function complete?
+
+Return ONLY the complete modified file content (no markdown fences):"""
+
+    # System prompt - IMPROVED VERSION
+    system_prompt = """You are an expert code editor. You MUST return the COMPLETE file.
+
+ABSOLUTE REQUIREMENTS:
+1. Return the ENTIRE file - not just the changed parts
+2. NEVER truncate code or use "..." or "// rest of code"
+3. NEVER leave placeholders or incomplete code
+4. All brackets, braces, and parentheses MUST be balanced
+5. Preserve ALL existing functionality that wasn't asked to change
+
+If you cannot complete the task properly, return the ORIGINAL file unchanged rather than returning broken code."""
 
     # Smart token calculation for EDIT
     file_tokens = len(file_content) // 4
@@ -839,7 +881,7 @@ Return ONLY the complete modified file content:"""
 
     ai_response = ask_model(
         messages=[
-            {"role": "system", "content": "You are an expert code editor. Return only the complete modified file."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
         model_key="gpt-4o",
@@ -853,7 +895,18 @@ Return ONLY the complete modified file content:"""
     # Remove markdown if present
     if new_content.startswith("```"):
         lines = new_content.split("\n")
-        new_content = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        # Find closing ``` and remove both markers
+        if lines[-1].strip() == "```":
+            new_content = "\n".join(lines[1:-1])
+        else:
+            # Maybe no closing, just remove first line
+            new_content = "\n".join(lines[1:])
+    
+    # Basic validation warning (will be expanded in Step 1.7.2)
+    original_lines = len(file_content.split('\n'))
+    new_lines = len(new_content.split('\n'))
+    if new_lines < original_lines * 0.5:
+        print(f"⚠️ [EDIT] WARNING: Output significantly shorter! Original: {original_lines} lines, New: {new_lines} lines")
     
     return {
         "action": "edit",
