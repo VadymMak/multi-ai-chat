@@ -1112,16 +1112,19 @@ async def copy_context_for_ai(
         if request.imports:
             parts.append("\n## 📦 Dependencies (from imports)\n")
             
-            for imp in request.imports[:request.max_files]:
-                # Determine import type
+            # ✅ FILTER FIRST, then limit
+            internal_imports = []
+            for imp in request.imports:
                 is_relative_js = imp.startswith('.') or imp.startswith('@/')
-                is_internal_python = imp.startswith('app.')  # ← ADD THIS
+                is_internal_python = imp.startswith('app.')
                 
-                # Skip external packages
-                if not is_relative_js and not is_internal_python:
-                    print(f"⏭️ [CopyContext] Skipping external: {imp}")
-                    continue
-                
+                if is_relative_js or is_internal_python:
+                    internal_imports.append(imp)
+            
+            print(f"🔍 [CopyContext] Internal imports: {internal_imports}")
+            
+            # Now process only internal imports
+            for imp in internal_imports[:request.max_files]:
                 print(f"🔍 [CopyContext] Resolving: {imp}")
                 
                 # Try to find file in database
