@@ -1076,6 +1076,11 @@ async def copy_context_for_ai(
     """
     
     print(f"\n📋 [CopyContext] file={request.file_path}, imports={len(request.imports)}")
+    print(f"\n📋 [CopyContext] ========== START ==========")
+    print(f"📋 [CopyContext] project_id={request.project_id}")
+    print(f"📋 [CopyContext] file_path={request.file_path}")
+    print(f"📋 [CopyContext] imports count={len(request.imports)}")
+    print(f"📋 [CopyContext] imports={request.imports[:5]}...") 
     
     try:
         from app.services.file_indexer import FileIndexer
@@ -1273,70 +1278,59 @@ async def _resolve_import(
 ) -> Optional[Dict[str, Any]]:
     """
     Resolve import path to actual file in database.
-    
-    Examples:
-    - './utils' -> src/utils.ts or src/utils/index.ts
-    - '../types' -> types.ts or types/index.ts
-    - '@/components/Button' -> src/components/Button.tsx
     """
     
-    import os
+    # Extract just the filename (without extension)
+    # "../store/modelStore" -> "modelStore"
+    filename = import_path.split('/')[-1]
     
-    # Get directory of current file
-    current_dir = '/'.join(current_file.replace('\\', '/').split('/')[:-1])
+    print(f"🔍 [ResolveImport] Looking for: {filename} in project {project_id}")
     
-    # Resolve relative path
-    if import_path.startswith('./'):
-        resolved_base = current_dir + '/' + import_path[2:]
-    elif import_path.startswith('../'):
-        # Go up one directory
-        parts = current_dir.split('/')
-        if parts:
-            parts.pop()
-        resolved_base = '/'.join(parts) + '/' + import_path[3:]
-    elif import_path.startswith('@/'):
-        # Alias for src/
-        resolved_base = 'src/' + import_path[2:]
-    else:
-        resolved_base = import_path
+    # Search by filename pattern in file_path (more reliable)
+    search_patterns = [
+        f"%/{filename}.ts",
+        f"%/{filename}.tsx",
+        f"%/{filename}.js",
+        f"%/{filename}.jsx",
+        f"%/{filename}/index.ts",
+        f"%/{filename}/index.tsx",
+    ]
     
-    # Clean up path
-    resolved_base = resolved_base.replace('//', '/')
-    
-    # Try different extensions
-    extensions = ['.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.tsx', '/index.js', '.py']
-    
-    for ext in extensions:
-        try_path = resolved_base + ext
-        
+    for pattern in search_patterns:
         result = db.execute(text("""
-            SELECT file_path, content, language FROM file_embeddings
-            WHERE project_id = :pid AND file_path LIKE :pattern
+            SELECT file_path, content, language 
+            FROM file_embeddings
+            WHERE project_id = :pid 
+            AND file_path LIKE :pattern
             LIMIT 1
-        """), {"pid": project_id, "pattern": f"%{try_path.split('/')[-1]}%"}).fetchone()
+        """), {"pid": project_id, "pattern": pattern}).fetchone()
         
         if result:
+            print(f"✅ [ResolveImport] Found: {result[0]}")
             return {
                 "file_path": result[0],
                 "content": result[1],
                 "language": result[2]
             }
     
-    # Fallback: search by filename
-    filename = import_path.split('/')[-1]
+    # Fallback: search by file_name column
     result = db.execute(text("""
-        SELECT file_path, content, language FROM file_embeddings
-        WHERE project_id = :pid AND file_name LIKE :pattern
+        SELECT file_path, content, language 
+        FROM file_embeddings
+        WHERE project_id = :pid 
+        AND file_name LIKE :pattern
         LIMIT 1
-    """), {"pid": project_id, "pattern": f"%{filename}%"}).fetchone()
+    """), {"pid": project_id, "pattern": f"{filename}.%"}).fetchone()
     
     if result:
+        print(f"✅ [ResolveImport] Found via file_name: {result[0]}")
         return {
             "file_path": result[0],
             "content": result[1],
             "language": result[2]
         }
     
+    print(f"❌ [ResolveImport] Not found: {filename}")
     return None
 
 
