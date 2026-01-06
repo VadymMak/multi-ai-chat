@@ -1034,3 +1034,333 @@ async def vscode_chat(
     except Exception as e:
         print(f"❌ [VSCode] Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+    # ============================================================
+# COPY CONTEXT FOR AI CHAT
+# ============================================================
+
+class CopyContextRequest(BaseModel):
+    project_id: int
+    file_path: str
+    file_content: str
+    imports: List[str] = []  # Parsed imports from extension
+    max_files: int = 5
+    max_tokens: int = 4000
+    include_metadata: bool = True
+
+
+class CopyContextResponse(BaseModel):
+    success: bool
+    context_markdown: str
+    files_included: int
+    estimated_tokens: int
+    dependencies: List[Dict[str, Any]] = []
+
+
+@router.post("/copy-context", response_model=CopyContextResponse)
+async def copy_context_for_ai(
+    request: CopyContextRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Build context for external AI chat (Claude, ChatGPT, etc.)
+    
+    Returns formatted markdown with:
+    1. Current file content
+    2. Dependencies (resolved from imports)
+    3. Related files (semantic search)
+    4. Project metadata
+    
+    User copies this to clipboard and pastes into AI chat.
+    """
+    
+    print(f"\n📋 [CopyContext] file={request.file_path}, imports={len(request.imports)}")
+    
+    try:
+        from app.services.file_indexer import FileIndexer
+        
+        indexer = FileIndexer(db)
+        
+        parts = []
+        files_included = 0
+        total_chars = 0
+        max_chars = request.max_tokens * 4  # ~4 chars per token
+        dependencies_found = []
+        
+        # ========== 1. CURRENT FILE ==========
+        file_name = request.file_path.split('/')[-1].split('\\')[-1]
+        language = _detect_language(request.file_path)
+        
+        current_file_section = f"""## 📄 Current File: `{request.file_path}`
+```{language}
+{request.file_content}
+```
+"""
+        parts.append(current_file_section)
+        total_chars += len(request.file_content)
+        files_included += 1
+        
+        print(f"✅ [CopyContext] Added current file: {len(request.file_content)} chars")
+        
+        # ========== 2. RESOLVE IMPORTS ==========
+        if request.imports:
+            parts.append("\n## 📦 Dependencies (from imports)\n")
+            
+            for imp in request.imports[:request.max_files]:
+                # Skip node_modules / external packages
+                if not imp.startswith('.') and not imp.startswith('@/'):
+                    continue
+                
+                # Try to find file in database
+                resolved = await _resolve_import(
+                    db=db,
+                    project_id=request.project_id,
+                    current_file=request.file_path,
+                    import_path=imp
+                )
+                
+                if resolved and total_chars < max_chars:
+                    dep_content = resolved.get('content', '')
+                    dep_path = resolved.get('file_path', imp)
+                    dep_lang = resolved.get('language', 'typescript')
+                    
+                    # Truncate if needed
+                    remaining = max_chars - total_chars
+                    if len(dep_content) > remaining:
+                        dep_content = dep_content[:remaining] + "\n// ... (truncated)"
+                    
+                    parts.append(f"""
+### `{dep_path}`
+```{dep_lang}
+{dep_content}
+```
+""")
+                    total_chars += len(dep_content)
+                    files_included += 1
+                    dependencies_found.append({
+                        "file_path": dep_path,
+                        "language": dep_lang,
+                        "chars": len(dep_content),
+                        "source": "import"
+                    })
+                    
+                    print(f"✅ [CopyContext] Added dependency: {dep_path} ({len(dep_content)} chars)")
+        
+        # ========== 3. SEMANTIC SEARCH FOR RELATED FILES ==========
+        if total_chars < max_chars and request.max_files > files_included:
+            # Search for related files using filename/content
+            search_query = file_name.replace('.tsx', '').replace('.ts', '').replace('.py', '')
+            
+            try:
+                related_files = await indexer.search_files(
+                    project_id=request.project_id,
+                    query=search_query,
+                    limit=request.max_files - files_included + 2
+                )
+                
+                if related_files:
+                    parts.append("\n## 🔗 Related Files (semantic search)\n")
+                    
+                    for rf in related_files:
+                        rf_path = rf.get('file_path', '')
+                        
+                        # Skip current file and already included
+                        if rf_path == request.file_path:
+                            continue
+                        if any(d['file_path'] == rf_path for d in dependencies_found):
+                            continue
+                        
+                        if total_chars >= max_chars:
+                            break
+                        if files_included >= request.max_files:
+                            break
+                        
+                        # Get content from DB
+                        content_result = db.execute(text("""
+                            SELECT content, language FROM file_embeddings
+                            WHERE project_id = :pid AND file_path = :path
+                        """), {"pid": request.project_id, "path": rf_path}).fetchone()
+                        
+                        if content_result:
+                            rf_content = content_result[0]
+                            rf_lang = content_result[1] or 'typescript'
+                            similarity = rf.get('similarity', 0)
+                            
+                            # Truncate if needed
+                            remaining = max_chars - total_chars
+                            if len(rf_content) > remaining:
+                                rf_content = rf_content[:remaining] + "\n// ... (truncated)"
+                            
+                            parts.append(f"""
+### `{rf_path}` ({similarity:.0%} match)
+```{rf_lang}
+{rf_content}
+```
+""")
+                            total_chars += len(rf_content)
+                            files_included += 1
+                            dependencies_found.append({
+                                "file_path": rf_path,
+                                "language": rf_lang,
+                                "chars": len(rf_content),
+                                "similarity": similarity,
+                                "source": "semantic"
+                            })
+                            
+                            print(f"✅ [CopyContext] Added related: {rf_path} ({similarity:.0%})")
+                            
+            except Exception as e:
+                print(f"⚠️ [CopyContext] Semantic search failed: {e}")
+        
+        # ========== 4. METADATA SECTION ==========
+        if request.include_metadata:
+            # Get project info
+            project = db.get(Project, request.project_id)
+            project_name = project.name if project else "Unknown"
+            
+            metadata_section = f"""
+---
+
+## 📊 Context Metadata
+
+| Property | Value |
+|----------|-------|
+| Project | {project_name} |
+| Current File | `{request.file_path}` |
+| Files Included | {files_included} |
+| Total Characters | {total_chars:,} |
+| Estimated Tokens | ~{total_chars // 4:,} |
+
+*Generated by Smart Cline - Copy Context for AI*
+"""
+            parts.append(metadata_section)
+        
+        # ========== BUILD FINAL MARKDOWN ==========
+        header = f"""# 🧠 Code Context for AI
+
+> Use this context to help AI understand your code.
+> Current file: `{request.file_path}`
+
+---
+"""
+        
+        final_markdown = header + "\n".join(parts)
+        estimated_tokens = len(final_markdown) // 4
+        
+        print(f"✅ [CopyContext] Complete: {files_included} files, ~{estimated_tokens} tokens")
+        
+        return CopyContextResponse(
+            success=True,
+            context_markdown=final_markdown,
+            files_included=files_included,
+            estimated_tokens=estimated_tokens,
+            dependencies=dependencies_found
+        )
+        
+    except Exception as e:
+        print(f"❌ [CopyContext] Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _resolve_import(
+    db: Session,
+    project_id: int,
+    current_file: str,
+    import_path: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve import path to actual file in database.
+    
+    Examples:
+    - './utils' -> src/utils.ts or src/utils/index.ts
+    - '../types' -> types.ts or types/index.ts
+    - '@/components/Button' -> src/components/Button.tsx
+    """
+    
+    import os
+    
+    # Get directory of current file
+    current_dir = '/'.join(current_file.replace('\\', '/').split('/')[:-1])
+    
+    # Resolve relative path
+    if import_path.startswith('./'):
+        resolved_base = current_dir + '/' + import_path[2:]
+    elif import_path.startswith('../'):
+        # Go up one directory
+        parts = current_dir.split('/')
+        if parts:
+            parts.pop()
+        resolved_base = '/'.join(parts) + '/' + import_path[3:]
+    elif import_path.startswith('@/'):
+        # Alias for src/
+        resolved_base = 'src/' + import_path[2:]
+    else:
+        resolved_base = import_path
+    
+    # Clean up path
+    resolved_base = resolved_base.replace('//', '/')
+    
+    # Try different extensions
+    extensions = ['.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.tsx', '/index.js', '.py']
+    
+    for ext in extensions:
+        try_path = resolved_base + ext
+        
+        result = db.execute(text("""
+            SELECT file_path, content, language FROM file_embeddings
+            WHERE project_id = :pid AND file_path LIKE :pattern
+            LIMIT 1
+        """), {"pid": project_id, "pattern": f"%{try_path.split('/')[-1]}%"}).fetchone()
+        
+        if result:
+            return {
+                "file_path": result[0],
+                "content": result[1],
+                "language": result[2]
+            }
+    
+    # Fallback: search by filename
+    filename = import_path.split('/')[-1]
+    result = db.execute(text("""
+        SELECT file_path, content, language FROM file_embeddings
+        WHERE project_id = :pid AND file_name LIKE :pattern
+        LIMIT 1
+    """), {"pid": project_id, "pattern": f"%{filename}%"}).fetchone()
+    
+    if result:
+        return {
+            "file_path": result[0],
+            "content": result[1],
+            "language": result[2]
+        }
+    
+    return None
+
+
+def _detect_language(file_path: str) -> str:
+    """Detect language from file extension"""
+    ext_map = {
+        '.ts': 'typescript',
+        '.tsx': 'typescript',
+        '.js': 'javascript',
+        '.jsx': 'javascript',
+        '.py': 'python',
+        '.css': 'css',
+        '.scss': 'scss',
+        '.html': 'html',
+        '.json': 'json',
+        '.md': 'markdown',
+        '.sql': 'sql',
+        '.sh': 'bash',
+        '.yaml': 'yaml',
+        '.yml': 'yaml',
+    }
+    
+    for ext, lang in ext_map.items():
+        if file_path.endswith(ext):
+            return lang
+    
+    return 'text'

@@ -331,7 +331,7 @@ const ChatPage: React.FC = () => {
               file,
               roleId,
               projectId,
-              sid,
+              sid!,
               provider
             );
 
@@ -344,7 +344,6 @@ const ChatPage: React.FC = () => {
 ${result.preview ? `Content: ${result.preview}` : ""}
 ${result.summary ? `Summary: ${result.summary}` : "No content extracted"}
             `.trim();
-
               fileContexts.push(fileContext);
             }
           } catch (err) {
