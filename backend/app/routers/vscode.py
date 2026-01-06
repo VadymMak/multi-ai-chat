@@ -1069,7 +1069,7 @@ async def copy_context_for_ai(
     Returns formatted markdown with:
     1. Current file content
     2. Dependencies (resolved from imports)
-    3. Related files (semantic search)
+    3. Related files (semantic search) - DISABLED BY DEFAULT
     4. Project metadata
     
     User copies this to clipboard and pastes into AI chat.
@@ -1080,6 +1080,7 @@ async def copy_context_for_ai(
     print(f"📋 [CopyContext] file_path={request.file_path}")
     print(f"📋 [CopyContext] imports count={len(request.imports)}")
     print(f"📋 [CopyContext] max_tokens={request.max_tokens}, max_files={request.max_files}")
+    print(f"📋 [CopyContext] include_semantic={getattr(request, 'include_semantic', False)}")
     print(f"📋 [CopyContext] all imports={request.imports}") 
     
     try:
@@ -1184,85 +1185,93 @@ async def copy_context_for_ai(
                         print(f"⚠️ [CopyContext] SKIPPED {imp}: Char limit reached ({total_chars} >= {max_chars})")
         
         # ========== 3. SEMANTIC SEARCH FOR RELATED FILES ==========
-        print(f"\n🔗 [CopyContext] Semantic search section")
-        print(f"🔗 [CopyContext] total_chars={total_chars}, max_chars={max_chars}")
-        print(f"🔗 [CopyContext] files_included={files_included}, max_files={request.max_files}")
+        # ⚠️ DISABLED BY DEFAULT - adds noise, not useful for copy-context
+        # Enable with include_semantic=True if needed
+        include_semantic = getattr(request, 'include_semantic', False)
         
-        if total_chars < max_chars and request.max_files > files_included:
-            # Search for related files using filename/content
-            search_query = file_name.replace('.tsx', '').replace('.ts', '').replace('.py', '')
-            print(f"🔗 [CopyContext] Search query: {search_query}")
+        if include_semantic:
+            print(f"\n🔗 [CopyContext] Semantic search ENABLED")
+            print(f"🔗 [CopyContext] total_chars={total_chars}, max_chars={max_chars}")
+            print(f"🔗 [CopyContext] files_included={files_included}, max_files={request.max_files}")
             
-            try:
-                related_files = await indexer.search_files(
-                    project_id=request.project_id,
-                    query=search_query,
-                    limit=request.max_files - files_included + 2
-                )
+            if total_chars < max_chars and request.max_files > files_included:
+                # Search for related files using filename/content
+                search_query = file_name.replace('.tsx', '').replace('.ts', '').replace('.py', '')
+                print(f"🔗 [CopyContext] Search query: {search_query}")
                 
-                print(f"🔗 [CopyContext] Found {len(related_files) if related_files else 0} related files")
-                
-                if related_files:
-                    parts.append("\n## 🔗 Related Files (semantic search)\n")
+                try:
+                    related_files = await indexer.search_files(
+                        project_id=request.project_id,
+                        query=search_query,
+                        limit=request.max_files - files_included + 2
+                    )
                     
-                    for rf in related_files:
-                        rf_path = rf.get('file_path', '')
+                    print(f"🔗 [CopyContext] Found {len(related_files) if related_files else 0} related files")
+                    
+                    if related_files:
+                        parts.append("\n## 🔗 Related Files (semantic search)\n")
                         
-                        # Skip current file and already included
-                        if rf_path == request.file_path:
-                            print(f"⏭️ [CopyContext] Skip (current file): {rf_path}")
-                            continue
-                        if any(d['file_path'] == rf_path for d in dependencies_found):
-                            print(f"⏭️ [CopyContext] Skip (already included): {rf_path}")
-                            continue
-                        
-                        if total_chars >= max_chars:
-                            print(f"⏭️ [CopyContext] Stop: char limit reached")
-                            break
-                        if files_included >= request.max_files:
-                            print(f"⏭️ [CopyContext] Stop: file limit reached")
-                            break
-                        
-                        # Get content from DB
-                        content_result = db.execute(text("""
-                            SELECT content, language FROM file_embeddings
-                            WHERE project_id = :pid AND file_path = :path
-                        """), {"pid": request.project_id, "path": rf_path}).fetchone()
-                        
-                        if content_result:
-                            rf_content = content_result[0]
-                            rf_lang = content_result[1] or 'typescript'
-                            similarity = rf.get('similarity', 0)
+                        for rf in related_files:
+                            rf_path = rf.get('file_path', '')
                             
-                            # Truncate if needed
-                            remaining = max_chars - total_chars
-                            if len(rf_content) > remaining:
-                                rf_content = rf_content[:remaining] + "\n// ... (truncated)"
+                            # Skip current file and already included
+                            if rf_path == request.file_path:
+                                print(f"⏭️ [CopyContext] Skip (current file): {rf_path}")
+                                continue
+                            if any(d['file_path'] == rf_path for d in dependencies_found):
+                                print(f"⏭️ [CopyContext] Skip (already included): {rf_path}")
+                                continue
                             
-                            parts.append(f"""
+                            if total_chars >= max_chars:
+                                print(f"⏭️ [CopyContext] Stop: char limit reached")
+                                break
+                            if files_included >= request.max_files:
+                                print(f"⏭️ [CopyContext] Stop: file limit reached")
+                                break
+                            
+                            # Get content from DB
+                            content_result = db.execute(text("""
+                                SELECT content, language FROM file_embeddings
+                                WHERE project_id = :pid AND file_path = :path
+                            """), {"pid": request.project_id, "path": rf_path}).fetchone()
+                            
+                            if content_result:
+                                rf_content = content_result[0]
+                                rf_lang = content_result[1] or 'typescript'
+                                similarity = rf.get('similarity', 0)
+                                
+                                # Truncate if needed
+                                remaining = max_chars - total_chars
+                                if len(rf_content) > remaining:
+                                    rf_content = rf_content[:remaining] + "\n// ... (truncated)"
+                                
+                                parts.append(f"""
 ### `{rf_path}` ({similarity:.0%} match)
 ```{rf_lang}
 {rf_content}
 ```
 """)
-                            total_chars += len(rf_content)
-                            files_included += 1
-                            dependencies_found.append({
-                                "file_path": rf_path,
-                                "language": rf_lang,
-                                "chars": len(rf_content),
-                                "similarity": similarity,
-                                "source": "semantic"
-                            })
-                            
-                            print(f"✅ [CopyContext] Added related: {rf_path} ({similarity:.0%})")
-                            
-            except Exception as e:
-                print(f"⚠️ [CopyContext] Semantic search failed: {e}")
-                import traceback
-                traceback.print_exc()
+                                total_chars += len(rf_content)
+                                files_included += 1
+                                dependencies_found.append({
+                                    "file_path": rf_path,
+                                    "language": rf_lang,
+                                    "chars": len(rf_content),
+                                    "similarity": similarity,
+                                    "source": "semantic"
+                                })
+                                
+                                print(f"✅ [CopyContext] Added related: {rf_path} ({similarity:.0%})")
+                                
+                except Exception as e:
+                    print(f"⚠️ [CopyContext] Semantic search failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"⏭️ [CopyContext] Skipping semantic search: chars={total_chars >= max_chars}, files={files_included >= request.max_files}")
         else:
-            print(f"⏭️ [CopyContext] Skipping semantic search: chars={total_chars >= max_chars}, files={files_included >= request.max_files}")
+            print(f"\n🔗 [CopyContext] Semantic search DISABLED (default)")
+            print(f"🔗 [CopyContext] To enable, add include_semantic=True to request")
         
         # ========== 4. METADATA SECTION ==========
         if request.include_metadata:
