@@ -7,11 +7,13 @@ This service:
 2. Generates embeddings using OpenAI text-embedding-3-small
 3. Stores in file_embeddings table
 4. Provides semantic search across codebase
+5. NEW: Saves file dependencies to file_dependencies table
 
 Use cases:
 - "Find files related to authentication" → returns auth files
 - "Where is error handling implemented?" → returns error handler files
 - Debug assistance with full codebase context
+- Smart Context: find dependencies for a file
 """
 
 import hashlib
@@ -101,6 +103,20 @@ MAX_FILE_SIZE = 100_000  # 100KB
 
 # Max files per project
 MAX_FILES_PER_PROJECT = 500
+
+# External packages to skip when resolving imports
+PYTHON_EXTERNAL_PACKAGES = {
+    # Stdlib
+    "os", "sys", "re", "json", "datetime", "typing", "logging", "hashlib",
+    "pathlib", "collections", "functools", "itertools", "asyncio", "time",
+    "uuid", "base64", "copy", "math", "random", "io", "contextlib", "enum",
+    "dataclasses", "abc", "traceback", "inspect", "importlib", "warnings",
+    # Common packages
+    "fastapi", "sqlalchemy", "pydantic", "httpx", "requests", "numpy",
+    "pandas", "pytest", "openai", "anthropic", "tiktoken", "redis",
+    "celery", "boto3", "passlib", "jwt", "dotenv", "uvicorn", "starlette",
+    "pgvector", "alembic", "aiohttp", "aiofiles", "cryptography", "bcrypt",
+}
 
 
 # ====================================================================
@@ -238,6 +254,224 @@ def extract_metadata(content: str, language: str) -> Dict[str, Any]:
         logger.warning(f"Failed to extract metadata: {e}")
     
     return metadata
+
+
+# ====================================================================
+# NEW: IMPORT RESOLUTION FUNCTIONS (Phase 2)
+# ====================================================================
+
+def resolve_python_import(
+    import_module: str,
+    source_file: str,
+    project_id: int,
+    db: Session
+) -> Optional[str]:
+    """
+    Resolve Python import to actual file path in database.
+    
+    Examples:
+    - "app.services.vector_service" → "backend/app/services/vector_service.py"
+    - "app.memory.models" → "backend/app/memory/models.py"
+    - "os" → None (stdlib)
+    - "fastapi" → None (external package)
+    """
+    # Get first part of import
+    first_part = import_module.split(".")[0]
+    if first_part in PYTHON_EXTERNAL_PACKAGES:
+        return None
+    
+    # Convert module path to possible file paths
+    module_path = import_module.replace(".", "/")
+    possible_paths = [
+        f"{module_path}.py",
+        f"backend/{module_path}.py",
+        f"src/{module_path}.py",
+        f"{module_path}/__init__.py",
+        f"backend/{module_path}/__init__.py",
+    ]
+    
+    # Search in database
+    for path_pattern in possible_paths:
+        result = db.execute(text("""
+            SELECT file_path FROM file_embeddings
+            WHERE project_id = :project_id 
+              AND (file_path = :path OR file_path LIKE :like_path)
+            LIMIT 1
+        """), {
+            "project_id": project_id,
+            "path": path_pattern,
+            "like_path": f"%/{path_pattern}"
+        }).fetchone()
+        
+        if result:
+            return result[0]
+    
+    return None
+
+
+def resolve_typescript_import(
+    import_path: str,
+    source_file: str,
+    project_id: int,
+    db: Session
+) -> Optional[str]:
+    """
+    Resolve TypeScript/JavaScript import to actual file path.
+    
+    Examples:
+    - "./utils" → "src/utils.ts"
+    - "../services/apiService" → "src/services/apiService.ts"
+    - "@/components/Button" → "src/components/Button.tsx"
+    - "react" → None (external)
+    """
+    # Skip node_modules / external packages
+    if not import_path.startswith(".") and not import_path.startswith("@/"):
+        return None
+    
+    # Handle @/ alias (typically maps to src/)
+    if import_path.startswith("@/"):
+        import_path = "./" + import_path[2:]
+        source_file = "src/index.ts"
+    
+    # Get directory of source file
+    source_dir = "/".join(source_file.replace("\\", "/").split("/")[:-1])
+    
+    # Resolve relative path
+    parts = import_path.split("/")
+    resolved_parts = source_dir.split("/") if source_dir else []
+    
+    for part in parts:
+        if part == ".":
+            continue
+        elif part == "..":
+            if resolved_parts:
+                resolved_parts.pop()
+        else:
+            resolved_parts.append(part)
+    
+    base_path = "/".join(resolved_parts)
+    
+    # Try different extensions
+    extensions = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"]
+    
+    for ext in extensions:
+        test_path = base_path + ext
+        
+        result = db.execute(text("""
+            SELECT file_path FROM file_embeddings
+            WHERE project_id = :project_id 
+              AND (file_path = :path OR file_path LIKE :like_path)
+            LIMIT 1
+        """), {
+            "project_id": project_id,
+            "path": test_path,
+            "like_path": f"%/{test_path}"
+        }).fetchone()
+        
+        if result:
+            return result[0]
+    
+    return None
+
+
+def resolve_import_path(
+    import_module: str,
+    source_file: str,
+    language: str,
+    project_id: int,
+    db: Session
+) -> Optional[str]:
+    """
+    Universal import resolver - dispatches to language-specific resolver.
+    """
+    if language == "python":
+        return resolve_python_import(import_module, source_file, project_id, db)
+    elif language in ["typescript", "javascript"]:
+        return resolve_typescript_import(import_module, source_file, project_id, db)
+    else:
+        return None
+
+
+def save_file_dependencies(
+    project_id: int,
+    source_file: str,
+    imports: List[str],
+    language: str,
+    db: Session
+) -> int:
+    """
+    Save resolved dependencies to file_dependencies table.
+    
+    Args:
+        project_id: Project ID
+        source_file: Path of the file that has imports
+        imports: List of import strings from extract_metadata()
+        language: Language of the source file
+        db: Database session
+        
+    Returns:
+        Number of dependencies saved
+    """
+    if not imports:
+        return 0
+    
+    saved_count = 0
+    
+    # First, delete old dependencies for this file
+    db.execute(text("""
+        DELETE FROM file_dependencies 
+        WHERE project_id = :project_id AND source_file = :source_file
+    """), {"project_id": project_id, "source_file": source_file})
+    
+    for import_module in imports:
+        # Try to resolve to actual file
+        target_file = resolve_import_path(
+            import_module=import_module,
+            source_file=source_file,
+            language=language,
+            project_id=project_id,
+            db=db
+        )
+        
+        # Skip if couldn't resolve (external package)
+        if not target_file:
+            # Only save unresolved relative imports
+            if import_module.startswith(".") or import_module.startswith("@/"):
+                target_file = import_module
+                dep_type = "import_unresolved"
+            else:
+                continue  # Skip external packages
+        else:
+            dep_type = "import"
+        
+        # Skip self-references
+        if target_file == source_file:
+            continue
+        
+        # Insert dependency
+        try:
+            db.execute(text("""
+                INSERT INTO file_dependencies 
+                (project_id, source_file, target_file, dependency_type, imports_what, created_at)
+                VALUES (:project_id, :source_file, :target_file, :dep_type, :imports_what, :now)
+                ON CONFLICT (project_id, source_file, target_file) 
+                DO UPDATE SET 
+                    dependency_type = EXCLUDED.dependency_type,
+                    imports_what = EXCLUDED.imports_what,
+                    created_at = EXCLUDED.created_at
+            """), {
+                "project_id": project_id,
+                "source_file": source_file,
+                "target_file": target_file,
+                "dep_type": dep_type,
+                "imports_what": json.dumps([import_module]),
+                "now": datetime.now(timezone.utc)
+            })
+            saved_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to save dependency {source_file} → {target_file}: {e}")
+    
+    return saved_count
 
 
 # ====================================================================
@@ -422,6 +656,7 @@ class FileIndexer:
             "indexed": 0,
             "skipped": 0,
             "errors": 0,
+            "dependencies_saved": 0,  # NEW
             "errors_list": []
         }
         
@@ -429,7 +664,7 @@ class FileIndexer:
             file_path = file_info["path"]
             
             try:
-                indexed = await self._index_file(
+                indexed, deps_count = await self._index_file(
                     project_id=project_id,
                     owner=owner,
                     repo=repo,
@@ -441,7 +676,8 @@ class FileIndexer:
                 
                 if indexed:
                     stats["indexed"] += 1
-                    logger.info(f"  ✅ [{i}/{len(files_to_index)}] {file_path}")
+                    stats["dependencies_saved"] += deps_count  # NEW
+                    logger.info(f"  ✅ [{i}/{len(files_to_index)}] {file_path} ({deps_count} deps)")
                 else:
                     stats["skipped"] += 1
                     logger.debug(f"  ⏭️ [{i}/{len(files_to_index)}] {file_path} (unchanged)")
@@ -465,6 +701,7 @@ class FileIndexer:
    Indexed: {stats['indexed']}
    Skipped: {stats['skipped']} (unchanged)
    Errors: {stats['errors']}
+   Dependencies saved: {stats['dependencies_saved']}  ← NEW!
 """)
         
         return stats
@@ -478,11 +715,11 @@ class FileIndexer:
         file_path: str,
         file_sha: Optional[str],
         force_reindex: bool = False
-    ) -> bool:
+    ) -> Tuple[bool, int]:
         """
         Index a single file.
         
-        Returns True if file was indexed, False if skipped.
+        Returns: (indexed: bool, dependencies_count: int)
         """
         # Check if file already indexed and unchanged
         if not force_reindex and file_sha:
@@ -492,7 +729,7 @@ class FileIndexer:
             """), {"project_id": project_id, "file_path": file_path}).fetchone()
             
             if existing and existing[0] == file_sha:
-                return False  # File unchanged
+                return False, 0  # File unchanged
         
         # Get file content
         content = await self.github.get_raw_file(owner, repo, file_path, branch)
@@ -507,7 +744,6 @@ class FileIndexer:
         metadata = extract_metadata(content, language) if language else {}
         
         # Generate embedding
-        # For code files, include file path and metadata in embedding text
         embedding_text = f"""
 File: {file_path}
 Language: {language}
@@ -520,13 +756,14 @@ Imports: {', '.join(metadata.get('imports', []))}
         
         embedding = vector_service.create_embedding(embedding_text)
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        
         # Get file name from path
         file_name = file_path.split("/")[-1]
         
         # Count lines
         line_count = content.count("\n") + 1
         
-        # Upsert into database - use f-string for vector cast
+        # Upsert into database
         self.db.execute(text(f"""
             INSERT INTO file_embeddings 
             (project_id, file_path, file_name, language, content, content_hash,
@@ -556,9 +793,24 @@ Imports: {', '.join(metadata.get('imports', []))}
             "metadata": json.dumps(metadata),
             "now": datetime.now(timezone.utc)
         })
+        
+        # ============================================================
+        # NEW: SAVE FILE DEPENDENCIES (Phase 2)
+        # ============================================================
+        deps_count = 0
+        if language and metadata.get("imports"):
+            deps_count = save_file_dependencies(
+                project_id=project_id,
+                source_file=file_path,
+                imports=metadata["imports"],
+                language=language,
+                db=self.db
+            )
+        # ============================================================
+        
         self.db.commit()
         
-        return True
+        return True, deps_count
     
     async def search_by_filename(self, project_id: int, query: str, limit: int = 5, db: Session = None) -> List[Dict]:
         """Search by filename using SQL LIKE"""
@@ -657,7 +909,6 @@ Imports: {', '.join(metadata.get('imports', []))}
             return []
         
         try:
-            # FIXED: Use vector_service module, not self.vector_service
             query_embedding = vector_service.create_embedding(query)
             
             sql = text("""
@@ -726,6 +977,103 @@ Imports: {', '.join(metadata.get('imports', []))}
             traceback.print_exc()
             return await self.search_semantic(project_id, query, limit, db)
     
+    # ====================================================================
+    # NEW: DEPENDENCY QUERY METHODS (Phase 2)
+    # ====================================================================
+    
+    async def get_file_dependencies(
+        self,
+        project_id: int,
+        file_path: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all files that this file imports (outgoing dependencies).
+        
+        Args:
+            project_id: Project ID
+            file_path: Path of the file to get dependencies for
+            
+        Returns:
+            List of dependency info dicts
+        """
+        result = self.db.execute(text("""
+            SELECT fd.target_file, fd.dependency_type, fd.imports_what,
+                   fe.language, fe.line_count
+            FROM file_dependencies fd
+            LEFT JOIN file_embeddings fe 
+                ON fe.project_id = fd.project_id AND fe.file_path = fd.target_file
+            WHERE fd.project_id = :project_id AND fd.source_file = :file_path
+            ORDER BY fd.target_file
+        """), {"project_id": project_id, "file_path": file_path}).fetchall()
+        
+        return [
+            {
+                "file_path": row[0],
+                "dependency_type": row[1],
+                "imports_what": json.loads(row[2]) if row[2] else [],
+                "language": row[3],
+                "line_count": row[4],
+            }
+            for row in result
+        ]
+    
+    async def get_file_dependents(
+        self,
+        project_id: int,
+        file_path: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all files that import this file (incoming dependencies).
+        
+        Args:
+            project_id: Project ID
+            file_path: Path of the file to find dependents for
+            
+        Returns:
+            List of dependent file info dicts
+        """
+        result = self.db.execute(text("""
+            SELECT fd.source_file, fd.dependency_type, fd.imports_what,
+                   fe.language, fe.line_count
+            FROM file_dependencies fd
+            LEFT JOIN file_embeddings fe 
+                ON fe.project_id = fd.project_id AND fe.file_path = fd.source_file
+            WHERE fd.project_id = :project_id AND fd.target_file = :file_path
+            ORDER BY fd.source_file
+        """), {"project_id": project_id, "file_path": file_path}).fetchall()
+        
+        return [
+            {
+                "file_path": row[0],
+                "dependency_type": row[1],
+                "imports_what": json.loads(row[2]) if row[2] else [],
+                "language": row[3],
+                "line_count": row[4],
+            }
+            for row in result
+        ]
+    
+    async def get_dependency_stats(self, project_id: int) -> Dict[str, Any]:
+        """Get dependency statistics for project"""
+        stats = self.db.execute(text("""
+            SELECT 
+                COUNT(*) as total_dependencies,
+                COUNT(DISTINCT source_file) as files_with_imports,
+                COUNT(DISTINCT target_file) as files_imported
+            FROM file_dependencies
+            WHERE project_id = :project_id AND dependency_type = 'import'
+        """), {"project_id": project_id}).fetchone()
+        
+        return {
+            "total_dependencies": stats[0] or 0,
+            "files_with_imports": stats[1] or 0,
+            "files_imported": stats[2] or 0,
+        }
+    
+    # ====================================================================
+    # EXISTING METHODS (unchanged)
+    # ====================================================================
+    
     async def get_file_content(
         self,
         project_id: int,
@@ -760,17 +1108,27 @@ Imports: {', '.join(metadata.get('imports', []))}
             ORDER BY count DESC
         """), {"project_id": project_id}).fetchall()
         
+        # NEW: Include dependency stats
+        dep_stats = await self.get_dependency_stats(project_id)
+        
         return {
             "total_files": stats[0] or 0,
             "languages": stats[1] or 0,
             "total_lines": stats[2] or 0,
             "total_size_kb": round((stats[3] or 0) / 1024, 2),
             "last_indexed": stats[4].isoformat() if stats[4] else None,
-            "by_language": {r[0]: r[1] for r in by_language}
+            "by_language": {r[0]: r[1] for r in by_language},
+            "dependencies": dep_stats,  # NEW
         }
     
     async def delete_project_index(self, project_id: int) -> int:
         """Delete all indexed files for project"""
+        # Delete dependencies first
+        self.db.execute(text("""
+            DELETE FROM file_dependencies WHERE project_id = :project_id
+        """), {"project_id": project_id})
+        
+        # Then delete files
         result = self.db.execute(text("""
             DELETE FROM file_embeddings WHERE project_id = :project_id
         """), {"project_id": project_id})
