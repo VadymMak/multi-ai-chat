@@ -1043,9 +1043,9 @@ class CopyContextRequest(BaseModel):
     project_id: int
     file_path: str
     file_content: str
-    imports: List[str] = []  # Parsed imports from extension
-    max_files: int = 5
-    max_tokens: int = 4000
+    imports: List[str] = [] 
+    max_files: int = 10  
+    max_tokens: int = 32000
     include_metadata: bool = True
 
 
