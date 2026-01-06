@@ -1113,9 +1113,16 @@ async def copy_context_for_ai(
             parts.append("\n## 📦 Dependencies (from imports)\n")
             
             for imp in request.imports[:request.max_files]:
-                # Skip node_modules / external packages
-                if not imp.startswith('.') and not imp.startswith('@/'):
+                # Determine import type
+                is_relative_js = imp.startswith('.') or imp.startswith('@/')
+                is_internal_python = imp.startswith('app.')  # ← ADD THIS
+                
+                # Skip external packages
+                if not is_relative_js and not is_internal_python:
+                    print(f"⏭️ [CopyContext] Skipping external: {imp}")
                     continue
+                
+                print(f"🔍 [CopyContext] Resolving: {imp}")
                 
                 # Try to find file in database
                 resolved = await _resolve_import(
@@ -1278,15 +1285,50 @@ async def _resolve_import(
 ) -> Optional[Dict[str, Any]]:
     """
     Resolve import path to actual file in database.
+    Supports:
+    - JS/TS: ../store/modelStore, @/components/Button
+    - Python: app.deps, app.memory.models
     """
     
-    # Extract just the filename (without extension)
-    # "../store/modelStore" -> "modelStore"
+    # Handle Python dot notation: app.deps -> deps, app.memory.models -> models
+    if '.' in import_path and not import_path.startswith('.'):
+        # Python import: app.memory.models -> models
+        filename = import_path.split('.')[-1]
+        # Also try full path: app/memory/models.py
+        python_path = import_path.replace('.', '/')
+        
+        print(f"🐍 [ResolveImport] Python import: {import_path} -> {filename} or {python_path}")
+        
+        # Try Python path patterns
+        python_patterns = [
+            f"%{python_path}.py",
+            f"%{python_path}/__init__.py",
+            f"%/{filename}.py",
+        ]
+        
+        for pattern in python_patterns:
+            result = db.execute(text("""
+                SELECT file_path, content, language 
+                FROM file_embeddings
+                WHERE project_id = :pid 
+                AND file_path LIKE :pattern
+                LIMIT 1
+            """), {"pid": project_id, "pattern": pattern}).fetchone()
+            
+            if result:
+                print(f"✅ [ResolveImport] Found Python: {result[0]}")
+                return {
+                    "file_path": result[0],
+                    "content": result[1],
+                    "language": result[2] or "python"
+                }
+    
+    # Handle JS/TS relative imports
     filename = import_path.split('/')[-1]
     
     print(f"🔍 [ResolveImport] Looking for: {filename} in project {project_id}")
     
-    # Search by filename pattern in file_path (more reliable)
+    # Search by filename pattern in file_path
     search_patterns = [
         f"%/{filename}.ts",
         f"%/{filename}.tsx",
