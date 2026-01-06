@@ -523,8 +523,12 @@ async def save_dependencies(
     """
     Save file dependencies to file_dependencies table.
     Called by VS Code Extension after indexing.
+    
+    FIXED: Now resolves relative paths (../store/chatStore) 
+    to full paths (frontend/src/store/chatStore.ts)!
     """
     saved = 0
+    skipped = 0
     errors = []
     
     print(f"\n🔗 [DEPS] Saving {len(request.dependencies)} dependencies for project {request.project_id}")
@@ -540,40 +544,172 @@ async def save_dependencies(
     except Exception as e:
         errors.append(f"Failed to clear old deps: {str(e)}")
     
-    # Insert new dependencies
+    # Insert new dependencies WITH RESOLUTION
     for dep in request.dependencies:
         try:
+            source_file = dep.source_file
+            target_file = dep.target_file
+            
+            # ============================================================
+            # NEW: Resolve relative paths to full paths!
+            # ============================================================
+            resolved_target = _resolve_dependency_path(
+                source_file=source_file,
+                target_file=target_file,
+                project_id=request.project_id,
+                db=db
+            )
+            
+            if not resolved_target:
+                # Skip unresolved dependencies - they are useless
+                skipped += 1
+                print(f"⏭️ [DEPS] Skipped unresolved: {source_file} → {target_file}")
+                continue
+            
+            # Skip self-references
+            if resolved_target == source_file:
+                skipped += 1
+                continue
+            
+            # ============================================================
+            
             db.execute(
                 text("""
                     INSERT INTO file_dependencies 
                     (project_id, source_file, target_file, dependency_type, imports_what, created_at)
                     VALUES (:pid, :src, :tgt, :dtype, :what, NOW())
+                    ON CONFLICT (project_id, source_file, target_file) 
+                    DO UPDATE SET 
+                        dependency_type = EXCLUDED.dependency_type,
+                        imports_what = EXCLUDED.imports_what,
+                        created_at = EXCLUDED.created_at
                 """),
                 {
                     "pid": request.project_id,
-                    "src": dep.source_file,
-                    "tgt": dep.target_file,
+                    "src": source_file,
+                    "tgt": resolved_target,  # ← NOW USING RESOLVED PATH!
                     "dtype": dep.dependency_type,
                     "what": json.dumps(dep.imports_what)
                 }
             )
             saved += 1
+            print(f"✅ [DEPS] {source_file} → {resolved_target}")
+            
         except Exception as e:
-            db.rollback()  # <-- CRITICAL: Reset transaction after error
+            db.rollback()
             error_msg = f"{dep.source_file} -> {dep.target_file}: {str(e)}"
             errors.append(error_msg)
             print(f"❌ [DEPS] {error_msg}")
     
     db.commit()
     
-    print(f"✅ [DEPS] Saved {saved} dependencies, {len(errors)} errors")
+    print(f"✅ [DEPS] Saved {saved}, skipped {skipped} (unresolved), {len(errors)} errors")
     
     return SaveDependenciesResponse(
         success=len(errors) == 0,
         saved=saved,
-        errors=errors[:10]  # Limit errors in response
+        errors=errors[:10]
     )
 
+def _resolve_dependency_path(
+    source_file: str,
+    target_file: str,
+    project_id: int,
+    db: Session
+) -> Optional[str]:
+    """
+    Resolve relative import path to full file path.
+    
+    Examples:
+    - source: "frontend/src/pages/ChatPage.tsx"
+      target: "../store/chatStore"
+      result: "frontend/src/store/chatStore.ts"
+      
+    - source: "frontend/src/pages/ChatPage.tsx"
+      target: "../hooks/useStreamText"
+      result: "frontend/src/hooks/useStreamText.ts"
+    """
+    
+    # Skip external packages (no dot prefix)
+    if not target_file.startswith(".") and not target_file.startswith("@/"):
+        return None
+    
+    # Normalize source path
+    source_file = source_file.replace("\\", "/")
+    
+    # Handle @/ alias
+    if target_file.startswith("@/"):
+        if "/src/" in source_file:
+            src_idx = source_file.find("/src/")
+            base_path = source_file[:src_idx + 5]
+            target_file = "./" + target_file[2:]
+            source_file = base_path + "index.ts"
+        else:
+            target_file = "./" + target_file[2:]
+    
+    # Get source directory
+    if "/" in source_file:
+        source_dir_parts = source_file.split("/")[:-1]
+    else:
+        source_dir_parts = []
+    
+    # Resolve relative path
+    import_parts = target_file.split("/")
+    resolved_parts = source_dir_parts.copy()
+    
+    for part in import_parts:
+        if part == ".":
+            continue
+        elif part == "..":
+            if resolved_parts:
+                resolved_parts.pop()
+        else:
+            resolved_parts.append(part)
+    
+    # Build base path without extension
+    base_path = "/".join(resolved_parts)
+    
+    # Try different extensions
+    extensions = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"]
+    
+    for ext in extensions:
+        test_path = base_path + ext
+        
+        result = db.execute(text("""
+            SELECT file_path FROM file_embeddings
+            WHERE project_id = :project_id 
+              AND file_path = :path
+            LIMIT 1
+        """), {
+            "project_id": project_id,
+            "path": test_path,
+        }).fetchone()
+        
+        if result:
+            return result[0]
+    
+    # Fallback: search by filename
+    file_name = resolved_parts[-1] if resolved_parts else target_file.split("/")[-1]
+    
+    for ext in [".ts", ".tsx", ".js", ".jsx"]:
+        result = db.execute(text("""
+            SELECT file_path FROM file_embeddings
+            WHERE project_id = :project_id 
+              AND (
+                  file_path LIKE :pattern1
+                  OR file_path LIKE :pattern2
+              )
+            LIMIT 1
+        """), {
+            "project_id": project_id,
+            "pattern1": f"%/{file_name}{ext}",
+            "pattern2": f"%/{file_name}/index{ext}",
+        }).fetchone()
+        
+        if result:
+            return result[0]
+    
+    return None
 
 # ==================== STEP EXECUTION HELPERS ====================
 
