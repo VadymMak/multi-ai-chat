@@ -5,9 +5,12 @@ File Indexer API - Index and search project files using pgvector
 Endpoints:
 - POST /index/{project_id} - Index all files from Git
 - GET /search/{project_id} - Semantic search in files
-- GET /stats/{project_id} - Get indexing statistics
+- GET /stats/{project_id} - Get indexing statistics (includes dependencies!)
 - GET /file/{project_id}/{file_path} - Get indexed file content
 - DELETE /index/{project_id} - Delete project index
+- POST /index-local - Index local files (saves dependencies!)
+- GET /dependencies/{project_id}/{file_path} - Get file dependencies (NEW!)
+- GET /dependents/{project_id}/{file_path} - Get file dependents (NEW!)
 """
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
@@ -22,7 +25,13 @@ from sqlalchemy import text
 from app.memory.db import get_db
 from app.memory.models import Project
 from app.deps import get_current_user
-from app.services.file_indexer import FileIndexer, SUPPORTED_EXTENSIONS, should_skip_file, extract_metadata
+from app.services.file_indexer import (
+    FileIndexer, 
+    SUPPORTED_EXTENSIONS, 
+    should_skip_file, 
+    extract_metadata,
+    save_file_dependencies,  # NEW!
+)
 from app.services import vector_service
 from datetime import datetime
 
@@ -205,7 +214,7 @@ async def search_files(
         raise HTTPException(500, f"Search failed: {str(e)}")
 
 
-@router.get("/stats/{project_id}", response_model=ProjectStats)
+@router.get("/stats/{project_id}")
 async def get_project_stats(
     project_id: int,
     current_user = Depends(get_current_user),
@@ -220,6 +229,7 @@ async def get_project_stats(
     - Total lines of code
     - Last indexed time
     - Files by language breakdown
+    - Dependencies statistics (NEW!)
     """
     # Verify project access
     project = db.query(Project).filter(
@@ -234,10 +244,10 @@ async def get_project_stats(
         indexer = FileIndexer(db)
         stats = await indexer.get_project_stats(project_id)
         
-        return ProjectStats(
-            project_id=project_id,
+        return {
+            "project_id": project_id,
             **stats
-        )
+        }
     except Exception as e:
         logger.exception(f"Failed to get stats: {e}")
         raise HTTPException(500, f"Failed to get stats: {str(e)}")
@@ -274,7 +284,6 @@ async def get_file_content(
             raise HTTPException(404, f"File not indexed: {file_path}")
         
         # Get file info
-        from sqlalchemy import text
         file_info = db.execute(text("""
             SELECT language, line_count
             FROM file_embeddings
@@ -331,9 +340,88 @@ async def delete_project_index(
     except Exception as e:
         logger.exception(f"Failed to delete index: {e}")
         raise HTTPException(500, f"Failed to delete index: {str(e)}")
-    
+
+
 # ====================================================================
-# LOCAL FILES INDEXING (for VS Code Extension)
+# NEW: DEPENDENCY ENDPOINTS (Phase 2)
+# ====================================================================
+
+@router.get("/dependencies/{project_id}/{file_path:path}")
+async def get_file_dependencies(
+    project_id: int,
+    file_path: str,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all files that this file imports (outgoing dependencies).
+    
+    Example: /dependencies/18/backend/app/routers/vscode.py
+    Returns: [vector_service.py, memory/models.py, ...]
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        deps = await indexer.get_file_dependencies(project_id, file_path)
+        
+        return {
+            "project_id": project_id,
+            "file_path": file_path,
+            "dependencies": deps,
+            "count": len(deps)
+        }
+    except Exception as e:
+        logger.exception(f"Failed to get dependencies: {e}")
+        raise HTTPException(500, f"Failed: {str(e)}")
+
+
+@router.get("/dependents/{project_id}/{file_path:path}")
+async def get_file_dependents(
+    project_id: int,
+    file_path: str,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all files that import this file (incoming dependencies).
+    
+    Example: /dependents/18/backend/app/services/vector_service.py
+    Returns: [vscode.py, file_indexer.py, ...] - files that use vector_service
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        indexer = FileIndexer(db)
+        deps = await indexer.get_file_dependents(project_id, file_path)
+        
+        return {
+            "project_id": project_id,
+            "file_path": file_path,
+            "dependents": deps,
+            "count": len(deps)
+        }
+    except Exception as e:
+        logger.exception(f"Failed to get dependents: {e}")
+        raise HTTPException(500, f"Failed: {str(e)}")
+
+
+# ====================================================================
+# LOCAL FILES INDEXING (for VS Code Extension) - UPDATED WITH DEPENDENCIES
 # ====================================================================
 
 @router.post("/index-local", response_model=IndexLocalFilesResponse)
@@ -346,6 +434,7 @@ async def index_local_files(
     Index files from local filesystem (sent by VS Code Extension).
     
     This endpoint does NOT require git_url - files are sent directly.
+    NOW ALSO SAVES FILE DEPENDENCIES!
     
     Args:
         project_id: Project ID
@@ -363,7 +452,7 @@ async def index_local_files(
         raise HTTPException(404, "Project not found")
     
     # Index files
-    stats = {"indexed": 0, "skipped": 0, "errors": 0}
+    stats = {"indexed": 0, "skipped": 0, "errors": 0, "dependencies_saved": 0}
     
     for file_data in request.files:
         try:
@@ -417,7 +506,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             line_count = file_data.content.count("\n") + 1
             file_size = len(file_data.content.encode("utf-8"))
             
-            # Upsert
+            # Upsert file_embeddings
             db.execute(text("""
                 INSERT INTO file_embeddings 
                 (project_id, file_path, file_name, language, content, content_hash,
@@ -447,6 +536,21 @@ Imports: {', '.join(metadata.get('imports', []))}
                 "metadata": json.dumps(metadata),
                 "now": datetime.utcnow()
             })
+            
+            # ============================================================
+            # NEW: SAVE FILE DEPENDENCIES
+            # ============================================================
+            if metadata.get("imports"):
+                deps_count = save_file_dependencies(
+                    project_id=request.project_id,
+                    source_file=file_data.path,
+                    imports=metadata["imports"],
+                    language=language,
+                    db=db
+                )
+                stats["dependencies_saved"] += deps_count
+            # ============================================================
+            
             db.commit()
             
             stats["indexed"] += 1
@@ -458,7 +562,7 @@ Imports: {', '.join(metadata.get('imports', []))}
     
     logger.info(f"✅ Local indexing complete: {stats}")
 
-    # ✅ UPDATE PROJECT STATUS (NEW)
+    # ✅ UPDATE PROJECT STATUS
     if stats["indexed"] > 0:
         # Get total files count
         total_files = db.execute(text("""
@@ -477,7 +581,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             "project_id": request.project_id
         })
         db.commit()
-        logger.info(f"  📊 Updated project status: {total_files} files indexed")
+        logger.info(f"  📊 Updated project status: {total_files} files, {stats['dependencies_saved']} deps")
     
     return IndexLocalFilesResponse(
         success=True,
@@ -485,7 +589,7 @@ Imports: {', '.join(metadata.get('imports', []))}
         indexed=stats["indexed"],
         skipped=stats["skipped"],
         errors=stats["errors"],
-        message=f"Indexed {stats['indexed']} files, skipped {stats['skipped']}, errors {stats['errors']}"
+        message=f"Indexed {stats['indexed']} files ({stats['dependencies_saved']} deps), skipped {stats['skipped']}, errors {stats['errors']}"
     )
 
 
@@ -518,8 +622,6 @@ async def find_related_files(
         raise HTTPException(404, "Project not found")
     
     try:
-        from sqlalchemy import text
-        
         # Get embedding of target file
         result = db.execute(text("""
             SELECT embedding FROM file_embeddings
@@ -530,16 +632,13 @@ async def find_related_files(
             raise HTTPException(404, f"File not indexed: {file_path}")
         
         # Convert embedding to PostgreSQL vector string format
-        # This avoids the :: conflict with SQLAlchemy parameters
         target_embedding = result[0]
         if isinstance(target_embedding, str):
             embedding_str = target_embedding
         else:
-            # It's a list/array from pgvector
             embedding_str = "[" + ",".join(str(x) for x in target_embedding) + "]"
         
         # Find similar files (excluding the target file)
-        # Embed vector directly in SQL to avoid :param::vector syntax conflict
         sql = f"""
             SELECT 
                 file_path, file_name, language, line_count,
@@ -580,7 +679,7 @@ async def find_related_files(
     
 
 # ====================================================================
-# INCREMENTAL RE-INDEXING (NEW)
+# INCREMENTAL RE-INDEXING - UPDATED WITH DEPENDENCIES
 # ====================================================================
 
 @router.post("/reindex-file", response_model=ReindexFileResponse)
@@ -594,6 +693,7 @@ async def reindex_single_file(
     
     Much faster than full re-index!
     Used by VS Code Extension when file changes are detected.
+    NOW ALSO UPDATES FILE DEPENDENCIES!
     
     Args:
         project_id: Project ID
@@ -703,9 +803,24 @@ Imports: {', '.join(metadata.get('imports', []))}
             embedding_id = result.fetchone()[0]
             logger.info(f"  ✅ Inserted: {request.file_path}")
         
+        # ============================================================
+        # NEW: UPDATE FILE DEPENDENCIES
+        # ============================================================
+        deps_count = 0
+        if metadata.get("imports"):
+            deps_count = save_file_dependencies(
+                project_id=request.project_id,
+                source_file=request.file_path,
+                imports=metadata["imports"],
+                language=language,
+                db=db
+            )
+            logger.info(f"  💾 Updated {deps_count} dependencies")
+        # ============================================================
+        
         db.commit()
         
-        # ✅ UPDATE PROJECT indexed_at (NEW)
+        # UPDATE PROJECT indexed_at
         db.execute(text("""
             UPDATE projects 
             SET indexed_at = :now
@@ -720,7 +835,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             success=True,
             project_id=request.project_id,
             file_path=request.file_path,
-            message="File re-indexed successfully",
+            message=f"File re-indexed successfully ({deps_count} deps)",
             embedding_id=embedding_id
         )
         
