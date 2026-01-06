@@ -318,29 +318,49 @@ def resolve_typescript_import(
     """
     Resolve TypeScript/JavaScript import to actual file path.
     
+    FIXED VERSION - properly resolves relative paths!
+    
     Examples:
-    - "./utils" → "src/utils.ts"
-    - "../services/apiService" → "src/services/apiService.ts"
-    - "@/components/Button" → "src/components/Button.tsx"
-    - "react" → None (external)
+    - source: "frontend/src/pages/ChatPage.tsx"
+      import: "../hooks/useStreamText"
+      result: "frontend/src/hooks/useStreamText.ts"
+      
+    - source: "frontend/src/pages/ChatPage.tsx"  
+      import: "../store/chatStore"
+      result: "frontend/src/store/chatStore.ts"
+      
+    - import: "react" → None (external)
     """
     # Skip node_modules / external packages
     if not import_path.startswith(".") and not import_path.startswith("@/"):
         return None
     
+    # Normalize source file path (replace backslashes)
+    source_file = source_file.replace("\\", "/")
+    
     # Handle @/ alias (typically maps to src/)
     if import_path.startswith("@/"):
-        import_path = "./" + import_path[2:]
-        source_file = "src/index.ts"
+        # Find src/ in source_file to determine base
+        if "/src/" in source_file:
+            src_idx = source_file.find("/src/")
+            base_path = source_file[:src_idx + 5]  # e.g., "frontend/src/"
+            import_path = "./" + import_path[2:]  # @/hooks → ./hooks
+            # Pretend source is at src/index.ts for resolution
+            source_file = base_path + "index.ts"
+        else:
+            import_path = "./" + import_path[2:]
     
     # Get directory of source file
-    source_dir = "/".join(source_file.replace("\\", "/").split("/")[:-1])
+    if "/" in source_file:
+        source_dir_parts = source_file.split("/")[:-1]  # Remove filename
+    else:
+        source_dir_parts = []
     
     # Resolve relative path
-    parts = import_path.split("/")
-    resolved_parts = source_dir.split("/") if source_dir else []
+    import_parts = import_path.split("/")
+    resolved_parts = source_dir_parts.copy()
     
-    for part in parts:
+    for part in import_parts:
         if part == ".":
             continue
         elif part == "..":
@@ -349,7 +369,12 @@ def resolve_typescript_import(
         else:
             resolved_parts.append(part)
     
+    # Build base path without extension
     base_path = "/".join(resolved_parts)
+    
+    print(f"🔍 [ResolveTSImport] source={source_file}")
+    print(f"🔍 [ResolveTSImport] import={import_path}")
+    print(f"🔍 [ResolveTSImport] resolved base={base_path}")
     
     # Try different extensions
     extensions = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"]
@@ -357,20 +382,45 @@ def resolve_typescript_import(
     for ext in extensions:
         test_path = base_path + ext
         
+        # Direct match
         result = db.execute(text("""
             SELECT file_path FROM file_embeddings
             WHERE project_id = :project_id 
-              AND (file_path = :path OR file_path LIKE :like_path)
+              AND file_path = :path
             LIMIT 1
         """), {
             "project_id": project_id,
             "path": test_path,
-            "like_path": f"%/{test_path}"
         }).fetchone()
         
         if result:
+            print(f"✅ [ResolveTSImport] Found: {result[0]}")
             return result[0]
     
+    # Fallback: search by filename pattern
+    # Extract just the filename part (last segment)
+    file_name = resolved_parts[-1] if resolved_parts else import_path.split("/")[-1]
+    
+    for ext in [".ts", ".tsx", ".js", ".jsx"]:
+        result = db.execute(text("""
+            SELECT file_path FROM file_embeddings
+            WHERE project_id = :project_id 
+              AND (
+                  file_path LIKE :pattern1
+                  OR file_path LIKE :pattern2
+              )
+            LIMIT 1
+        """), {
+            "project_id": project_id,
+            "pattern1": f"%/{file_name}{ext}",
+            "pattern2": f"%/{file_name}/index{ext}",
+        }).fetchone()
+        
+        if result:
+            print(f"✅ [ResolveTSImport] Found (fallback): {result[0]}")
+            return result[0]
+    
+    print(f"❌ [ResolveTSImport] Not found: {import_path}")
     return None
 
 
@@ -402,15 +452,8 @@ def save_file_dependencies(
     """
     Save resolved dependencies to file_dependencies table.
     
-    Args:
-        project_id: Project ID
-        source_file: Path of the file that has imports
-        imports: List of import strings from extract_metadata()
-        language: Language of the source file
-        db: Database session
-        
-    Returns:
-        Number of dependencies saved
+    FIXED: Only saves RESOLVED dependencies (with full paths).
+    Does NOT save unresolved relative imports anymore!
     """
     if not imports:
         return 0
@@ -433,16 +476,10 @@ def save_file_dependencies(
             db=db
         )
         
-        # Skip if couldn't resolve (external package)
+        # FIXED: Only save if resolved!
+        # Skip unresolved imports - they are useless for JOIN
         if not target_file:
-            # Only save unresolved relative imports
-            if import_module.startswith(".") or import_module.startswith("@/"):
-                target_file = import_module
-                dep_type = "import_unresolved"
-            else:
-                continue  # Skip external packages
-        else:
-            dep_type = "import"
+            continue
         
         # Skip self-references
         if target_file == source_file:
@@ -463,7 +500,7 @@ def save_file_dependencies(
                 "project_id": project_id,
                 "source_file": source_file,
                 "target_file": target_file,
-                "dep_type": dep_type,
+                "dep_type": "import",  # Always "import" now (resolved)
                 "imports_what": json.dumps([import_module]),
                 "now": datetime.now(timezone.utc)
             })

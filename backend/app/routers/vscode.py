@@ -1056,21 +1056,25 @@ class CopyContextResponse(BaseModel):
     estimated_tokens: int
     dependencies: List[Dict[str, Any]] = []
 
+# ============================================================
+# ЗАМЕНИ copy_context_for_ai в backend/app/routers/vscode.py
+# ============================================================
+# Версия B: Использует file_dependencies таблицу
+# БЕЗ semantic search!
+# ============================================================
+
+
 def _normalize_file_path(file_path: str) -> str:
     """
     Normalize file path from VS Code format to database format.
     
     Input:  "e:\\projects\\ai-assistant\\backend\\app\\routers\\vscode.py"
     Output: "backend/app/routers/vscode.py"
-    
-    Input:  "frontend/src/pages/ChatPage.tsx"
-    Output: "frontend/src/pages/ChatPage.tsx"
     """
     # Replace backslashes with forward slashes
     normalized = file_path.replace("\\", "/")
     
     # Try to extract relative path
-    # Common patterns: backend/, frontend/, src/
     markers = ["backend/", "frontend/", "src/", "app/"]
     
     for marker in markers:
@@ -1078,9 +1082,8 @@ def _normalize_file_path(file_path: str) -> str:
             idx = normalized.find(marker)
             return normalized[idx:]
     
-    # If no marker found, return filename only or as-is
+    # If no marker found, return as-is or last parts
     if "/" in normalized:
-        # Try to get last 3-4 parts of path
         parts = normalized.split("/")
         if len(parts) > 4:
             return "/".join(parts[-4:])
@@ -1098,26 +1101,21 @@ async def copy_context_for_ai(
     """
     Build context for external AI chat (Claude, ChatGPT, etc.)
     
-    V2: NOW USES file_dependencies TABLE instead of runtime resolution!
-    Much faster and more reliable.
+    VERSION B: Uses file_dependencies table for dependencies.
+    NO semantic search - only actual imports from database!
     
     Returns formatted markdown with:
     1. Current file content
-    2. Dependencies (from file_dependencies table!)
-    3. Related files (semantic search)
-    4. Project metadata
+    2. Dependencies (from file_dependencies table)
+    3. Project metadata
     """
     
-    print(f"\n📋 [CopyContext] ========== START (v2 - using file_dependencies) ==========")
+    print(f"\n📋 [CopyContext] ========== START (v3 - file_dependencies) ==========")
     print(f"📋 [CopyContext] project_id={request.project_id}")
     print(f"📋 [CopyContext] file_path={request.file_path}")
     print(f"📋 [CopyContext] max_tokens={request.max_tokens}, max_files={request.max_files}")
     
     try:
-        from app.services.file_indexer import FileIndexer
-        
-        indexer = FileIndexer(db)
-        
         parts = []
         files_included = 0
         total_chars = 0
@@ -1140,14 +1138,11 @@ async def copy_context_for_ai(
         
         print(f"✅ [CopyContext] Added current file: {len(request.file_content)} chars")
         
-        # ========== 2. GET DEPENDENCIES FROM DATABASE (NEW!) ==========
-        # Normalize file path for database lookup
-        # Extension sends: "e:\projects\ai-assistant\backend\app\routers\vscode.py"
-        # DB has: "backend/app/routers/vscode.py"
+        # ========== 2. GET DEPENDENCIES FROM file_dependencies TABLE ==========
         normalized_path = _normalize_file_path(request.file_path)
-        print(f"🔗 [CopyContext] Normalized path for DB: {normalized_path}")
+        print(f"🔗 [CopyContext] Normalized path: {normalized_path}")
         
-        # Query file_dependencies table
+        # Query file_dependencies with JOIN to get content
         deps_query = db.execute(text("""
             SELECT fd.target_file, fd.dependency_type, fd.imports_what,
                    fe.content, fe.language
@@ -1165,10 +1160,13 @@ async def copy_context_for_ai(
             "max_files": request.max_files
         }).fetchall()
         
-        print(f"🔗 [CopyContext] Found {len(deps_query)} dependencies in file_dependencies table")
+        deps_with_content = 0
+        deps_without_content = 0
+        
+        print(f"🔗 [CopyContext] Found {len(deps_query)} dependencies in DB")
         
         if deps_query:
-            parts.append("\n## 📦 Dependencies (from file_dependencies)\n")
+            parts.append("\n## 📦 Dependencies\n")
             
             for row in deps_query:
                 target_file = row[0]
@@ -1178,8 +1176,11 @@ async def copy_context_for_ai(
                 dep_lang = row[4] or 'typescript'
                 
                 if not content:
+                    deps_without_content += 1
                     print(f"⚠️ [CopyContext] No content for: {target_file}")
                     continue
+                
+                deps_with_content += 1
                 
                 if total_chars >= max_chars:
                     print(f"⏭️ [CopyContext] Char limit reached, stopping")
@@ -1189,7 +1190,7 @@ async def copy_context_for_ai(
                 remaining = max_chars - total_chars
                 if len(content) > remaining:
                     content = content[:remaining] + "\n// ... (truncated)"
-                    print(f"⚠️ [CopyContext] Truncated {target_file} to {remaining} chars")
+                    print(f"⚠️ [CopyContext] Truncated {target_file}")
                 
                 parts.append(f"""
 ### `{target_file}`
@@ -1206,134 +1207,20 @@ async def copy_context_for_ai(
                     "source": "file_dependencies"
                 })
                 
-                print(f"✅ [CopyContext] Added from DB: {target_file} ({len(content)} chars)")
+                print(f"✅ [CopyContext] Added: {target_file} ({len(content)} chars)")
         
-        # ========== 3. FALLBACK: Runtime resolution if DB empty ==========
-        if not deps_query and request.imports:
-            print(f"⚠️ [CopyContext] No DB dependencies found, falling back to runtime resolution")
-            parts.append("\n## 📦 Dependencies (runtime resolved)\n")
-            
-            # Filter internal imports
-            internal_imports = []
-            for imp in request.imports:
-                is_relative_js = imp.startswith('.') or imp.startswith('@/')
-                is_internal_python = imp.startswith('app.')
-                
-                if is_relative_js or is_internal_python:
-                    internal_imports.append(imp)
-            
-            print(f"🔍 [CopyContext] Internal imports to resolve: {internal_imports}")
-            
-            for imp in internal_imports[:request.max_files]:
-                if total_chars >= max_chars:
-                    break
-                
-                resolved = await _resolve_import(
-                    db=db,
-                    project_id=request.project_id,
-                    current_file=request.file_path,
-                    import_path=imp
-                )
-                
-                if resolved:
-                    dep_content = resolved.get('content', '')
-                    dep_path = resolved.get('file_path', imp)
-                    dep_lang = resolved.get('language', 'typescript')
-                    
-                    remaining = max_chars - total_chars
-                    if len(dep_content) > remaining:
-                        dep_content = dep_content[:remaining] + "\n// ... (truncated)"
-                    
-                    parts.append(f"""
-### `{dep_path}`
-```{dep_lang}
-{dep_content}
-```
-""")
-                    total_chars += len(dep_content)
-                    files_included += 1
-                    dependencies_found.append({
-                        "file_path": dep_path,
-                        "language": dep_lang,
-                        "chars": len(dep_content),
-                        "source": "runtime"
-                    })
-                    
-                    print(f"✅ [CopyContext] Added (runtime): {dep_path}")
+        print(f"📊 [CopyContext] Dependencies: {deps_with_content} with content, {deps_without_content} without")
         
-        # ========== 4. SEMANTIC SEARCH FOR RELATED FILES ==========
-        print(f"\n🔗 [CopyContext] Semantic search section")
+        # ========== 3. NO SEMANTIC SEARCH ==========
+        # Semantic search is DISABLED - use file_dependencies only
+        print(f"⏭️ [CopyContext] Semantic search DISABLED (using file_dependencies only)")
         
-        if total_chars < max_chars and request.max_files > files_included:
-            search_query = file_name.replace('.tsx', '').replace('.ts', '').replace('.py', '')
-            print(f"🔗 [CopyContext] Search query: {search_query}")
-            
-            try:
-                related_files = await indexer.search_files(
-                    project_id=request.project_id,
-                    query=search_query,
-                    limit=request.max_files - files_included + 2
-                )
-                
-                print(f"🔗 [CopyContext] Found {len(related_files) if related_files else 0} related files")
-                
-                if related_files:
-                    parts.append("\n## 🔗 Related Files (semantic search)\n")
-                    
-                    for rf in related_files:
-                        rf_path = rf.get('file_path', '')
-                        
-                        # Skip current file and already included
-                        if rf_path == request.file_path or rf_path == normalized_path:
-                            continue
-                        if any(d['file_path'] == rf_path for d in dependencies_found):
-                            continue
-                        
-                        if total_chars >= max_chars or files_included >= request.max_files:
-                            break
-                        
-                        # Get content from DB
-                        content_result = db.execute(text("""
-                            SELECT content, language FROM file_embeddings
-                            WHERE project_id = :pid AND file_path = :path
-                        """), {"pid": request.project_id, "path": rf_path}).fetchone()
-                        
-                        if content_result:
-                            rf_content = content_result[0]
-                            rf_lang = content_result[1] or 'typescript'
-                            similarity = rf.get('similarity', 0)
-                            
-                            remaining = max_chars - total_chars
-                            if len(rf_content) > remaining:
-                                rf_content = rf_content[:remaining] + "\n// ... (truncated)"
-                            
-                            parts.append(f"""
-### `{rf_path}` ({similarity:.0%} match)
-```{rf_lang}
-{rf_content}
-```
-""")
-                            total_chars += len(rf_content)
-                            files_included += 1
-                            dependencies_found.append({
-                                "file_path": rf_path,
-                                "language": rf_lang,
-                                "chars": len(rf_content),
-                                "similarity": similarity,
-                                "source": "semantic"
-                            })
-                            
-                            print(f"✅ [CopyContext] Added related: {rf_path} ({similarity:.0%})")
-                            
-            except Exception as e:
-                print(f"⚠️ [CopyContext] Semantic search failed: {e}")
-        
-        # ========== 5. METADATA SECTION ==========
+        # ========== 4. METADATA SECTION ==========
         if request.include_metadata:
             project = db.get(Project, request.project_id)
             project_name = project.name if project else "Unknown"
             
-            # Get dependency count from DB
+            # Get total dependencies count
             dep_count = db.execute(text("""
                 SELECT COUNT(*) FROM file_dependencies
                 WHERE project_id = :pid AND source_file = :source
@@ -1349,18 +1236,18 @@ async def copy_context_for_ai(
 | Project | {project_name} |
 | Current File | `{request.file_path}` |
 | Files Included | {files_included} |
+| Dependencies in DB | {dep_count} |
+| Dependencies loaded | {deps_with_content} |
 | Total Characters | {total_chars:,} |
 | Estimated Tokens | ~{total_chars // 4:,} |
-| Dependencies in DB | {dep_count} |
 
-*Generated by Smart Cline v2 - Copy Context for AI (using file_dependencies)*
+*Generated by Smart Cline v3 - Copy Context (file_dependencies)*
 """
             parts.append(metadata_section)
         
         # ========== BUILD FINAL MARKDOWN ==========
         header = f"""# 🧠 Code Context for AI
 
-> Use this context to help AI understand your code.
 > Current file: `{request.file_path}`
 
 ---
