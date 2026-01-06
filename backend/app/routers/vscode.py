@@ -1075,12 +1075,12 @@ async def copy_context_for_ai(
     User copies this to clipboard and pastes into AI chat.
     """
     
-    print(f"\n📋 [CopyContext] file={request.file_path}, imports={len(request.imports)}")
     print(f"\n📋 [CopyContext] ========== START ==========")
     print(f"📋 [CopyContext] project_id={request.project_id}")
     print(f"📋 [CopyContext] file_path={request.file_path}")
     print(f"📋 [CopyContext] imports count={len(request.imports)}")
-    print(f"📋 [CopyContext] imports={request.imports[:5]}...") 
+    print(f"📋 [CopyContext] max_tokens={request.max_tokens}, max_files={request.max_files}")
+    print(f"📋 [CopyContext] all imports={request.imports}") 
     
     try:
         from app.services.file_indexer import FileIndexer
@@ -1093,6 +1093,8 @@ async def copy_context_for_ai(
         max_chars = request.max_tokens * 4  # ~4 chars per token
         dependencies_found = []
         
+        print(f"📋 [CopyContext] max_chars={max_chars}")
+        
         # ========== 1. CURRENT FILE ==========
         file_name = request.file_path.split('/')[-1].split('\\')[-1]
         language = _detect_language(request.file_path)
@@ -1103,10 +1105,11 @@ async def copy_context_for_ai(
 ```
 """
         parts.append(current_file_section)
-        total_chars += len(request.file_content)
+        # NOTE: Don't count current file against limit - it's always included
         files_included += 1
         
         print(f"✅ [CopyContext] Added current file: {len(request.file_content)} chars")
+        print(f"📋 [CopyContext] Current file NOT counted against max_chars limit")
         
         # ========== 2. RESOLVE IMPORTS ==========
         if request.imports:
@@ -1120,12 +1123,15 @@ async def copy_context_for_ai(
                 
                 if is_relative_js or is_internal_python:
                     internal_imports.append(imp)
+                else:
+                    print(f"⏭️ [CopyContext] Skipping external: {imp}")
             
-            print(f"🔍 [CopyContext] Internal imports: {internal_imports}")
+            print(f"🔍 [CopyContext] Internal imports to resolve: {internal_imports}")
+            print(f"🔍 [CopyContext] Will process up to {request.max_files} imports")
             
             # Now process only internal imports
-            for imp in internal_imports[:request.max_files]:
-                print(f"🔍 [CopyContext] Resolving: {imp}")
+            for i, imp in enumerate(internal_imports[:request.max_files]):
+                print(f"\n🔍 [CopyContext] [{i+1}/{len(internal_imports[:request.max_files])}] Resolving: {imp}")
                 
                 # Try to find file in database
                 resolved = await _resolve_import(
@@ -1134,16 +1140,25 @@ async def copy_context_for_ai(
                     current_file=request.file_path,
                     import_path=imp
                 )
+
+                print(f"📦 [CopyContext] Resolved result: {resolved is not None}")
+                if resolved:
+                    print(f"📦 [CopyContext] Found file: {resolved.get('file_path', 'unknown')}")
+                    print(f"📦 [CopyContext] Content length: {len(resolved.get('content', ''))}")
+                print(f"📦 [CopyContext] total_chars={total_chars}, max_chars={max_chars}, ok={total_chars < max_chars}")
                 
                 if resolved and total_chars < max_chars:
                     dep_content = resolved.get('content', '')
                     dep_path = resolved.get('file_path', imp)
                     dep_lang = resolved.get('language', 'typescript')
                     
+                    print(f"📦 [CopyContext] Adding dependency: {dep_path}")
+                    
                     # Truncate if needed
                     remaining = max_chars - total_chars
                     if len(dep_content) > remaining:
                         dep_content = dep_content[:remaining] + "\n// ... (truncated)"
+                        print(f"⚠️ [CopyContext] Truncated to {remaining} chars")
                     
                     parts.append(f"""
 ### `{dep_path}`
@@ -1161,11 +1176,22 @@ async def copy_context_for_ai(
                     })
                     
                     print(f"✅ [CopyContext] Added dependency: {dep_path} ({len(dep_content)} chars)")
+                    print(f"📊 [CopyContext] Progress: {files_included} files, {total_chars} chars")
+                else:
+                    if not resolved:
+                        print(f"⚠️ [CopyContext] SKIPPED {imp}: Could not resolve")
+                    else:
+                        print(f"⚠️ [CopyContext] SKIPPED {imp}: Char limit reached ({total_chars} >= {max_chars})")
         
         # ========== 3. SEMANTIC SEARCH FOR RELATED FILES ==========
+        print(f"\n🔗 [CopyContext] Semantic search section")
+        print(f"🔗 [CopyContext] total_chars={total_chars}, max_chars={max_chars}")
+        print(f"🔗 [CopyContext] files_included={files_included}, max_files={request.max_files}")
+        
         if total_chars < max_chars and request.max_files > files_included:
             # Search for related files using filename/content
             search_query = file_name.replace('.tsx', '').replace('.ts', '').replace('.py', '')
+            print(f"🔗 [CopyContext] Search query: {search_query}")
             
             try:
                 related_files = await indexer.search_files(
@@ -1173,6 +1199,8 @@ async def copy_context_for_ai(
                     query=search_query,
                     limit=request.max_files - files_included + 2
                 )
+                
+                print(f"🔗 [CopyContext] Found {len(related_files) if related_files else 0} related files")
                 
                 if related_files:
                     parts.append("\n## 🔗 Related Files (semantic search)\n")
@@ -1182,13 +1210,17 @@ async def copy_context_for_ai(
                         
                         # Skip current file and already included
                         if rf_path == request.file_path:
+                            print(f"⏭️ [CopyContext] Skip (current file): {rf_path}")
                             continue
                         if any(d['file_path'] == rf_path for d in dependencies_found):
+                            print(f"⏭️ [CopyContext] Skip (already included): {rf_path}")
                             continue
                         
                         if total_chars >= max_chars:
+                            print(f"⏭️ [CopyContext] Stop: char limit reached")
                             break
                         if files_included >= request.max_files:
+                            print(f"⏭️ [CopyContext] Stop: file limit reached")
                             break
                         
                         # Get content from DB
@@ -1227,6 +1259,10 @@ async def copy_context_for_ai(
                             
             except Exception as e:
                 print(f"⚠️ [CopyContext] Semantic search failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"⏭️ [CopyContext] Skipping semantic search: chars={total_chars >= max_chars}, files={files_included >= request.max_files}")
         
         # ========== 4. METADATA SECTION ==========
         if request.include_metadata:
@@ -1263,7 +1299,11 @@ async def copy_context_for_ai(
         final_markdown = header + "\n".join(parts)
         estimated_tokens = len(final_markdown) // 4
         
-        print(f"✅ [CopyContext] Complete: {files_included} files, ~{estimated_tokens} tokens")
+        print(f"\n✅ [CopyContext] ========== COMPLETE ==========")
+        print(f"✅ [CopyContext] Files: {files_included}")
+        print(f"✅ [CopyContext] Chars: {total_chars}")
+        print(f"✅ [CopyContext] Tokens: ~{estimated_tokens}")
+        print(f"✅ [CopyContext] Dependencies: {[d['file_path'] for d in dependencies_found]}")
         
         return CopyContextResponse(
             success=True,
