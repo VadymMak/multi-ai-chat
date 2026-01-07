@@ -204,7 +204,8 @@ from app.routers import (  # noqa: E402
     vscode,
     file_indexer,
     agentic,
-    versions
+    versions,
+    auto_learning
 )
 
 # Optional routers (guarded so startup doesn't crash if missing)
@@ -246,6 +247,7 @@ app.include_router(vscode.router, prefix="/api")
 app.include_router(file_indexer.router, prefix="/api"),
 app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
+app.include_router(auto_learning.router, prefix="/api")
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402

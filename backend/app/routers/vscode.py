@@ -23,6 +23,7 @@ from app.utils.api_key_resolver import get_openai_key
 from app.services.smart_context import build_smart_context
 from app.services.vector_service import store_message_with_embedding
 from app.services.version_service import VersionService
+from app.services.auto_learning import AutoLearningService
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
@@ -247,6 +248,8 @@ async def edit_file_with_ai(
     """
     Edit file using AI with Smart Context.
     Returns diff between original and new content.
+    
+    ✅ NEW: Integrates Auto-Learning warnings into prompt
     """
     try:
         print(f"\n🔧 [EDIT] file={request.file_path}")
@@ -259,6 +262,16 @@ async def edit_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
+        # ✅ NEW: Get Auto-Learning warnings
+        from app.services.auto_learning import AutoLearningService
+        auto_learn = AutoLearningService(db)
+        learned_warnings = auto_learn.format_warnings_for_prompt(
+            project_id=request.project_id,
+            file_path=request.file_path
+        )
+        if learned_warnings:
+            print(f"🎓 [EDIT] Added {len(learned_warnings)} chars of learned warnings")
+        
         # ✅ Build context based on mode
         context = await build_context_for_mode(
             context_mode=request.context_mode or 'file',
@@ -270,7 +283,7 @@ async def edit_file_with_ai(
             db=db,
             memory=memory,
             file_content=request.current_content,
-            selected_text=None,  # For EDIT we use full file
+            selected_text=None,
             file_path=request.file_path
         )
 
@@ -281,6 +294,7 @@ async def edit_file_with_ai(
         original_chars = len(request.current_content)
         
         # Build prompt with STRICT formatting rules
+        # ✅ NEW: Include learned_warnings in prompt
         prompt = f"""You are an expert code editor. Your ONLY job is to provide SEARCH/REPLACE instructions.
 
 CURRENT FILE: {request.file_path}
@@ -294,7 +308,7 @@ Lines: {original_lines} | Characters: {original_chars}
 
 === PROJECT CONTEXT ===
 {context}
-
+{learned_warnings}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL FORMAT RULES - FOLLOW EXACTLY:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -396,7 +410,6 @@ Response must start with "SEARCH:" immediately.
         cleaned_text = re.sub(r'```typescript\s*', '', cleaned_text)
         cleaned_text = re.sub(r'```\s*', '', cleaned_text)
         
-        
         print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
         
         # Шаг 2: Надёжный парсер SEARCH/REPLACE блоков
@@ -407,7 +420,7 @@ Response must start with "SEARCH:" immediately.
             # Split by SEARCH:
             parts = re.split(r'SEARCH:\s*', text, flags=re.IGNORECASE)
             
-            for part in parts[1:]:  # Skip first empty part
+            for part in parts[1:]:
                 # Find <<< >>> for search block
                 search_match = re.search(r'<<<\n?([\s\S]*?)>>>', part)
                 if not search_match:
@@ -501,10 +514,23 @@ Response must start with "SEARCH:" immediately.
                 if found:
                     continue
             
-            # If we reach here, nothing was found
+            # ✅ NEW: If search failed, report to Auto-Learning
             print(f"⚠️ [EDIT] Search block not found in file:")
             print(f"   Looking for (exact): {search_text[:200]}...")
-            print(f"   Looking for (normalized): {search_normalized[:200]}...")
+            
+            # Report this as an error pattern
+            try:
+                auto_learn.report_error(
+                    project_id=request.project_id,
+                    error_pattern=f"SEARCH/REPLACE block not found in file",
+                    error_type="ai_edit_failed",
+                    file_path=request.file_path,
+                    code_snippet=search_text[:500]
+                )
+                print(f"🎓 [EDIT] Reported failed edit to Auto-Learning")
+            except Exception as learn_err:
+                print(f"⚠️ [EDIT] Failed to report to Auto-Learning: {learn_err}")
+            
             raise HTTPException(
                 status_code=400,
                 detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
@@ -523,7 +549,6 @@ Response must start with "SEARCH:" immediately.
 
         # ✅ Create version for this edit
         try:
-            # Get file_id from file_embeddings
             file_record = db.execute(
                 text("SELECT id FROM file_embeddings WHERE project_id = :pid AND file_path = :path"),
                 {"pid": request.project_id, "path": request.file_path}
