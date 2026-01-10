@@ -1,10 +1,76 @@
-# Ignore node_modules and Python env
-frontend/node_modules
-backend/__pycache__/
-*.pyc
-*.env
+# Python virtual environments
+venv/
+env/
+backend/venv/
 llm_env/
 
-# Python virtual envs
-venv/
-backend/venv/
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.db
+*.sqlite3
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+backend/.env
+backend/.env.development
+backend/.env.local
+frontend/.env.local
+frontend/.env.development
+
+# Node.js and frontend
+frontend/node_modules/
+node_modules/
+*.log
+*.lock
+package-lock.json
+yarn.lock
+frontend/build/
+frontend/.cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+FollowMe.md
+
+# Build artifacts
+*.dll
+*.exe
+
+# Database backups
+*.sql
+backup.sql
+
+# Temporary files
+*.tmp
+*.temp
+
+# Railway/Docker
+.railway/
+docker-compose.override.yml
+
+# Testing
+coverage/
+.coverage
+*.cover
+.pytest_cache/

@@ -1,0 +1,345 @@
+"""
+Large test file for testing AI EDIT mode with SEARCH/REPLACE.
+This file has 300+ lines to test max_tokens handling.
+"""
+
+class UserService:
+    """Service for managing users"""
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.cache = {}
+        self.logger = None
+    
+    def get_user_by_id(self, user_id):
+        """Get user by ID"""
+        if user_id in self.cache:
+            return self.cache[user_id]
+        
+        query = f"SELECT * FROM users WHERE id = {user_id}"
+        result = self.db.execute(query)
+        
+        if result:
+            self.cache[user_id] = result
+            return result
+        return None
+    
+    def create_user(self, username, email, password):
+        """Create new user"""
+        query = f"INSERT INTO users (username, email, password) VALUES ('{username}', '{email}', '{password}')"
+        result = self.db.execute(query)
+        return result
+    
+    def update_user(self, user_id, data):
+        """Update user data"""
+        fields = []
+        for key, value in data.items():
+            fields.append(f"{key} = '{value}'")
+        
+        query = f"UPDATE users SET {', '.join(fields)} WHERE id = {user_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def delete_user(self, user_id):
+        """Delete user"""
+        query = f"DELETE FROM users WHERE id = {user_id}"
+        result = self.db.execute(query)
+        
+        if user_id in self.cache:
+            del self.cache[user_id]
+        
+        return result
+    
+    def search_users(self, search_term):
+        """Search users by term"""
+        query = f"SELECT * FROM users WHERE username LIKE '%{search_term}%' OR email LIKE '%{search_term}%'"
+        results = self.db.execute(query)
+        return results
+    
+    def get_all_users(self):
+        """Get all users"""
+        query = "SELECT * FROM users"
+        results = self.db.execute(query)
+        return results
+    
+    def count_users(self):
+        """Count total users"""
+        query = "SELECT COUNT(*) FROM users"
+        result = self.db.execute(query)
+        return result[0] if result else 0
+
+
+class AuthService:
+    """Service for authentication"""
+    
+    def __init__(self, user_service):
+        self.user_service = user_service
+        self.sessions = {}
+        self.tokens = {}
+    
+    def login(self, username, password):
+        """Login user"""
+        query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
+        result = self.user_service.db.execute(query)
+        
+        if result:
+            token = self.generate_token(result['id'])
+            self.sessions[token] = result
+            return token
+        return None
+    
+    def logout(self, token):
+        """Logout user"""
+        if token in self.sessions:
+            del self.sessions[token]
+            return True
+        return False
+    
+    def verify_token(self, token):
+        """Verify authentication token"""
+        if token in self.sessions:
+            return self.sessions[token]
+        return None
+    
+    def generate_token(self, user_id):
+        """Generate authentication token"""
+        import random
+        import string
+        
+        token = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+        self.tokens[token] = user_id
+        return token
+    
+    def refresh_token(self, old_token):
+        """Refresh authentication token"""
+        user = self.verify_token(old_token)
+        if user:
+            self.logout(old_token)
+            return self.login(user['username'], user['password'])
+        return None
+    
+    def change_password(self, user_id, old_password, new_password):
+        """Change user password"""
+        query = f"SELECT * FROM users WHERE id = {user_id} AND password = '{old_password}'"
+        result = self.user_service.db.execute(query)
+        
+        if result:
+            update_query = f"UPDATE users SET password = '{new_password}' WHERE id = {user_id}"
+            self.user_service.db.execute(update_query)
+            return True
+        return False
+
+
+class ProductService:
+    """Service for managing products"""
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.inventory = {}
+    
+    def get_product(self, product_id):
+        """Get product by ID"""
+        query = f"SELECT * FROM products WHERE id = {product_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def create_product(self, name, price, description):
+        """Create new product"""
+        query = f"INSERT INTO products (name, price, description) VALUES ('{name}', {price}, '{description}')"
+        result = self.db.execute(query)
+        return result
+    
+    def update_product(self, product_id, data):
+        """Update product data"""
+        fields = []
+        for key, value in data.items():
+            if isinstance(value, str):
+                fields.append(f"{key} = '{value}'")
+            else:
+                fields.append(f"{key} = {value}")
+        
+        query = f"UPDATE products SET {', '.join(fields)} WHERE id = {product_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def delete_product(self, product_id):
+        """Delete product"""
+        query = f"DELETE FROM products WHERE id = {product_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def search_products(self, search_term):
+        """Search products"""
+        query = f"SELECT * FROM products WHERE name LIKE '%{search_term}%'"
+        results = self.db.execute(query)
+        return results
+    
+    def get_products_by_price_range(self, min_price, max_price):
+        """Get products in price range"""
+        query = f"SELECT * FROM products WHERE price BETWEEN {min_price} AND {max_price}"
+        results = self.db.execute(query)
+        return results
+    
+    def update_inventory(self, product_id, quantity):
+        """Update product inventory"""
+        self.inventory[product_id] = quantity
+        return True
+    
+    def check_stock(self, product_id):
+        """Check product stock"""
+        return self.inventory.get(product_id, 0)
+
+
+class OrderService:
+    """Service for managing orders"""
+    
+    def __init__(self, db_connection, product_service):
+        self.db = db_connection
+        self.product_service = product_service
+        self.orders = []
+    
+    def create_order(self, user_id, products):
+        """Create new order"""
+        total = 0
+        order_items = []
+        
+        for product_id, quantity in products.items():
+            product = self.product_service.get_product(product_id)
+            if product:
+                subtotal = product['price'] * quantity
+                total += subtotal
+                order_items.append({
+                    'product_id': product_id,
+                    'quantity': quantity,
+                    'subtotal': subtotal
+                })
+        
+        query = f"INSERT INTO orders (user_id, total, status) VALUES ({user_id}, {total}, 'pending')"
+        result = self.db.execute(query)
+        
+        order_id = result['id']
+        
+        for item in order_items:
+            item_query = f"INSERT INTO order_items (order_id, product_id, quantity, subtotal) VALUES ({order_id}, {item['product_id']}, {item['quantity']}, {item['subtotal']})"
+            self.db.execute(item_query)
+        
+        return order_id
+    
+    def get_order(self, order_id):
+        """Get order by ID"""
+        query = f"SELECT * FROM orders WHERE id = {order_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def update_order_status(self, order_id, status):
+        """Update order status"""
+        query = f"UPDATE orders SET status = '{status}' WHERE id = {order_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def cancel_order(self, order_id):
+        """Cancel order"""
+        return self.update_order_status(order_id, 'cancelled')
+    
+    def get_user_orders(self, user_id):
+        """Get all orders for user"""
+        query = f"SELECT * FROM orders WHERE user_id = {user_id}"
+        results = self.db.execute(query)
+        return results
+    
+    def calculate_order_total(self, order_id):
+        """Calculate order total"""
+        query = f"SELECT SUM(subtotal) FROM order_items WHERE order_id = {order_id}"
+        result = self.db.execute(query)
+        return result[0] if result else 0
+
+
+class PaymentService:
+    """Service for processing payments"""
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.transactions = []
+    
+    def process_payment(self, order_id, amount, payment_method):
+        """Process payment"""
+        query = f"INSERT INTO payments (order_id, amount, method, status) VALUES ({order_id}, {amount}, '{payment_method}', 'processing')"
+        result = self.db.execute(query)
+        
+        payment_id = result['id']
+        
+        # Simulate payment processing
+        success = self.charge_payment(payment_method, amount)
+        
+        if success:
+            update_query = f"UPDATE payments SET status = 'completed' WHERE id = {payment_id}"
+            self.db.execute(update_query)
+            return True
+        else:
+            update_query = f"UPDATE payments SET status = 'failed' WHERE id = {payment_id}"
+            self.db.execute(update_query)
+            return False
+    
+    def charge_payment(self, payment_method, amount):
+        """Charge payment (mock)"""
+        # Mock payment gateway
+        if amount > 0:
+            return True
+        return False
+    
+    def refund_payment(self, payment_id):
+        """Refund payment"""
+        query = f"UPDATE payments SET status = 'refunded' WHERE id = {payment_id}"
+        result = self.db.execute(query)
+        return result
+    
+    def get_payment_status(self, payment_id):
+        """Get payment status"""
+        query = f"SELECT status FROM payments WHERE id = {payment_id}"
+        result = self.db.execute(query)
+        return result['status'] if result else None
+
+
+class NotificationService:
+    """Service for sending notifications"""
+    
+    def __init__(self):
+        self.notifications = []
+        self.email_sender = None
+    
+    def send_email(self, to, subject, body):
+        """Send email notification"""
+        notification = {
+            'type': 'email',
+            'to': to,
+            'subject': subject,
+            'body': body
+        }
+        self.notifications.append(notification)
+        return True
+    
+    def send_sms(self, phone, message):
+        """Send SMS notification"""
+        notification = {
+            'type': 'sms',
+            'to': phone,
+            'message': message
+        }
+        self.notifications.append(notification)
+        return True
+    
+    def send_push(self, user_id, title, message):
+        """Send push notification"""
+        notification = {
+            'type': 'push',
+            'user_id': user_id,
+            'title': title,
+            'message': message
+        }
+        self.notifications.append(notification)
+        return True
+    
+    def get_notifications(self, user_id):
+        """Get user notifications"""
+        user_notifications = [n for n in self.notifications if n.get('user_id') == user_id]
+        return user_notifications

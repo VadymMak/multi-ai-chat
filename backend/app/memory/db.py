@@ -1,60 +1,187 @@
-# backend/app/memory/db.py
+# File: backend/app/memory/db.py
+
 import os
+import time
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import OperationalError
+from typing import Generator
+
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import OperationalError
+
 from .models import Base
 
-# Configure logging
+__all__ = ["engine", "SessionLocal", "Base", "get_db", "init_db", "DATABASE_URL", "SQLALCHEMY_URL"]
+
+# ─────────────────────────── Logging ───────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv(dotenv_path="E:/projects/ai-assistant/backend/.env")
+# ──────────────────────── .env resolution ───────────────────────
+# Try project .env first; fall back to current working dir
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ENV_CANDIDATES = [
+    os.path.join(PROJECT_ROOT, ".env"),
+    os.environ.get("ENV_FILE", ""),  # allow override
+]
 
-# Database URL: Default to SQLite, allow override via environment variable
-SQLALCHEMY_URL = os.getenv("SQLALCHEMY_URL", "sqlite:///./memory.db")
+for candidate in ENV_CANDIDATES:
+    if candidate and os.path.exists(candidate):
+        load_dotenv(dotenv_path=candidate)
+        logger.info(f"Loaded .env from: {candidate}")
+        break
+else:
+    # As a last resort, load default .env if present in CWD
+    load_dotenv()
+    logger.info("Loaded .env from current working directory (if present).")
 
-# Engine configuration
-engine_args = {}
-if SQLALCHEMY_URL.startswith("sqlite"):
-    engine_args["connect_args"] = {"check_same_thread": False}
-elif SQLALCHEMY_URL.startswith("postgresql"):
-    engine_args["pool_size"] = 5
-    engine_args["max_overflow"] = 10
-    engine_args["pool_timeout"] = 30
+# ───────────────────── Database URL / Paths ─────────────────────
+DEFAULT_DB_PATH = os.path.abspath(os.path.join(PROJECT_ROOT, "memory.db"))
+DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
 
+# ═══════════════════════ DEBUG LOGGING ═══════════════════════
+logger.info("=" * 80)
+logger.info("🔍 [DATABASE_URL DEBUG]")
+logger.info(f"  Raw value: {DATABASE_URL}")
+logger.info(f"  Type: {type(DATABASE_URL)}")
+logger.info(f"  Length: {len(DATABASE_URL) if DATABASE_URL else 0}")
+logger.info(f"  Starts with 'postgresql': {DATABASE_URL.startswith('postgresql') if DATABASE_URL else False}")
+logger.info(f"  Starts with 'sqlite': {DATABASE_URL.startswith('sqlite') if DATABASE_URL else False}")
+logger.info(f"  Default DB path: {DEFAULT_DB_PATH}")
+logger.info("=" * 80)
+# ═══════════════════════════════════════════════════════════════
+
+SQLALCHEMY_URL: str = DATABASE_URL  # Backward compatibility alias
+ECHO = (os.getenv("SQLALCHEMY_ECHO", "0").strip().lower() in {"1", "true", "yes", "on"})
+
+# Ensure SQLite directory exists (except for :memory:)
+if DATABASE_URL.startswith("sqlite"):
+    # strip "sqlite:///" and normalize
+    db_path = DATABASE_URL.replace("sqlite:///", "", 1)
+    if db_path and db_path != ":memory:":
+        # Convert to absolute in case a relative path was provided
+        abs_path = os.path.abspath(db_path)
+        dir_name = os.path.dirname(abs_path)
+        try:
+            os.makedirs(dir_name, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Could not create SQLite directory '{dir_name}': {e}")
+
+# ─────────────────────────── Create engine ──────────────────────
 try:
-    engine = create_engine(SQLALCHEMY_URL, **engine_args)
-    logger.info(f"Database engine created: {SQLALCHEMY_URL}")
+    if DATABASE_URL.startswith("postgresql"):
+        # PostgreSQL with connection pooling
+        from sqlalchemy.pool import QueuePool
+        
+        engine = create_engine(
+            DATABASE_URL,
+            poolclass=QueuePool,
+            pool_size=int(os.getenv("SQL_POOL_SIZE", "5")),
+            max_overflow=int(os.getenv("SQL_MAX_OVERFLOW", "10")),
+            pool_timeout=int(os.getenv("SQL_POOL_TIMEOUT", "30")),
+            pool_recycle=int(os.getenv("SQL_POOL_RECYCLE", "3600")),
+            pool_pre_ping=True,
+            echo=ECHO
+        )
+        logger.info("✅ PostgreSQL configured with connection pooling")
+        logger.info(f"Database URL: {DATABASE_URL.split('@')[0]}@***")  # Hide credentials
+    else:
+        # SQLite without pooling
+        from sqlalchemy.pool import NullPool
+        
+        engine = create_engine(
+            DATABASE_URL,
+            poolclass=NullPool,
+            connect_args={"check_same_thread": False},
+            echo=ECHO
+        )
+        logger.info("✅ SQLite configured (development mode)")
+        logger.info(f"Database path: {DATABASE_URL}")
+        
 except Exception as e:
-    logger.error(f"Failed to create database engine: {e}")
+    logger.error(f"❌ Failed to create engine: {e}")
     raise
 
+# ───────────────────── SQLite performance tweaks ────────────────
+if DATABASE_URL.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-redef]
+        try:
+            cursor = dbapi_connection.cursor()
+            # Keep foreign keys enforced and use WAL for better concurrency
+            cursor.execute("PRAGMA foreign_keys=ON;")
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            # Cache size negative = KB pages in memory cache
+            cursor.execute("PRAGMA cache_size=-64000;")
+            cursor.close()
+        except Exception as e:
+            # Never fail app due to pragma issues
+            logger.warning(f"SQLite PRAGMA setup warning: {e}")
+
+# ───────────────────────── Session factory ──────────────────────
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-def init_db() -> None:
-    """Create tables if they don't exist, with retry logic for robustness."""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            Base.metadata.create_all(bind=engine)
-            logger.info("Database tables created successfully")
-            return
-        except OperationalError as e:
-            logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to create tables: {e}")
-            if attempt == max_retries - 1:
-                logger.error("Failed to create database tables after retries")
-                raise
-            import time
-            time.sleep(1)  # Wait before retrying
-
-def get_db():
-    """Dependency to provide a database session."""
+# FastAPI dependency
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+# Standalone scripts utility
+def get_session() -> Session:
+    return SessionLocal()
+
+# ────────────────────────── Init helpers ────────────────────────
+def init_db(retries: int = 3, delay: float = 1.0) -> None:
+    """
+    Create all tables with pgvector extension enabled first.
+    Extension must be enabled BEFORE creating tables with vector columns.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            # Enable pgvector extension FIRST (PostgreSQL only)
+            if str(engine.url).startswith("postgresql"):
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                        conn.commit()
+                    logger.info("✅ pgvector extension enabled")
+                except Exception as e:
+                    logger.error(f"❌ Failed to enable pgvector: {e}")
+                    logger.warning("⚠️ Continuing without vector support")
+                    # Don't raise - allow app to run without semantic search
+            
+            # NOW create tables
+            Base.metadata.create_all(bind=engine)
+            logger.info("✅ Database tables created successfully.")
+            
+            return
+        except OperationalError as e:
+            logger.warning(f"⚠️ Attempt {attempt}/{retries} failed: {e}")
+            if attempt == retries:
+                logger.error("❌ Failed after all retries.")
+                raise
+            time.sleep(delay)
+
+# Optionally initialize at import if desired; harmless if tables exist
+if os.getenv("INIT_DB_ON_IMPORT", "1").strip().lower() in {"1", "true", "yes", "on"}:
+    try:
+        init_db()
+    except Exception:
+        # Don't crash import path; app can still call init on startup
+        logger.exception("DB init at import failed; continuing. App may initialize on startup.")
+
+__all__ = [
+    "engine",
+    "SessionLocal", 
+    "Base",
+    "get_db",
+    "init_db",
+    "DATABASE_URL",
+    "SQLALCHEMY_URL"
+]
