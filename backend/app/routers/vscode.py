@@ -87,9 +87,11 @@ class EditFileRequest(BaseModel):
     file_path: str
     instruction: str
     current_content: str
-    # ✅ NEW: Context mode
     context_mode: Optional[ContextModeType] = 'file'
     use_smart_context: Optional[bool] = False
+    # NEW: Retry support
+    last_error: Optional[Dict[str, Any]] = None
+    attempt: Optional[int] = 1
 
 
 class CreateFileRequest(BaseModel):
@@ -249,12 +251,13 @@ async def edit_file_with_ai(
     Edit file using AI with Smart Context.
     Returns diff between original and new content.
     
-    ✅ NEW: Integrates Auto-Learning warnings into prompt
+    ✅ UPDATED: Includes retry logic with error context
     """
     try:
         print(f"\n🔧 [EDIT] file={request.file_path}")
         print(f"📝 [EDIT] instruction: {request.instruction[:100]}...")
         print(f"🔍 [EDIT] context_mode: {request.context_mode}")
+        print(f"🔄 [EDIT] attempt: {request.attempt or 1}")
         
         # Get user's API key
         user_api_key = get_openai_key(current_user, db, required=True)
@@ -262,7 +265,7 @@ async def edit_file_with_ai(
         # Initialize memory
         memory = MemoryManager(db)
         
-        # ✅ NEW: Get Auto-Learning warnings
+        # ✅ Get Auto-Learning warnings
         from app.services.auto_learning import AutoLearningService
         auto_learn = AutoLearningService(db)
         learned_warnings = auto_learn.format_warnings_for_prompt(
@@ -288,13 +291,41 @@ async def edit_file_with_ai(
         )
 
         print(f"📋 [EDIT] Context length: {len(context)} chars")
-        print(f"📋 [EDIT] Context preview: {context[:300]}...")
 
         original_lines = request.current_content.count('\n') + 1
         original_chars = len(request.current_content)
         
+        # ✅ NEW: Build retry context if this is a retry attempt
+        retry_context = ""
+        if request.last_error and request.attempt and request.attempt > 1:
+            failed_block = request.last_error.get('failed_search_block', '')
+            if failed_block and len(failed_block) > 500:
+                failed_block = failed_block[:500] + "..."
+            
+            retry_context = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ RETRY ATTEMPT {request.attempt} - PREVIOUS ATTEMPT FAILED!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ERROR: {request.last_error.get('error', 'Unknown error')}
+HINT: {request.last_error.get('hint', 'Check your SEARCH block matches exactly')}
+
+{"FAILED SEARCH BLOCK (this text was NOT found in file):" if failed_block else ""}
+{failed_block}
+
+CRITICAL FOR THIS RETRY:
+1. The SEARCH block MUST be copied EXACTLY from the FILE CONTENT section above
+2. Check whitespace - every space and tab matters
+3. Check line endings - include complete lines only
+4. Do NOT add or remove any characters
+5. Try using a SMALLER, more unique section of code (3-5 lines)
+6. Look for UNIQUE identifiers like function names or variable names
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+            print(f"🔄 [EDIT] Retry attempt {request.attempt}, adding error context")
+        
         # Build prompt with STRICT formatting rules
-        # ✅ NEW: Include learned_warnings in prompt
         prompt = f"""You are an expert code editor. Your ONLY job is to provide SEARCH/REPLACE instructions.
 
 CURRENT FILE: {request.file_path}
@@ -309,6 +340,7 @@ Lines: {original_lines} | Characters: {original_chars}
 === PROJECT CONTEXT ===
 {context}
 {learned_warnings}
+{retry_context}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL FORMAT RULES - FOLLOW EXACTLY:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -333,7 +365,7 @@ SEARCH BLOCK RULES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. Copy EXACT text from file (character-for-character)
-2. Include 5-10 lines of context (not more!)
+2. Include 3-10 lines of context (not more!)
 3. Keep ALL whitespace, indentation, quotes EXACTLY as in file
 4. If code has multiple locations - provide ONE block for MAIN location only
 5. Test mentally: Can I find this EXACT text in file above? If NO - try again!
@@ -345,25 +377,18 @@ EXAMPLE (CORRECT):
 SEARCH:
 <<<
     def get_user_by_id(self, user_id):
-        
         if user_id in self.cache:
             return self.cache[user_id]
-        query = f"SELECT * FROM users WHERE id = {{user_id}}"
-        result = self.db.execute(query)
 >>>
 
 REPLACE:
 <<<
     def get_user_by_id(self, user_id):
-        
         try:
             if user_id in self.cache:
                 return self.cache[user_id]
-            query = f"SELECT * FROM users WHERE id = {{user_id}}"
-            result = self.db.execute(query)
-            return result
         except Exception as e:
-            raise Exception(f"Failed to get user {{user_id}}: {{e}}")
+            raise Exception(f"Failed: {{e}}")
 >>>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -402,9 +427,9 @@ Response must start with "SEARCH:" immediately.
         print(response_text[:500])
         print(f"{'='*80}\n")
 
-        # ✅ Улучшенный парсинг с fallback
+        # ✅ Parse SEARCH/REPLACE blocks
         
-        # Шаг 1: Убрать markdown если есть
+        # Step 1: Remove markdown if present
         cleaned_text = response_text
         cleaned_text = re.sub(r'```python\s*', '', cleaned_text)
         cleaned_text = re.sub(r'```typescript\s*', '', cleaned_text)
@@ -412,7 +437,7 @@ Response must start with "SEARCH:" immediately.
         
         print(f"🧹 [CLEAN] Removed markdown, length: {len(cleaned_text)}")
         
-        # Шаг 2: Надёжный парсер SEARCH/REPLACE блоков
+        # Step 2: Parse SEARCH/REPLACE blocks
         def parse_search_replace_blocks(text: str):
             """Parse SEARCH/REPLACE blocks reliably"""
             blocks = []
@@ -444,7 +469,7 @@ Response must start with "SEARCH:" immediately.
         if matches:
             print(f"✅ [PARSE] Found {len(matches)} blocks")
                 
-        # Шаг 3: Попытка 2 - формат без <<< >>> (fallback)
+        # Step 3: Fallback parser (without <<< >>>)
         if not matches:
             print(f"⚠️ [PARSE] Standard format failed, trying fallback...")
             search_replace_pattern = r'SEARCH:\s*\n(.*?)\n\s*REPLACE:\s*\n(.*?)(?=\n\s*SEARCH:|\Z)'
@@ -454,16 +479,21 @@ Response must start with "SEARCH:" immediately.
                 print(f"✅ [PARSE] Found {len(matches)} blocks with fallback format")
 
         if not matches:
-            # Fallback: AI didn't follow format
+            # AI didn't follow format
             print(f"⚠️ [EDIT] AI response didn't follow SEARCH/REPLACE format")
             print(f"   Response: {response_text[:200]}...")
             raise HTTPException(
                 status_code=400,
-                detail="AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction."
+                detail={
+                    "message": "AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction.",
+                    "error_type": "format_error",
+                    "failed_search_block": None
+                }
             )
 
         # Apply all SEARCH/REPLACE operations
         new_content = request.current_content
+        failed_search_block = None
 
         for i, (search_block, replace_block) in enumerate(matches):
             search_text = search_block.strip()
@@ -514,11 +544,13 @@ Response must start with "SEARCH:" immediately.
                 if found:
                     continue
             
-            # ✅ NEW: If search failed, report to Auto-Learning
+            # ✅ Search failed - prepare for retry
             print(f"⚠️ [EDIT] Search block not found in file:")
-            print(f"   Looking for (exact): {search_text[:200]}...")
+            print(f"   Looking for (first 200 chars): {search_text[:200]}...")
             
-            # Report this as an error pattern
+            failed_search_block = search_text
+            
+            # Report to Auto-Learning
             try:
                 auto_learn.report_error(
                     project_id=request.project_id,
@@ -531,9 +563,15 @@ Response must start with "SEARCH:" immediately.
             except Exception as learn_err:
                 print(f"⚠️ [EDIT] Failed to report to Auto-Learning: {learn_err}")
             
+            # ✅ UPDATED: Return structured error for retry
             raise HTTPException(
                 status_code=400,
-                detail=f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake. Please try again."
+                detail={
+                    "message": f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake.",
+                    "error_type": "search_not_found",
+                    "failed_search_block": search_text[:500],
+                    "block_index": i+1
+                }
             )
 
         # Generate diff
@@ -570,14 +608,16 @@ Response must start with "SEARCH:" immediately.
         except Exception as e:
             print(f"⚠️ [VERSION] Failed to create version: {e}")
 
-        # Return response
+        # ✅ Return SUCCESS response
         return type('obj', (object,), {
+            'success': True,
             'response_type': 'edit',
             'original_content': request.current_content,
             'new_content': new_content,
             'diff': diff,
             'file_path': request.file_path,
-            'tokens_used': {'total': len(prompt.split()) + len(response_text.split())}
+            'tokens_used': {'total': len(prompt.split()) + len(response_text.split())},
+            'attempt': request.attempt or 1
         })()
         
     except HTTPException:
