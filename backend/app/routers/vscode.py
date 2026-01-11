@@ -759,6 +759,39 @@ Response must start with "SEARCH:" immediately.
         raise
 
 
+# ============================================================
+# EDIT FILE ENDPOINT (called by extension directly)
+# ============================================================
+@router.post("/edit-file")
+async def edit_file_endpoint(
+    request: EditFileRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Direct endpoint for editing files.
+    Called by VS Code extension's editFile command.
+    """
+    print(f"\n🔧 [ENDPOINT] /edit-file called for {request.file_path}")
+    
+    result = await edit_file_with_ai(request, current_user, db)
+    
+    # If result is JSONResponse (error), return it directly
+    if isinstance(result, JSONResponse):
+        return result
+    
+    # Otherwise return success response
+    return {
+        "success": True,
+        "original_content": result.original_content,
+        "new_content": result.new_content,
+        "diff": result.diff,
+        "file_path": result.file_path,
+        "tokens_used": result.tokens_used,
+        "attempt": result.attempt
+    }
+
+
 async def create_file_with_ai(
     request: CreateFileRequest, 
     current_user: User, 
