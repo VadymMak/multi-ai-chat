@@ -15,9 +15,13 @@ import { DebateView } from "../components/Debate/DebateView";
 export const DebatePage: React.FC = () => {
   const [error, setError] = React.useState<string | null>(null);
 
-  const handleError = (error: Error) => {
-    console.error("Debate page error:", error);
-    setError(error.message || "An unexpected error occurred");
+const handleError = (error: Error) => {
+    try {
+      console.error("Debate page error:", error);
+      setError(error.message || "An unexpected error occurred");
+    } catch (e) {
+      console.error("Failed to handle error:", e);
+    }
   };
 
   React.useEffect(() => {
