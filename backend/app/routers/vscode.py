@@ -7,6 +7,7 @@ Full Smart Context using EXISTING services:
 """
 from typing import Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -482,9 +483,10 @@ Response must start with "SEARCH:" immediately.
             # AI didn't follow format
             print(f"⚠️ [EDIT] AI response didn't follow SEARCH/REPLACE format")
             print(f"   Response: {response_text[:200]}...")
-            raise HTTPException(
+            return JSONResponse(
                 status_code=400,
-                detail={
+                content={
+                    "success": False,
                     "message": "AI response didn't follow SEARCH/REPLACE format. Please try again with a more specific instruction.",
                     "error_type": "format_error",
                     "failed_search_block": None
@@ -563,14 +565,15 @@ Response must start with "SEARCH:" immediately.
             except Exception as learn_err:
                 print(f"⚠️ [EDIT] Failed to report to Auto-Learning: {learn_err}")
             
-            # ✅ UPDATED: Return structured error for retry
-            raise HTTPException(
+            # ✅ UPDATED: Return structured error for retry (using JSONResponse to bypass Railway proxy)
+            return JSONResponse(
                 status_code=400,
-                detail={
+                content={
+                    "success": False,
                     "message": f"Could not find the code block to replace (block {i+1}). The AI may have made a mistake.",
                     "error_type": "search_not_found",
                     "failed_search_block": search_text[:500],
-                    "block_index": i+1
+                    "block_index": i + 1
                 }
             )
 
@@ -964,14 +967,22 @@ async def vscode_chat(
                 )
                 
             except HTTPException as he:
-                # ✅ Re-raise HTTP exceptions (edit format errors, search not found, etc.)
-                # This allows retry logic on frontend to work properly
+                # ✅ Convert HTTPException to JSONResponse for proper error structure
                 print(f"\n{'='*80}")
-                print(f"⚠️ [EDIT mode] HTTPException - returning to client for retry:")
+                print(f"⚠️ [EDIT mode] HTTPException - converting to JSONResponse:")
                 print(f"   Status: {he.status_code}")
                 print(f"   Detail: {he.detail}")
                 print(f"{'='*80}\n")
-                raise he
+                
+                # Return as JSONResponse to preserve structure through Railway proxy
+                detail = he.detail if isinstance(he.detail, dict) else {"message": str(he.detail)}
+                return JSONResponse(
+                    status_code=he.status_code,
+                    content={
+                        "success": False,
+                        **detail
+                    }
+                )
             except Exception as e:
                 print(f"\n{'='*80}")
                 print(f"❌ [EDIT mode] UNEXPECTED EXCEPTION:")
