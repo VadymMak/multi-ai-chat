@@ -985,7 +985,7 @@ async def vscode_chat(
                 print(f"{'='*80}\n")
                 
                 # Fall through to normal chat mode only for unexpected errors
-                intent = "CHAT""
+                intent = "CHAT"
         
         # ========== ROUTE TO CREATE MODE ==========
         elif intent == "CREATE" and project_id:
