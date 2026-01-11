@@ -60,6 +60,38 @@ def normalize_code(text: str) -> str:
     return '\n'.join(lines)
 
 
+def find_block_position(content: str, search_text: str) -> int:
+    """
+    Find the starting position of search_text in content.
+    Returns -1 if not found.
+    Used for sorting blocks by position (bottom-up application).
+    """
+    # Try exact match first
+    pos = content.find(search_text)
+    if pos != -1:
+        return pos
+    
+    # Try normalized match
+    search_normalized = normalize_code(search_text)
+    content_normalized = normalize_code(content)
+    
+    if search_normalized in content_normalized:
+        # Find approximate position by searching for unique line
+        search_lines = search_text.strip().split('\n')
+        content_lines = content.split('\n')
+        
+        # Find longest line as anchor
+        unique_line = max((sl.strip() for sl in search_lines if sl.strip()), key=len, default='')
+        
+        if unique_line:
+            for idx, cl in enumerate(content_lines):
+                if unique_line in cl or cl.strip() == unique_line:
+                    # Return character position of this line
+                    return sum(len(content_lines[i]) + 1 for i in range(idx))
+    
+    return -1
+
+
 # ✅ Context Mode Type
 ContextModeType = Literal['selection', 'file', 'project']
 
@@ -537,6 +569,25 @@ Response must start with "SEARCH:" immediately.
                 }
             )
 
+        # ✅ NEW: Sort blocks by position (bottom-up) to avoid index shifting
+        if len(matches) > 1:
+            print(f"🔄 [EDIT] Sorting {len(matches)} blocks by position (bottom-up)...")
+            
+            # Find positions for each block
+            blocks_with_positions = []
+            for search_block, replace_block in matches:
+                search_text = search_block.strip()
+                pos = find_block_position(request.current_content, search_text)
+                blocks_with_positions.append((pos, search_block, replace_block))
+                print(f"   📍 Block at position {pos}: {search_text[:50]}...")
+            
+            # Sort by position DESCENDING (bottom-up)
+            blocks_with_positions.sort(key=lambda x: x[0], reverse=True)
+            
+            # Rebuild matches in sorted order
+            matches = [(search, replace) for pos, search, replace in blocks_with_positions]
+            print(f"✅ [EDIT] Blocks sorted: positions = {[p for p, s, r in blocks_with_positions]}")
+
         # Apply all SEARCH/REPLACE operations
         new_content = request.current_content
         failed_search_block = None
@@ -545,9 +596,10 @@ Response must start with "SEARCH:" immediately.
             search_text = search_block.strip()
             replace_text = replace_block.strip()
             
-            print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)}")
+            print(f"🔍 [EDIT] Processing replacement {i+1}/{len(matches)} (bottom-up order)")
             print(f"   Searching for: {len(search_text)} chars")
-
+            print(f"   Preview: {search_text[:80]}...")
+            
             # ✅ SPECIAL CASE: Empty search = prepend to file
             if not search_text.strip():
                 print(f"✅ [EDIT] Empty SEARCH block = prepend to file")
