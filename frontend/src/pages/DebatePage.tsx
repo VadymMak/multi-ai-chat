@@ -1,4 +1,9 @@
 /**
+ * This file defines the DebatePage component, which serves as the main
+ * interface for the Debate Mode feature, allowing users to watch AI
+ * debates and view results. It includes error handling and UI elements
+ * for controls and results display.
+ *
  * DebatePage Component
  * Main page for Debate Mode
  */

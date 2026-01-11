@@ -963,9 +963,18 @@ async def vscode_chat(
                     tokens_used=edit_response.tokens_used
                 )
                 
+            except HTTPException as he:
+                # ✅ Re-raise HTTP exceptions (edit format errors, search not found, etc.)
+                # This allows retry logic on frontend to work properly
+                print(f"\n{'='*80}")
+                print(f"⚠️ [EDIT mode] HTTPException - returning to client for retry:")
+                print(f"   Status: {he.status_code}")
+                print(f"   Detail: {he.detail}")
+                print(f"{'='*80}\n")
+                raise he
             except Exception as e:
                 print(f"\n{'='*80}")
-                print(f"❌ [EDIT mode] EXCEPTION CAUGHT:")
+                print(f"❌ [EDIT mode] UNEXPECTED EXCEPTION:")
                 print(f"   Error type: {type(e).__name__}")
                 print(f"   Error message: {str(e)}")
                 print(f"{'='*80}\n")
@@ -975,8 +984,8 @@ async def vscode_chat(
                 traceback.print_exc()
                 print(f"{'='*80}\n")
                 
-                # Fall through to normal chat mode
-                intent = "CHAT"
+                # Fall through to normal chat mode only for unexpected errors
+                intent = "CHAT""
         
         # ========== ROUTE TO CREATE MODE ==========
         elif intent == "CREATE" and project_id:
