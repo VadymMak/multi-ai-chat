@@ -524,26 +524,59 @@ Response must start with "SEARCH:" immediately.
             
             # Try normalized match
             if search_normalized in content_normalized:
-                print(f"✅ [EDIT] Found normalized match")
+                print(f"✅ [EDIT] Found normalized match in normalized content")
                 
-                # Find the actual position in original content
-                lines = new_content.split('\n')
-                search_lines = search_text.split('\n')
+                # Strategy: Find by unique line from search block
+                search_lines = search_text.strip().split('\n')
+                content_lines = new_content.split('\n')
                 
-                # Find approximate location
-                found = False
-                for line_idx in range(len(lines) - len(search_lines) + 1):
-                    # Check if this section matches (normalized)
-                    section = '\n'.join(lines[line_idx:line_idx + len(search_lines)])
-                    if normalize_code(section) == search_normalized:
-                        # Replace this section
-                        lines[line_idx:line_idx + len(search_lines)] = replace_text.split('\n')
-                        new_content = '\n'.join(lines)
-                        found = True
-                        print(f"✅ [EDIT] Applied replacement {i+1} (normalized): {len(search_text)} → {len(replace_text)} chars")
-                        break
+                # Find the most unique line in search block (longest non-empty line)
+                unique_line = None
+                for sl in search_lines:
+                    sl_stripped = sl.strip()
+                    if sl_stripped and (unique_line is None or len(sl_stripped) > len(unique_line)):
+                        unique_line = sl_stripped
                 
-                if found:
+                if unique_line:
+                    # Find this unique line in content
+                    found_idx = None
+                    for idx, cl in enumerate(content_lines):
+                        if unique_line in cl or cl.strip() == unique_line:
+                            found_idx = idx
+                            break
+                    
+                    if found_idx is not None:
+                        # Calculate start index (go back to find beginning of the block)
+                        # Find which line in search_lines contains our unique_line
+                        unique_line_offset = 0
+                        for offset, sl in enumerate(search_lines):
+                            if unique_line in sl.strip():
+                                unique_line_offset = offset
+                                break
+                        
+                        start_idx = found_idx - unique_line_offset
+                        end_idx = start_idx + len(search_lines)
+                        
+                        # Make sure indices are valid
+                        if start_idx >= 0 and end_idx <= len(content_lines):
+                            # Replace the section
+                            replace_lines = replace_text.strip().split('\n')
+                            content_lines[start_idx:end_idx] = replace_lines
+                            new_content = '\n'.join(content_lines)
+                            print(f"✅ [EDIT] Applied replacement {i+1} (normalized via unique line): {len(search_text)} → {len(replace_text)} chars")
+                            continue
+                
+                # Fallback: try simple normalized string replacement
+                print(f"⚠️ [EDIT] Unique line strategy failed, trying string replacement")
+                
+                # Build a pattern that's more flexible
+                search_pattern = search_text.strip()
+                content_to_search = new_content
+                
+                # Try removing trailing semicolons and braces variations
+                if search_pattern in content_to_search:
+                    new_content = content_to_search.replace(search_pattern, replace_text.strip(), 1)
+                    print(f"✅ [EDIT] Applied replacement {i+1} (direct pattern): {len(search_text)} → {len(replace_text)} chars")
                     continue
             
             # ✅ Search failed - prepare for retry
