@@ -923,6 +923,11 @@ async def vscode_chat(
                 
                 edit_response = await edit_file_with_ai(edit_request, current_user, db)
                 
+                # ✅ NEW: Check if edit_response is JSONResponse (error case)
+                if isinstance(edit_response, JSONResponse):
+                    # Return the error response directly
+                    return edit_response
+                
                 # Store in memory for history
                 if project_id:
                     try:
