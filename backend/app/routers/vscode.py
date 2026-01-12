@@ -6,7 +6,8 @@ Full Smart Context using EXISTING services:
 - store_message_with_embedding() from vector_service.py
 """
 from typing import Optional, List, Dict, Any, Literal
-from fastapi import APIRouter, Depends, HTTPException, Query
+console.log("Starting VS Code API Router");
+from fastapi import APIRouter, Depends, HTTPException, Query  # VS Code API Router initialized
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -90,6 +91,54 @@ def find_block_position(content: str, search_text: str) -> int:
                     return sum(len(content_lines[i]) + 1 for i in range(idx))
     
     return -1
+
+def find_fuzzy_match(content: str, search: str, threshold: float = 0.8) -> Optional[Dict[str, Any]]:
+    """
+    Find similar block using difflib SequenceMatcher.
+    Used as last resort when exact and normalized matches fail.
+    
+    From Aider approach - proven to reduce edit failures.
+    
+    Args:
+        content: Full file content
+        search: Search block to find
+        threshold: Minimum similarity ratio (0.8 = 80%)
+    
+    Returns:
+        Dict with start, end, ratio, content if found, None otherwise
+    """
+    from difflib import SequenceMatcher
+    
+    lines = content.split('\n')
+    search_lines = search.strip().split('\n')
+    search_len = len(search_lines)
+    
+    if search_len == 0:
+        return None
+    
+    best_match = None
+    best_ratio = 0.0
+    
+    # Sliding window over content
+    for i in range(len(lines) - search_len + 1):
+        window = '\n'.join(lines[i:i + search_len])
+        
+        # Calculate similarity ratio
+        ratio = SequenceMatcher(None, search.strip(), window.strip()).ratio()
+        
+        if ratio > best_ratio and ratio >= threshold:
+            best_ratio = ratio
+            best_match = {
+                'start': i,
+                'end': i + search_len,
+                'ratio': ratio,
+                'content': window
+            }
+    
+    if best_match:
+        print(f"🎯 [Fuzzy] Best match: {best_match['ratio']:.2%} at lines {best_match['start']}-{best_match['end']}")
+    
+    return best_match
 
 
 # ✅ Context Mode Type
@@ -674,6 +723,24 @@ Response must start with "SEARCH:" immediately.
                     new_content = content_to_search.replace(search_pattern, replace_text.strip(), 1)
                     print(f"✅ [EDIT] Applied replacement {i+1} (direct pattern): {len(search_text)} → {len(replace_text)} chars")
                     continue
+
+            # ✅ Strategy 3: Fuzzy match (last resort) - from Aider approach
+            print(f"🔍 [EDIT] Trying fuzzy match (80% threshold)...")
+            
+            fuzzy_match = find_fuzzy_match(new_content, search_text, threshold=0.8)
+            
+            if fuzzy_match:
+                print(f"✅ [EDIT] Fuzzy match found! Ratio: {fuzzy_match['ratio']:.2%}")
+                print(f"   Lines {fuzzy_match['start']}-{fuzzy_match['end']}")
+                
+                # Apply fuzzy match replacement
+                content_lines = new_content.split('\n')
+                replace_lines = replace_text.strip().split('\n')
+                content_lines[fuzzy_match['start']:fuzzy_match['end']] = replace_lines
+                new_content = '\n'.join(content_lines)
+                
+                print(f"✅ [EDIT] Applied replacement {i+1} (fuzzy): {len(search_text)} → {len(replace_text)} chars")
+                continue
             
             # ✅ Search failed - prepare for retry
             print(f"⚠️ [EDIT] Search block not found in file:")

@@ -1,3 +1,7 @@
+// Top-level comment: DebatePage component managing AI debate interface
+
+// This file handles the setup and rendering of the AI Debate Mode page
+
 /**
  * This file defines the DebatePage component, which serves as the main
  * interface for the Debate Mode feature, allowing users to watch AI
@@ -23,6 +27,8 @@ const handleError = (error: Error) => {
       console.error("Failed to handle error:", e);
     }
   };
+
+// Commit: Add error handling and improved UI for AI Debate Mode
 
   React.useEffect(() => {
     // Clear error after 5 seconds
@@ -102,7 +108,8 @@ const handleError = (error: Error) => {
         <DebateView />
       </div>
     </div>
-  );
+);
 };
 
+// Exporting the DebatePage component as the default export
 export default DebatePage;
