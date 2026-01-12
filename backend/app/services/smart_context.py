@@ -225,63 +225,49 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] Git structure failed: {e}")
     
     # ============================================================
-    # 5. Relevant code files WITH CONTENT
-    # FIXED: Now includes actual code, not just metadata!
+    # 5. Relevant code files WITH CONTENT (HYBRID SEARCH!)
+    # Uses: Semantic (pgvector) + FTS (tsvector) + Graph (dependencies)
     # ============================================================
     try:
-        from app.services.file_indexer import FileIndexer
+        from app.services.hybrid_search_service import hybrid_search
         
-        indexer = FileIndexer(db)
-        
-        # Search files by project_id
-        print(f"🔍 [Smart Context] Searching indexed files for project={project_id}...")
+        print(f"🔍 [Smart Context] Hybrid search for project={project_id}...")
 
-        enhanced_query = query
-        query_lower = query.lower()
-        
-        if any(term in query_lower for term in ["semantic", "search", "vector", "embedding"]):
-            enhanced_query = f"{query} pgvector database embedding similarity file_indexer"
-            print(f"🔍 [Query Enhancement] Added: pgvector, embedding, file_indexer")
-
-        relevant_files = await indexer.search_files(
+        # Use hybrid search with default preset
+        relevant_files = hybrid_search(
+            query=query,
             project_id=project_id,
-            query=enhanced_query,
+            db=db,
+            preset="code",  # Balanced: semantic=40%, fts=30%, graph=30%
             limit=15
         )
 
         if relevant_files:
-            # BOOST: Increase score for files with query terms in filename
-            query_words = query.lower().split()
-            
+            # Map combined_score to similarity for format function
             for f in relevant_files:
-                path = f.get("file_path", "").lower()
-                original_score = f.get("similarity", 0)
-                
-                # Check filename matches
-                matches = sum(1 for word in query_words if word in path)
-                
-                if matches > 0:
-                    # Boost by 0.2 per matching word (max 1.0)
-                    boosted_score = min(original_score + (matches * 0.2), 1.0)
-                    f["similarity"] = boosted_score
-                    print(f"🚀 [Boost] {path}: {original_score:.2f} → {boosted_score:.2f}")
+                f["similarity"] = f.get("combined_score", f.get("score", 0))
             
-            # Re-sort by boosted scores
-            relevant_files.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-       
             files_text = format_relevant_files_with_content(
                 files=relevant_files,
                 db=db,
                 project_id=project_id,
                 max_content_chars=4000  # ~1000 tokens for code
             )
+            
+            # Show search sources in log
+            sources_summary = {}
+            for f in relevant_files[:5]:
+                for src in f.get("sources", ["unknown"]):
+                    sources_summary[src] = sources_summary.get(src, 0) + 1
+            
             parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
-            print(f"✅ [Smart Context] Added {len(relevant_files)} relevant code files WITH content")
+            print(f"✅ [Smart Context] Added {len(relevant_files)} files via HYBRID search")
+            print(f"   Sources: {sources_summary}")
         else:
             print(f"ℹ️ [Smart Context] No indexed files found for query")
             
     except Exception as e:
-        print(f"⚠️ [Smart Context] File search failed: {e}")
+        print(f"⚠️ [Smart Context] Hybrid search failed: {e}")
         import traceback
         traceback.print_exc()
     
