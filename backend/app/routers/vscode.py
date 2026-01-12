@@ -6,7 +6,6 @@ Full Smart Context using EXISTING services:
 - store_message_with_embedding() from vector_service.py
 """
 from typing import Optional, List, Dict, Any, Literal
-console.log("Starting VS Code API Router");
 from fastapi import APIRouter, Depends, HTTPException, Query  # VS Code API Router initialized
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
