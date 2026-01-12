@@ -1047,6 +1047,22 @@ If you cannot complete the task properly, return the ORIGINAL file unchanged rat
     )
     
     new_content = ai_response.strip()
+
+    # ✅ NEW: Validate AI response - don't accept error messages as code!
+    if new_content.startswith("[ERROR]") or "quota" in new_content.lower() or "rate limit" in new_content.lower():
+        raise HTTPException(
+            status_code=503,
+            detail=f"AI service temporarily unavailable: {new_content[:100]}"
+        )
+
+    # ✅ NEW: Check for suspiciously short output
+    original_lines = len(file_content.split('\n'))
+    new_lines = len(new_content.split('\n'))
+    if new_lines < original_lines * 0.3 and original_lines > 10:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI returned truncated response ({new_lines} lines vs {original_lines} original). Please retry."
+        )
     
     # Remove markdown if present
     if new_content.startswith("```"):
