@@ -103,7 +103,7 @@ export const DebatePage: React.FC = () => {
         )}
 
         {/* Controls */}
-        <DebateControls />
+        <DebateControls onError={handleError} />
 
         {/* Results */}
         <DebateView />

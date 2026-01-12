@@ -9,11 +9,13 @@ import { useDebateStore } from "../../store/debateStore";
 interface DebateControlsProps {
   initialTopic?: string;
   onTopicChange?: (topic: string) => void;
+  onError?: (error: Error) => void;
 }
 
 export const DebateControls: React.FC<DebateControlsProps> = ({
   initialTopic = "",
   onTopicChange,
+  onError,
 }) => {
   const { isDebating, startDebate } = useDebateStore();
   const [topic, setTopic] = useState(initialTopic);
@@ -31,9 +33,11 @@ export const DebateControls: React.FC<DebateControlsProps> = ({
 
     try {
       await startDebate(topic, rounds);
-    } catch (error) {
-      // Error already handled in store
+} catch (error) {
       console.error("Debate error:", error);
+      if (error instanceof Error) {
+        onError?.(error);
+      }
     }
   };
 
