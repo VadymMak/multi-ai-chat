@@ -400,6 +400,11 @@ async def execute_step(
                 db=db,
                 memory=memory
             )
+
+            print(f"📤 [EXECUTE] Edit step {request.step_num} result:")
+            print(f"   action: {result.get('action')}")
+            print(f"   file_path: {result.get('file_path')}")
+            print(f"   new_content length: {len(result.get('new_content', '')) if result.get('new_content') else 0}")
             
         elif step["action"] == "delete":
             result = {
@@ -837,22 +842,37 @@ async def _execute_edit_step(
         
         # Try exact match first
         result = db.execute(
-            text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path = :fpath LIMIT 1"),
+            text("SELECT content, file_path FROM file_embeddings WHERE project_id = :pid AND file_path = :fpath LIMIT 1"),
             {"pid": project_id, "fpath": file_path}
         ).fetchone()
         
-        # If not found, try partial match
-        if not result:
-            result = db.execute(
-                text("SELECT content FROM file_embeddings WHERE project_id = :pid AND file_path LIKE :pattern LIMIT 1"),
-                {"pid": project_id, "pattern": f"%{file_name}"}
-            ).fetchone()
-        
         if result:
             file_content = result[0]
-            print(f"📄 [EXECUTE] Got file content from DB: {file_path} ({len(file_content)} chars)")
+            actual_path = result[1]
+            print(f"📄 [EXECUTE] Found exact match: {actual_path} ({len(file_content)} chars)")
         else:
-            print(f"⚠️ [EXECUTE] File not found in DB: {file_path}")
+            # Try partial match with filename
+            file_name_with_ext = file_path.split('/')[-1]
+            print(f"🔍 [EXECUTE] Trying partial match for: {file_name_with_ext}")
+            
+            result = db.execute(
+                text("""
+                    SELECT content, file_path FROM file_embeddings 
+                    WHERE project_id = :pid 
+                    AND file_path LIKE :pattern 
+                    LIMIT 1
+                """),
+                {"pid": project_id, "pattern": f"%/{file_name_with_ext}"}
+            ).fetchone()
+            
+            if result:
+                file_content = result[0]
+                actual_path = result[1]
+                # ✅ CRITICAL: Update step with correct full path!
+                step["file_path"] = actual_path
+                print(f"📄 [EXECUTE] Found via partial match: {actual_path} ({len(file_content)} chars)")
+            else:
+                print(f"⚠️ [EXECUTE] File not found in DB: {file_path}")
     
     # ✅ If still no content, raise error
     if not file_content:
@@ -1044,9 +1064,14 @@ If you cannot complete the task properly, return the ORIGINAL file unchanged rat
     if new_lines < original_lines * 0.5:
         print(f"⚠️ [EDIT] WARNING: Output significantly shorter! Original: {original_lines} lines, New: {new_lines} lines")
     
+    # ✅ Log what we're returning
+    print(f"📤 [EXECUTE] Returning edit result:")
+    print(f"   file_path: {step['file_path']}")
+    print(f"   new_content length: {len(new_content)}")
+    
     return {
         "action": "edit",
-        "file_path": step["file_path"],
+        "file_path": step["file_path"],  # Now has correct path!
         "original_content": file_content,
         "new_content": new_content,
         "message": f"Modified {step['file_path']}"

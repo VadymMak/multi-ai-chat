@@ -19,16 +19,17 @@ import { DebateView } from "../components/Debate/DebateView";
 export const DebatePage: React.FC = () => {
   const [error, setError] = React.useState<string | null>(null);
 
-const handleError = (error: Error) => {
+  const handleError = (error: Error) => {
     try {
       console.error("Debate page error:", error);
       setError(error.message || "An unexpected error occurred");
     } catch (e) {
       console.error("Failed to handle error:", e);
+      setError("An error occurred while processing another error");
     }
   };
 
-// Commit: Add error handling and improved UI for AI Debate Mode
+  // Commit: Add error handling and improved UI for AI Debate Mode
 
   React.useEffect(() => {
     // Clear error after 5 seconds
@@ -108,7 +109,7 @@ const handleError = (error: Error) => {
         <DebateView />
       </div>
     </div>
-);
+  );
 };
 
 // Exporting the DebatePage component as the default export
