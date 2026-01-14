@@ -270,6 +270,60 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] Hybrid search failed: {e}")
         import traceback
         traceback.print_exc()
+
+    # ============================================================
+    # 6. PROJECT DEPENDENCY TREE (AI Context - replaces print_tree.py!)
+    # ============================================================
+    try:
+        tree_result = db.execute(text("""
+            SELECT 
+                fe.file_path, fe.file_name, fe.language, fe.line_count,
+                (SELECT COUNT(*) FROM file_dependencies fd 
+                 WHERE fd.project_id = fe.project_id 
+                 AND fd.source_file = fe.file_path) as import_count
+            FROM file_embeddings fe
+            WHERE fe.project_id = :project_id
+            ORDER BY fe.file_path
+            LIMIT 200
+        """), {"project_id": project_id}).fetchall()
+        
+        if tree_result:
+            # Group by directory
+            dirs = {}
+            for row in tree_result:
+                file_path, file_name, language, line_count, import_count = row
+                parts = file_path.split("/")
+                dir_path = "/".join(parts[:-1]) if len(parts) > 1 else "."
+                
+                if dir_path not in dirs:
+                    dirs[dir_path] = []
+                dirs[dir_path].append({
+                    "name": file_name,
+                    "lang": language or "?",
+                    "lines": line_count or 0,
+                    "imports": import_count or 0
+                })
+            
+            # Build compact tree (max 50 lines)
+            tree_lines = []
+            line_count = 0
+            for dir_path in sorted(dirs.keys()):
+                if line_count >= 50:
+                    tree_lines.append(f"... and {len(dirs) - len(tree_lines)} more directories")
+                    break
+                tree_lines.append(f"📁 {dir_path}/")
+                line_count += 1
+                for f in sorted(dirs[dir_path], key=lambda x: x["name"])[:10]:
+                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L, {f['imports']} imports)")
+                    line_count += 1
+                    if line_count >= 50:
+                        break
+            
+            tree_text = "\n".join(tree_lines)
+            parts.append(f"📌 PROJECT TREE:\n{tree_text}")
+            print(f"✅ [Smart Context] Added project tree ({len(tree_result)} files)")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] Project tree failed: {e}")
     
     result = "\n\n".join(parts)
     print(f"✅ [Smart Context] Built context with {len(parts)} components")
