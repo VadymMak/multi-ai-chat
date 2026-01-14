@@ -292,8 +292,8 @@ async def build_smart_context(
             dirs = {}
             for row in tree_result:
                 file_path, file_name, language, line_count, import_count = row
-                parts = file_path.split("/")
-                dir_path = "/".join(parts[:-1]) if len(parts) > 1 else "."
+                file_parts = file_path.split("/")  # RENAMED: was 'parts'
+                dir_path = "/".join(file_parts[:-1]) if len(file_parts) > 1 else "."
                 
                 if dir_path not in dirs:
                     dirs[dir_path] = []
@@ -304,24 +304,32 @@ async def build_smart_context(
                     "imports": import_count or 0
                 })
             
-            # Build compact tree (max 50 lines)
+            # Build compact tree (max 80 lines for better coverage)
             tree_lines = []
-            line_count = 0
+            lines_used = 0  # RENAMED: was 'line_count' - conflicted with DB column!
+            max_lines = 80  # Increased from 50
+            dirs_shown = 0
+            
             for dir_path in sorted(dirs.keys()):
-                if line_count >= 50:
-                    tree_lines.append(f"... and {len(dirs) - len(tree_lines)} more directories")
+                if lines_used >= max_lines:
+                    remaining = len(dirs) - dirs_shown
+                    if remaining > 0:
+                        tree_lines.append(f"... and {remaining} more directories")
                     break
+                    
                 tree_lines.append(f"📁 {dir_path}/")
-                line_count += 1
+                lines_used += 1
+                dirs_shown += 1
+                
                 for f in sorted(dirs[dir_path], key=lambda x: x["name"])[:10]:
-                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L, {f['imports']} imports)")
-                    line_count += 1
-                    if line_count >= 50:
+                    if lines_used >= max_lines:
                         break
+                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L, {f['imports']} imports)")
+                    lines_used += 1
             
             tree_text = "\n".join(tree_lines)
             parts.append(f"📌 PROJECT TREE:\n{tree_text}")
-            print(f"✅ [Smart Context] Added project tree ({len(tree_result)} files)")
+            print(f"✅ [Smart Context] Added project tree ({len(tree_result)} files, {dirs_shown} dirs)")
     except Exception as e:
         print(f"⚠️ [Smart Context] Project tree failed: {e}")
     
