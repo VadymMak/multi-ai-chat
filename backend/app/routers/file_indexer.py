@@ -845,3 +845,153 @@ Imports: {', '.join(metadata.get('imports', []))}
         db.rollback()
         logger.exception(f"Failed to re-index file: {e}")
         raise HTTPException(500, f"Re-indexing failed: {str(e)}")
+    
+# ====================================================================
+# DEPENDENCY GRAPH FOR VISUALIZATION (Phase 1.8)
+# ====================================================================
+
+@router.get("/dependency-graph/{project_id}")
+async def get_dependency_graph(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get full dependency graph for visualization.
+    
+    Returns:
+    - nodes: All files with metadata
+    - edges: All import relationships
+    - tree: Formatted tree string for AI context
+    - stats: Summary statistics
+    
+    Used by:
+    - Web App (React Flow visualization)
+    - VS Code Extension (Mermaid diagram)
+    - AI Context (replaces print_tree.py!)
+    """
+    # Verify project access
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    
+    if not project:
+        raise HTTPException(404, "Project not found")
+    
+    try:
+        # 1. Get all files (nodes)
+        files_result = db.execute(text("""
+            SELECT 
+                id, file_path, file_name, language, 
+                line_count, file_size, metadata
+            FROM file_embeddings
+            WHERE project_id = :project_id
+            ORDER BY file_path
+        """), {"project_id": project_id}).fetchall()
+        
+        nodes = []
+        file_paths = set()
+        
+        for row in files_result:
+            file_path = row[1]
+            file_paths.add(file_path)
+            
+            # Determine node type based on path
+            node_type = "file"
+            if "/components/" in file_path or "/pages/" in file_path:
+                node_type = "component"
+            elif "/services/" in file_path or "/api/" in file_path:
+                node_type = "service"
+            elif "/utils/" in file_path or "/helpers/" in file_path:
+                node_type = "utility"
+            elif "/models/" in file_path or "/types/" in file_path:
+                node_type = "model"
+            elif "/routers/" in file_path or "/routes/" in file_path:
+                node_type = "router"
+            
+            nodes.append({
+                "id": str(row[0]),
+                "file_path": file_path,
+                "label": row[2],  # file_name
+                "language": row[3],
+                "line_count": row[4] or 0,
+                "file_size": row[5] or 0,
+                "type": node_type,
+                "metadata": row[6] if row[6] else {}
+            })
+        
+        # 2. Get all dependencies (edges)
+        deps_result = db.execute(text("""
+            SELECT 
+                fd.source_file, fd.target_file, fd.dependency_type,
+                fe_source.id as source_id, fe_target.id as target_id
+            FROM file_dependencies fd
+            LEFT JOIN file_embeddings fe_source 
+                ON fe_source.project_id = fd.project_id 
+                AND fe_source.file_path = fd.source_file
+            LEFT JOIN file_embeddings fe_target 
+                ON fe_target.project_id = fd.project_id 
+                AND fe_target.file_path = fd.target_file
+            WHERE fd.project_id = :project_id
+            ORDER BY fd.source_file
+        """), {"project_id": project_id}).fetchall()
+        
+        edges = []
+        for row in deps_result:
+            if row[3] and row[4]:  # Both source and target exist
+                edges.append({
+                    "source": str(row[3]),
+                    "target": str(row[4]),
+                    "source_path": row[0],
+                    "target_path": row[1],
+                    "type": row[2] or "import"
+                })
+        
+        # 3. Build tree string for AI context
+        tree_lines = [f"Project: {project.name}", ""]
+        
+        # Group files by directory
+        dirs = {}
+        for node in nodes:
+            parts = node["file_path"].split("/")
+            if len(parts) > 1:
+                dir_path = "/".join(parts[:-1])
+            else:
+                dir_path = "."
+            
+            if dir_path not in dirs:
+                dirs[dir_path] = []
+            dirs[dir_path].append(node)
+        
+        # Build tree
+        for dir_path in sorted(dirs.keys()):
+            tree_lines.append(f"📁 {dir_path}/")
+            for node in sorted(dirs[dir_path], key=lambda x: x["label"]):
+                deps_count = len([e for e in edges if e["source_path"] == node["file_path"]])
+                tree_lines.append(f"  ├── {node['label']} ({node['language']}, {node['line_count']} lines, {deps_count} imports)")
+        
+        tree_string = "\n".join(tree_lines)
+        
+        # 4. Calculate stats
+        stats = {
+            "total_files": len(nodes),
+            "total_dependencies": len(edges),
+            "languages": list(set(n["language"] for n in nodes if n["language"])),
+            "total_lines": sum(n["line_count"] for n in nodes),
+        }
+        
+        logger.info(f"📊 Dependency graph: {stats['total_files']} nodes, {stats['total_dependencies']} edges")
+        
+        return {
+            "project_id": project_id,
+            "project_name": project.name,
+            "nodes": nodes,
+            "edges": edges,
+            "tree": tree_string,
+            "stats": stats
+        }
+        
+    except Exception as e:
+        logger.exception(f"Failed to get dependency graph: {e}")
+        raise HTTPException(500, f"Failed: {str(e)}")
