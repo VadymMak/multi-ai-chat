@@ -282,17 +282,17 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                   )}
 
 
-{/* Graph Button */}
-<button
-  onClick={(e) => {
-    e.stopPropagation();
-    navigate(`/project/${project.id}/graph`);
-  }}
-  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-primary/10 rounded transition-opacity"
-  title="View Dependency Graph"
->
-  <BarChart3 size={14} className="text-primary" />
-</button>
+                  {/* Graph Button */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/project/${project.id}/graph`);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-primary/10 rounded transition-opacity"
+                    title="View Dependency Graph"
+                  >
+                    <BarChart3 size={14} className="text-primary" />
+                  </button>
 
                   {/* More Button (shows on hover) */}
                   <button

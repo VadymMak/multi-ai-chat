@@ -318,7 +318,7 @@ const DependencyGraphPage: React.FC = () => {
       try {
         const token = localStorage.getItem('token');
         const response = await fetch(
-          `${import.meta.env.VITE_API_URL || ''}/api/file-indexer/dependency-graph/${projectId}`,
+        `${import.meta.env.VITE_API_BASE_URL || ''}/file-indexer/dependency-graph/${projectId}`,
           {
             headers: {
               'Authorization': `Bearer ${token}`,
