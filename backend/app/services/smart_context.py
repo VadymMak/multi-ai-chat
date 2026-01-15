@@ -202,49 +202,42 @@ async def build_smart_context(
                 if language:
                     languages.add(language)
             
-            # Build compact tree
+            # Build COMPACT tree - show ALL directories but fewer files per dir
             tree_lines = []
             
             # Header with stats
             tree_lines.append(f"📊 {len(tree_result)} files | {total_lines:,} lines | {', '.join(sorted(languages)[:5])}")
             tree_lines.append("")
             
-            lines_used = 2
-            max_lines = 60
-            dirs_shown = 0
+            # STRATEGY: Show ALL directories, but only key files (3 per dir max)
+            # This ensures AI knows the FULL structure
             
             for dir_path in sorted(dirs.keys()):
-                if lines_used >= max_lines:
-                    remaining = len(dirs) - dirs_shown
-                    if remaining > 0:
-                        tree_lines.append(f"... and {remaining} more directories")
-                    break
-                
-                # Directory header with file count
                 dir_files = dirs[dir_path]
+                
+                # Directory header with ALL file names (compact format)
+                file_names = [f["name"] for f in sorted(dir_files, key=lambda x: x["name"])]
+                
+                # Show directory with file count
                 tree_lines.append(f"📁 {dir_path}/ ({len(dir_files)} files)")
-                lines_used += 1
-                dirs_shown += 1
                 
-                # Sort files: most "used_by" first (core files)
-                sorted_files = sorted(dir_files, key=lambda x: x["used_by"], reverse=True)
-                
-                for f in sorted_files[:8]:  # Max 8 files per dir
-                    if lines_used >= max_lines:
-                        break
-                    
-                    # Show used_by count for important files
-                    used_by_indicator = f" ⭐{f['used_by']}" if f['used_by'] > 2 else ""
-                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L){used_by_indicator}")
-                    lines_used += 1
-                
-                if len(dir_files) > 8:
-                    tree_lines.append(f"  └── ... +{len(dir_files) - 8} more")
-                    lines_used += 1
+                # List ALL files in compact format (just names, no metadata)
+                # This is crucial for AI to know what exists!
+                if len(file_names) <= 10:
+                    # Show all files if 10 or fewer
+                    for name in file_names:
+                        tree_lines.append(f"  ├── {name}")
+                else:
+                    # Show first 5 + last 3 + count
+                    for name in file_names[:5]:
+                        tree_lines.append(f"  ├── {name}")
+                    tree_lines.append(f"  │   ... ({len(file_names) - 8} more files)")
+                    for name in file_names[-3:]:
+                        tree_lines.append(f"  ├── {name}")
             
             tree_text = "\n".join(tree_lines)
             parts.append(f"📌 PROJECT STRUCTURE (from database):\n{tree_text}")
-            print(f"✅ [Smart Context] 1. Added project tree ({len(tree_result)} files, {dirs_shown} dirs)")
+            print(f"✅ [Smart Context] 1. Added project tree ({len(tree_result)} files, {len(dirs)} dirs, ALL shown)")
         else:
             print(f"ℹ️ [Smart Context] 1. No indexed files found")
             
