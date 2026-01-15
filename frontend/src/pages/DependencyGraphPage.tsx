@@ -27,6 +27,7 @@ import ReactFlow, {
   ConnectionMode,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+import { useAuthStore } from '../store/authStore';
 
 import { useParams, useNavigate } from 'react-router-dom';
 
@@ -305,54 +306,59 @@ const DependencyGraphPage: React.FC = () => {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   
   // ============================================================
-  // FETCH DATA
-  // ============================================================
-  
-  useEffect(() => {
-    const fetchGraph = async () => {
-      if (!projectId) return;
-      
-      setLoading(true);
-      setError(null);
-      
-      try {
-        const token = localStorage.getItem('token');
-        const response = await fetch(
-        `${import.meta.env.VITE_API_BASE_URL || ''}/file-indexer/dependency-graph/${projectId}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch: ${response.status}`);
-        }
-        
-        const data: DependencyGraphResponse = await response.json();
-        setGraphData(data);
-        
-        // Calculate layout and set nodes/edges
-        const { nodes: layoutNodes, edges: layoutEdges } = calculateLayout(
-          data.nodes, 
-          data.edges
-        );
-        
-        setNodes(layoutNodes);
-        setEdges(layoutEdges);
-        
-      } catch (err) {
-        console.error('Failed to fetch dependency graph:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load graph');
-      } finally {
-        setLoading(false);
-      }
-    };
+// FETCH DATA
+// ============================================================
+
+// Get auth state
+const { isAuthenticated, token } = useAuthStore();
+
+useEffect(() => {
+  const fetchGraph = async () => {
+    // Wait for auth
+    if (!projectId || !isAuthenticated || !token) {
+      return;
+    }
     
-    fetchGraph();
-  }, [projectId, setNodes, setEdges]);
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_API_BASE_URL || ''}/file-indexer/dependency-graph/${projectId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch: ${response.status}`);
+      }
+      
+      const data: DependencyGraphResponse = await response.json();
+      setGraphData(data);
+      
+      // Calculate layout and set nodes/edges
+      const { nodes: layoutNodes, edges: layoutEdges } = calculateLayout(
+        data.nodes, 
+        data.edges
+      );
+      
+      setNodes(layoutNodes);
+      setEdges(layoutEdges);
+      
+    } catch (err) {
+      console.error('Failed to fetch dependency graph:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load graph');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  fetchGraph();
+}, [projectId, isAuthenticated, token, setNodes, setEdges]);
   
   // ============================================================
   // NODE CLICK HANDLER
