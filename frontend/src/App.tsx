@@ -12,6 +12,10 @@ import LoadingOverlay from "./components/Shared/LoadingOverlay";
 import { useSettingsStore } from "./store/settingsStore";
 import ToastContainer from "./components/Shared/ToastContainer";
 import { NetworkStatus } from "./components/NetworkStatus";
+import DependencyGraphPage from './pages/DependencyGraphPage';
+
+// In Routes:
+<Route path="/project/:projectId/graph" element={<DependencyGraphPage />} />
 // ✅ ДОБАВИТЬ: Import auth и role stores
 import { useAuthStore } from "./store/authStore";
 import { useRoleStore } from "./store/roleStore";
@@ -108,6 +112,7 @@ const App: React.FC = () => {
         <Route path="/" element={<Landing />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/project/:projectId/graph" element={<DependencyGraphPage />} />
         <Route
           path="/chat"
           element={

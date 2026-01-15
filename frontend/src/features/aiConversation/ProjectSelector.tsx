@@ -14,6 +14,8 @@ import { toast } from "../../store/toastStore";
 import { useChatStore } from "@/store/chatStore";
 import ProjectContextMenu from "../../components/Settings/ProjectContextMenu";
 import ProjectSettingsModal from "../../components/Settings/ProjectSettingsModal";
+import { BarChart3 } from "lucide-react";  // или используем ViewGraphButton
+import { useNavigate } from "react-router-dom";
 
 interface ProjectSelectorProps {
   onOpenSettings?: () => void;
@@ -29,6 +31,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
   const forceRefreshProjects = useProjectStore(
     (state) => state.forceRefreshProjects
   );
+  const navigate = useNavigate();
 
   const deleteProject = useProjectStore((state) => state.deleteProject); // ❌ УДАЛИ ЭТУ СТРОКУ
 
@@ -277,6 +280,19 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                       <Link2 size={12} />
                     </span>
                   )}
+
+
+{/* Graph Button */}
+<button
+  onClick={(e) => {
+    e.stopPropagation();
+    navigate(`/project/${project.id}/graph`);
+  }}
+  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-primary/10 rounded transition-opacity"
+  title="View Dependency Graph"
+>
+  <BarChart3 size={14} className="text-primary" />
+</button>
 
                   {/* More Button (shows on hover) */}
                   <button
