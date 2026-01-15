@@ -111,16 +111,17 @@ FORMAT_RULES = {
     "tree": """
 
 ## RESPONSE FORMAT FOR FILE LISTINGS:
-CRITICAL: Each file MUST be on its OWN LINE!
+CRITICAL: Put the file tree inside a code block to preserve formatting!
 
 When listing files or directory structure:
-- Put EACH file on a SEPARATE LINE
-- Use tree characters: ├── for files, └── for last file
-- NEVER put multiple files on the same line
+1. First write a brief intro sentence
+2. Then put the tree inside a ```text code block
+3. Each file on its own line with ├── or └──
 
-CORRECT FORMAT (each file on new line):
+CORRECT FORMAT:
 The backend/app/services/ directory contains 19 files:
 
+```text
 📁 backend/app/services/ (19 files)
 ├── __init__.py
 ├── auto_learning.py
@@ -141,15 +142,13 @@ The backend/app/services/ directory contains 19 files:
 ├── youtube_http.py
 ├── youtube_service.py
 └── youtube_transcript_service.py
-
-WRONG FORMAT (do NOT do this - files on same line):
-├── file1.py ├── file2.py ├── file3.py
+```
 
 RULES:
-1. ONE file per line - NEVER multiple files on same line
-2. Use newline character after each file
-3. NO code blocks around directory paths
-4. Show ALL files in the directory"""
+1. Use ```text code block for the tree
+2. ONE file per line inside the code block
+3. Show ALL files from the PROJECT STRUCTURE section
+4. Use ├── for files and └── for last file"""
 }
 
 # Special formatting for YouTube results
