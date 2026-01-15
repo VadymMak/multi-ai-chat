@@ -1,4 +1,5 @@
 # app/routers/ask_ai_to_ai.py
+# REFACTORED: Uses unified build_smart_context instead of _build_smart_context_from_git
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +25,9 @@ from app.prompts.prompt_builder import build_full_prompt
 from app.config.settings import settings
 from app.deps import get_current_active_user
 from app.utils.api_key_resolver import get_openai_key, get_anthropic_key
+
+# ✅ REFACTORED: Import unified build_smart_context
+from app.services.smart_context import build_smart_context
 
 # В начале файла, после существующих imports добавить:
 from app.config.debate_prompts import get_round_config, get_mode_info
@@ -390,7 +394,7 @@ async def claude_with_retry(
     system: Optional[str] = None,
     retries: int = 2,
     api_key: Optional[str] = None,
-    model: str = "claude-sonnet-4-20250514"  # ← ADD THIS
+    model: str = "claude-sonnet-4-20250514"
 ) -> str:
     """Claude wrapper with simple retries/backoff"""
     filtered_messages = [m for m in messages if m.get("role") != "system"]
@@ -408,7 +412,7 @@ async def claude_with_retry(
                 ask_claude, 
                 filtered_messages, 
                 system=system,
-                model=model,  # ← ADD THIS
+                model=model,
                 api_key=api_key
             )
             last = ans or ""
@@ -460,7 +464,7 @@ def _get_or_create_session_id(memory: MemoryManager, role_id: int, project_id: s
         return provided.strip()
     try:
         if hasattr(memory, "get_or_create_chat_session_id"):
-            return memory.get_or_create_chat_session_id(role_id, project_id)  # type: ignore[attr-defined]
+            return memory.get_or_create_chat_session_id(role_id, project_id)
     except Exception as e:
         print(f"[get_or_create_chat_session_id error] {e}")
     last = memory.get_last_session(role_id=role_id, project_id=project_id)
@@ -473,188 +477,12 @@ def _extract_terms_from_topic(topic: str) -> List[str]:
     toks = re.findall(r"[A-Za-z0-9_]+", topic or "")
     return [t for t in toks if len(t) >= 3][:8]
 
-async def _build_smart_context_from_git(
-    project: Optional[Project],
-    memory: MemoryManager,
-    db: Session,  # ← NEW PARAMETER
-    role_id: int,
-    project_id: str,
-    query: str,
-    max_tokens: int = 4000
-) -> str:
-    """
-    Build smart context using Git structure instead of full history.
-    
-    Returns:
-        Formatted context string with:
-        - Git file structure (~2K tokens)
-        - Recent messages (~500 tokens)
-        - Semantic search results (~800 tokens)
-        - Memory summaries (~700 tokens)
-        - Relevant code files (~500 tokens) ← NEW!
-    """
-    parts = []
-    
-    # 1. Git Structure (if available)
-    if project and project.git_url and project.project_structure:
-        try:
-            structure = json.loads(project.project_structure)
-            files = structure.get("files", [])
-            
-            if files:
-                git_info = f"""
-## 📁 Project Structure
 
-Repository: {project.git_url}
-Last synced: {project.git_updated_at or 'Never'}
-Files: {len(files)}
+# ============================================================
+# ✅ REMOVED: _build_smart_context_from_git function
+# Now using unified build_smart_context from smart_context.py
+# ============================================================
 
-### File List:
-"""
-                # List first 100 files to stay within token budget
-                for f in files[:100]:
-                    git_info += f"\n- {f.get('path', 'unknown')}"
-                
-                if len(files) > 100:
-                    git_info += f"\n... and {len(files) - 100} more files"
-                
-                parts.append(git_info)
-                print(f"✅ Git structure loaded: {len(files)} files")
-        except Exception as e:
-            print(f"⚠️ Failed to load Git structure: {e}")
-    
-    # 2. Recent messages (last 5 only)
-    try:
-        messages_data = memory.retrieve_messages(
-            role_id=role_id,
-            project_id=project_id,
-            limit=5,  # Only last 5!
-            for_display=False,
-        )
-        rows = messages_data.get("messages", [])
-        if rows:
-            recent = "\n\n## 💬 Recent Conversation:\n\n"
-            for r in rows[-5:]:
-                sender = r.get("sender", "unknown")
-                text = r.get("text", "")[:200]  # Max 200 chars per message
-                recent += f"**{sender}:** {text}\n"
-            parts.append(recent)
-            print(f"✅ Recent messages: {len(rows)} included")
-    except Exception as e:
-        print(f"⚠️ Failed to load recent messages: {e}")
-    
-    # 3. Semantic search (pgvector)
-    try:
-        if hasattr(memory, 'search_similar_memories'):
-            similar = memory.search_similar_memories(
-                query=query,
-                role_id=role_id,
-                project_id=project_id,
-                top_k=3
-            )
-            if similar:
-                semantic = "\n\n## 🔍 Relevant Past Context:\n\n"
-                for idx, item in enumerate(similar, 1):
-                    summary = item.get("summary", "")[:300]
-                    semantic += f"{idx}. {summary}\n"
-                parts.append(semantic)
-                print(f"✅ Semantic search: {len(similar)} results")
-    except Exception as e:
-        print(f"⚠️ Semantic search failed: {e}")
-    
-    # 4. Memory summaries
-    try:
-        summaries = memory.load_recent_summaries(
-            role_id=role_id,
-            project_id=project_id,
-            limit=3
-        )
-        if summaries:
-            summary_text = "\n\n## 📝 Previous Summaries:\n\n"
-            for idx, s in enumerate(summaries, 1):
-                summary_text += f"{idx}. {s[:300]}\n"
-            parts.append(summary_text)
-            print(f"✅ Summaries: {len(summaries)} included")
-    except Exception as e:
-        print(f"⚠️ Failed to load summaries: {e}")
-    
-    # ============================================================
-    # 5. Relevant code files from file_embeddings (NEW!)
-    # ============================================================
-    try:
-        if project and project.git_url:
-            from app.services.file_indexer import FileIndexer
-            
-            indexer = FileIndexer(db)
-            project_id_int = int(project_id) if str(project_id).isdigit() else 0
-            
-            relevant_files = await indexer.search_files(
-                project_id=project_id_int,
-                query=query,
-                limit=3
-            )
-            
-            if relevant_files:
-                files_text = "\n\n## 📄 Relevant Code Files:\n\n"
-                
-                for f in relevant_files:
-                    path = f.get("file_path", "unknown")
-                    lang = f.get("language", "")
-                    similarity = f.get("similarity", 0)
-                    
-                    files_text += f"**{path}** ({lang}, {similarity:.0%} relevant)\n"
-                    
-                    # Try to load actual file content
-                    try:
-                        from sqlalchemy import text
-                        result = db.execute(text("""
-                            SELECT content FROM file_embeddings
-                            WHERE project_id = :project_id AND file_path = :file_path
-                        """), {"project_id": project_id_int, "file_path": path}).fetchone()
-                        
-                        if result and result[0]:
-                            content = result[0]
-                            # Limit to 500 chars per file
-                            if len(content) > 500:
-                                content = content[:500] + "\n... (truncated)"
-                            
-                            files_text += f"```{lang}\n{content}\n```\n\n"
-                        else:
-                            # Fallback to metadata if no content
-                            metadata = f.get("metadata", {})
-                            if metadata.get("functions"):
-                                funcs_list = metadata["functions"][:5]
-                                files_text += f"  - functions: {', '.join(funcs_list)}\n"
-                            if metadata.get("classes"):
-                                classes_list = metadata["classes"][:5]
-                                files_text += f"  - classes: {', '.join(classes_list)}\n"
-                            
-                    except Exception as content_err:
-                        print(f"⚠️ Could not load content for {path}: {content_err}")
-                
-                parts.append(files_text)
-                print(f"✅ Relevant code files: {len(relevant_files)} with content")
-            else:
-                print(f"ℹ️ No indexed files found for query")
-                
-    except Exception as e:
-        print(f"⚠️ File search failed: {e}")
-    
-    context = "\n".join(parts)
-    
-    # Token check
-    try:
-        token_count = memory.count_tokens(context)
-        print(f"📊 Smart context size: {token_count} tokens (target: {max_tokens})")
-        
-        if token_count > max_tokens:
-            print(f"⚠️ Context too large, truncating...")
-            # Simple truncation - keep first 80%
-            context = context[:int(len(context) * 0.8)]
-    except Exception as e:
-        print(f"⚠️ Token counting failed: {e}")
-    
-    return context
 
 # -------------------- Project Builder Mode Handler --------------------
 async def _handle_project_builder_mode(
@@ -722,8 +550,8 @@ async def _handle_project_builder_mode(
     
     print(f"✅ Round 2 complete: {len(claude_review)} chars")
 
-    # ---- Final: Merge (Claude Sonnet 4.5) ----  # ✅ Правильный комментарий
-    print(f"🎯 Final: Merging with Claude Sonnet 4.5...")  # ✅ Обновлённое сообщение
+    # ---- Final: Merge (Claude Sonnet 4.5) ----
+    print(f"🎯 Final: Merging with Claude Sonnet 4.5...")
 
     merger_prompt = final_config["prompt_template"].format(
         topic=data.topic,
@@ -735,7 +563,7 @@ async def _handle_project_builder_mode(
         final_reply_raw = await claude_with_retry(
             [{"role": "user", "content": merger_prompt}],
             system="You are a project architecture expert. Create the best possible final structure.",
-            model="claude-sonnet-4-5-20250929",  # ✅ ДОБАВИТЬ ЭТУ СТРОКУ!
+            model="claude-sonnet-4-5-20250929",
             api_key=anthropic_key
         )
     except Exception as e:
@@ -914,7 +742,7 @@ async def _handle_debate_mode(
     web_hits: List[Dict[str, Any]],
     canon_digest: str,
     canon_items_struct: List[Dict[str, Any]],
-    project: Optional[Project] = None,  # ← ДОБАВЬ ЭТУ СТРОКУ
+    project: Optional[Project] = None,
 ) -> JSONResponse:
     """
     Standard Debate mode: Starter replies → Claude reviews → Final summary
@@ -1175,6 +1003,8 @@ async def ask_ai_to_ai_route(
     """
     Boost mode: one model answers, another reviews, then a final summary is produced.
     Supports modes: "debate" (default) and "project-builder"
+    
+    ✅ REFACTORED: Now uses unified build_smart_context from smart_context.py
     """
 
     # 🔧 ФИКС: Если role_id=9 (Project Builder) → форсировать project-builder mode
@@ -1205,7 +1035,7 @@ async def ask_ai_to_ai_route(
         f"user_id={current_user.id}"
     )
 
-    # ---- Smart Context: Use Git structure instead of full history ----
+    # ---- Get project for context ----
     try:
         proj_id_int = int(project_id) if str(project_id).isdigit() else None
         project: Optional[Project] = db.query(Project).filter_by(id=proj_id_int).first() if proj_id_int else None
@@ -1218,36 +1048,26 @@ async def ask_ai_to_ai_route(
         print(f"[Project lookup error] {e}")
         project = None
     
-    # Build smart context if Git is linked
-    if project and project.git_url:
-        print("🚀 Using Smart Context (Git structure)")
-        smart_context = await _build_smart_context_from_git(
-            project=project,
-            memory=memory,
-            db=db,  # ← ADD THIS
+    # ============================================================
+    # ✅ REFACTORED: Use unified build_smart_context
+    # ============================================================
+    print("🚀 Using unified Smart Context (from file_embeddings)")
+    
+    try:
+        smart_context = await build_smart_context(
+            project_id=proj_id_int or 0,
             role_id=role_id,
-            project_id=project_id,
             query=data.topic,
-            max_tokens=4000
+            session_id=chat_session_id,
+            db=db,
+            memory=memory
         )
-        # Use smart context as "history" for the AI
         history = [{"role": "system", "content": smart_context}]
-        print(f"✅ Smart context ready (~4K tokens)")
-    else:
-        # Fallback to old method if no Git linked
-        print("⚠️ No Git linked, using traditional history")
-        messages_data = memory.retrieve_messages(
-            role_id=role_id,
-            project_id=project_id,
-            chat_session_id=chat_session_id,
-            limit=HISTORY_FETCH_LIMIT,
-            for_display=False,
-        )
-        rows = messages_data.get("messages", [])
-        history = _rows_to_messages(rows)
-        history = _clip_by_tokens(memory, history, HISTORY_MAX_TOKENS)
-        if history:
-            print(f"🧩 Context included → {len(history)} turns")
+        print(f"✅ Smart context ready (~{len(smart_context) // 4} tokens)")
+    except Exception as e:
+        print(f"⚠️ Smart context failed: {e}, using empty history")
+        history = []
+    # ============================================================
 
     # ---- Canonical Context (optional) ----
     canon_digest = ""
@@ -1347,4 +1167,5 @@ async def ask_ai_to_ai_route(
             web_hits=web_hits,
             canon_digest=canon_digest,
             canon_items_struct=canon_items_struct,
+            project=project,
         )
