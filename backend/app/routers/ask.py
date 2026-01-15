@@ -51,6 +51,179 @@ SUMMARIZE_TRIGGER_TOKENS = getattr(settings, "SUMMARIZE_TRIGGER_TOKENS", 2000)
 ENABLE_CANON = bool(getattr(settings, "ENABLE_CANON", False))
 CANON_TOPK = int(getattr(settings, "CANON_TOPK", 6))
 
+
+# ============================================================
+# 🎯 SYSTEM PROMPTS - REFACTORED FOR OPTIMAL PERFORMANCE
+# ============================================================
+
+# Base system prompt - coding-aware, context-aware
+BASE_SYSTEM_PROMPT = """You are a senior software engineer and helpful assistant working on THIS specific project.
+
+## YOUR CAPABILITIES:
+You have access to REAL project data from the database:
+- PROJECT STRUCTURE: Actual files indexed in the database (not cached/stale data)
+- PAST DECISIONS: Summaries of previous conversations and architectural decisions
+- RECENT CONVERSATION: Last messages for context continuity
+- RELATED DISCUSSIONS: Semantically similar past conversations
+- RELEVANT CODE: Actual source code files matching the current query
+
+## CRITICAL RULES:
+1. USE the project structure provided - these are REAL files from the database
+2. FOLLOW existing code patterns shown in RELEVANT CODE section
+3. DO NOT hallucinate file paths - only reference files shown in PROJECT STRUCTURE
+4. DO NOT claim you cannot see previous messages - you have RECENT CONVERSATION
+5. BE CONSISTENT with PAST DECISIONS when making recommendations
+6. REFERENCE specific files by their exact paths when discussing code"""
+
+# Formatting rules for different output modes
+FORMAT_RULES = {
+    "plain": """
+
+## RESPONSE FORMAT:
+- Use concise plain text paragraphs
+- Do NOT use code blocks (```) unless showing actual code
+- Do NOT put each item in a separate code block
+- For file listings, use tree format:
+  📁 directory/
+  ├── file1.py
+  ├── file2.py
+  └── file3.py
+- Keep responses focused and actionable""",
+
+    "code": """
+
+## RESPONSE FORMAT:
+- Return code in a SINGLE fenced code block
+- Use the appropriate language label
+- Include necessary imports at the top
+- Add brief comments for complex logic
+- No explanations before or after the code block""",
+
+    "doc": """
+
+## RESPONSE FORMAT:
+- Use valid GitHub-flavored Markdown
+- Start with a clear # heading
+- Use ## for sections, ### for subsections
+- Use bullet points for lists (not code blocks)
+- Keep formatting clean and professional""",
+
+    "tree": """
+
+## RESPONSE FORMAT FOR FILE LISTINGS:
+When listing files or directory structure:
+- Use tree format with ├── and └── characters
+- Group by directory
+- Show file counts per directory
+- Example:
+  📁 src/ (5 files)
+  ├── index.ts
+  ├── App.tsx
+  ├── utils.ts
+  └── types.ts
+- Do NOT put each filename in a separate code block
+- Use ONE code block for the entire tree if needed"""
+}
+
+# Special formatting for YouTube results
+YOUTUBE_FORMAT_RULE = """
+
+## YOUTUBE RESULTS FORMAT:
+- Present video results as a simple numbered list
+- Do NOT re-list URLs - the UI shows video cards separately
+- Focus on summarizing what videos are available
+- Keep response brief and conversational"""
+
+
+def build_system_prompt(
+    smart_context: str,
+    mode: str = "plain",
+    has_youtube: bool = False,
+    query_type: str = "general"
+) -> str:
+    """
+    Build optimal system prompt with correct ordering.
+    
+    ORDER (based on "Lost in the Middle" research):
+    1. ROLE & CAPABILITIES (START - high attention)
+    2. FORMAT RULES (START - high attention)
+    3. SMART CONTEXT (MIDDLE - structure, summaries, messages)
+    4. RELEVANT CODE (END - high attention, in smart_context)
+    
+    Args:
+        smart_context: Pre-built context from build_smart_context()
+        mode: Output mode (plain/code/doc)
+        has_youtube: Whether YouTube results are included
+        query_type: Type of query for specialized formatting
+    
+    Returns:
+        Complete system prompt string
+    """
+    
+    parts = []
+    
+    # 1. BASE SYSTEM (Role + Capabilities) - START
+    parts.append(BASE_SYSTEM_PROMPT)
+    
+    # 2. FORMAT RULES - START (high attention)
+    # Detect if query is about file listing
+    if query_type == "file_listing":
+        parts.append(FORMAT_RULES["tree"])
+    else:
+        parts.append(FORMAT_RULES.get(mode, FORMAT_RULES["plain"]))
+    
+    # 3. YouTube format if needed
+    if has_youtube:
+        parts.append(YOUTUBE_FORMAT_RULE)
+    
+    # 4. SMART CONTEXT - Already ordered optimally:
+    #    - Project Tree (START of context)
+    #    - Summaries (MIDDLE)
+    #    - Messages (MIDDLE)
+    #    - Semantic (MIDDLE)
+    #    - Code (END of context - high attention)
+    if smart_context:
+        parts.append("\n\n## 📊 PROJECT CONTEXT (from database):")
+        parts.append(smart_context)
+    
+    return "\n".join(parts)
+
+
+def detect_query_type(query: str) -> str:
+    """
+    Detect the type of query for specialized formatting.
+    """
+    q = query.lower()
+    
+    # File/directory listing queries
+    file_patterns = [
+        "what files", "list files", "show files",
+        "what's in", "what is in",
+        "directory", "folder", "structure",
+        "files are in", "files in"
+    ]
+    if any(p in q for p in file_patterns):
+        return "file_listing"
+    
+    # Code generation queries
+    code_patterns = [
+        "write code", "create function", "implement",
+        "generate code", "code for", "script for"
+    ]
+    if any(p in q for p in code_patterns):
+        return "code_generation"
+    
+    # Explanation queries
+    explain_patterns = [
+        "explain", "how does", "what does",
+        "why does", "describe"
+    ]
+    if any(p in q for p in explain_patterns):
+        return "explanation"
+    
+    return "general"
+
+
 # ---------- Output-mode helpers ----------
 _LANG_HINTS = {
     "c#": "csharp",
@@ -601,17 +774,10 @@ async def ask_route(
         )
 
         print(f"🔍 [DEBUG ask.py] smart_context_text length: {len(smart_context_text)} chars")
-        print(f"🔍 [DEBUG ask.py] First 500 chars:\n{smart_context_text[:500]}")
-        print(f"🔍 [DEBUG ask.py] Contains 'pgvector': {'pgvector' in smart_context_text}")
-        print(f"🔍 [DEBUG ask.py] Contains '```': {'```' in smart_context_text}")  # Проверка есть ли код
-        
-        # Smart Context as system message
-        hist_now = []
-        print(f"✅ [Smart Context] Context ready (~4K tokens)")
+        print(f"✅ [Smart Context] Context ready (~{len(smart_context_text) // 4} tokens)")
 
-        # 3) YouTube intent (force plain output when present)
+        # 3) YouTube intent detection
         youtube_items: List[Dict[str, str]] = []
-        youtube_context_blocks: List[str] = []
         yt_topic = None
         if bool(getattr(settings, "ENABLE_YT_IN_CHAT", True)):
             yt_topic = _detect_youtube_intent(data.query)
@@ -619,9 +785,6 @@ async def ask_route(
                 print(f"[YT] intent detected → topic='{yt_topic}'")
                 youtube_items = await _safe_youtube(yt_topic)
                 if youtube_items:
-                    youtube_context_blocks = [
-                        "\n".join(f"- {i+1}. {it['title']} — {it['url']}" for i, it in enumerate(youtube_items))
-                    ]
                     try:
                         memory.insert_audit_log(
                             project_id, role_id, chat_session_id, "youtube", "search", yt_topic[:200]
@@ -629,14 +792,13 @@ async def ask_route(
                     except Exception:
                         pass
 
-        # 4) Build prompt + render policy
-        base_system = (
-            "You are a helpful assistant. You DO have access to the chat history included below. "
-            "Use it to stay consistent, reference prior messages, and avoid claiming you cannot see previous messages."
-        )
-
+        # 4) Detect output mode and query type
         mode, lang = _detect_output_mode(data.query, data.output_mode, data.language)
+        query_type = detect_query_type(data.query)
+        
+        print(f"🔍 [Query Analysis] mode={mode}, query_type={query_type}")
 
+        # Handle special presentation modes
         force_plain = (yt_topic is not None) or (data.presentation == "poem_plain")
         force_code = (data.presentation == "poem_code")
         if force_code:
@@ -644,46 +806,29 @@ async def ask_route(
         elif force_plain:
             mode, lang = "plain", None
 
-        if force_code:
-            render_policy = (
-                "\n\n[RENDER_POLICY] Output EXACTLY one fenced code block labeled `text` "
-                "containing ONLY the poem text (each verse on its own line). "
-                "No headings, no explanations before or after, no extra prose."
-            )
-        elif force_plain:
-            render_policy = (
-                "\n\n[RENDER_POLICY] Respond in concise plain text. "
-                "Do NOT include triple backticks, fenced code blocks, or markdown lists. "
-                "Do NOT include URLs. If YouTube links are present in context, "
-                "DO NOT re-list them; the UI will show video cards separately."
-            )
-        elif mode == "code":
-            render_policy = f"\n\n[RENDER_POLICY] Return a single fenced code block labeled `{lang or ''}`. No commentary."
-        elif mode == "doc":
-            render_policy = "\n\n[RENDER_POLICY] Return valid GitHub-flavored Markdown only. Start with an `#` title. No pre/post text."
-        else:
-            render_policy = (
-                "\n\n[RENDER_POLICY] Respond in concise plain text. "
-                "Do NOT include triple backticks or fenced code blocks under any circumstances."
-            )
+        # 5) Build optimized system prompt
+        # ORDER: Role → Format Rules → Smart Context (Tree→Summaries→Messages→Semantic→Code)
+        full_prompt = build_system_prompt(
+            smart_context=smart_context_text,
+            mode=mode,
+            has_youtube=bool(youtube_items),
+            query_type=query_type
+        )
+        
+        print(f"✅ [ask.py] System prompt built ({len(full_prompt)} chars)")
 
-        system_prompt = base_system + render_policy
-        if smart_context_text:
-            system_prompt += f"\n\n{smart_context_text}"
-            print(f"✅ [ask.py] Smart Context added to system_prompt ({len(smart_context_text)} chars)")
-
-        full_prompt = system_prompt  # Просто используй напрямую!
-
-        # 5) Use Smart Context + current query
-        history = hist_now + [{"role": "user", "content": data.query}]
+        # 6) Prepare message history (just current query with Smart Context in system)
+        history = [{"role": "user", "content": data.query}]
 
         debug_info: Optional[Dict[str, Any]] = None
         if debug:
             debug_info = {
                 "smart_context": "enabled",
                 "mode": mode,
+                "query_type": query_type,
                 "presentation": data.presentation,
                 "yt_topic": yt_topic,
+                "prompt_length": len(full_prompt),
             }
 
         def store_and_respond(sender: str, text: str, render: Optional[Dict[str, Any]] = None):
@@ -730,6 +875,12 @@ async def ask_route(
                 answer2 = _ensure_markdown(answer)
                 render_meta = {"kind": "markdown"}
                 return answer2, render_meta
+            
+            # For file_listing queries, prefer markdown rendering
+            if query_type == "file_listing":
+                render_meta = {"kind": "markdown"}
+                return answer, render_meta
+            
             if _CODE_FENCE_RE.search(answer or ""):
                 answer = _CODE_FENCE_RE.sub(lambda m: (m.group(2) or "").strip(), answer or "")
             if _looks_like_markdown_list(answer) or answer.lstrip().startswith("# "):
@@ -738,7 +889,7 @@ async def ask_route(
                 render_meta = {"kind": "plain"}
             return answer, render_meta
 
-        # 6) Provider selection
+        # 7) Provider selection and model call
         if data.provider == "all":
             if data.model_key and MODEL_REGISTRY.get(data.model_key, {}).get("provider") == "openai":
                 openai_key = data.model_key
@@ -863,9 +1014,9 @@ async def ask_stream_route(
             # Send initial status
             yield f"{json.dumps({'event': 'status', 'data': {'status': 'processing'}})}\n\n"
 
-            # 2) Build Smart Context (replaces full history loading)
+            # 2) Build Smart Context
             print(f"🎯 [Smart Context] Building context for streaming query: {data.query[:50]}...")
-            smart_context_text =await build_smart_context(
+            smart_context_text = await build_smart_context(
                 project_id=project_id_int,
                 role_id=role_id,
                 query=data.query,
@@ -873,18 +1024,11 @@ async def ask_stream_route(
                 db=db,
                 memory=memory
             )
-            
-            # Smart Context as system message
-            hist_now = []
-            print(f"✅ [Smart Context] Context ready for streaming (~4K tokens)")
+            print(f"✅ [Smart Context] Context ready for streaming (~{len(smart_context_text) // 4} tokens)")
 
-            # 3) Build prompt (same as /ask)
-            base_system = (
-                "You are a helpful assistant. You DO have access to the chat history included below. "
-                "Use it to stay consistent, reference prior messages, and avoid claiming you cannot see previous messages."
-            )
-
+            # 3) Detect modes
             mode, lang = _detect_output_mode(data.query, data.output_mode, data.language)
+            query_type = detect_query_type(data.query)
 
             force_plain = (data.presentation == "poem_plain")
             force_code = (data.presentation == "poem_code")
@@ -893,38 +1037,20 @@ async def ask_stream_route(
             elif force_plain:
                 mode, lang = "plain", None
 
-            if force_code:
-                render_policy = (
-                    "\n\n[RENDER_POLICY] Output EXACTLY one fenced code block labeled `text` "
-                    "containing ONLY the poem text (each verse on its own line). "
-                    "No headings, no explanations before or after, no extra prose."
-                )
-            elif force_plain:
-                render_policy = (
-                    "\n\n[RENDER_POLICY] Respond in concise plain text. "
-                    "Do NOT include triple backticks, fenced code blocks, or markdown lists."
-                )
-            elif mode == "code":
-                render_policy = f"\n\n[RENDER_POLICY] Return a single fenced code block labeled `{lang or ''}`. No commentary."
-            elif mode == "doc":
-                render_policy = "\n\n[RENDER_POLICY] Return valid GitHub-flavored Markdown only. Start with an `#` title. No pre/post text."
-            else:
-                render_policy = (
-                    "\n\n[RENDER_POLICY] Respond in concise plain text. "
-                    "Do NOT include triple backticks or fenced code blocks under any circumstances."
-                )
+            # 4) Build optimized system prompt
+            full_prompt = build_system_prompt(
+                smart_context=smart_context_text,
+                mode=mode,
+                has_youtube=False,
+                query_type=query_type
+            )
+            
+            print(f"✅ [ask-stream] System prompt built ({len(full_prompt)} chars)")
 
-            system_prompt = base_system + render_policy
-            if smart_context_text:
-                system_prompt += f"\n\n{smart_context_text}"
-                print(f"✅ [ask-stream] Smart Context added to system_prompt ({len(smart_context_text)} chars)")
+            # 5) Prepare message history
+            history = [{"role": "user", "content": data.query}]
 
-            full_prompt = system_prompt
-
-            # 4) Use Smart Context + current query
-            history = hist_now + [{"role": "user", "content": data.query}]
-
-            # 5) Determine model and parameters
+            # 6) Determine model and parameters
             chosen_key = data.model_key or _default_key_for_provider(data.provider)
             reg = MODEL_REGISTRY.get(chosen_key)
             if reg and data.provider in {"openai", "anthropic"} and reg["provider"] != data.provider:
@@ -936,7 +1062,7 @@ async def ask_stream_route(
             max_tokens = model_info.get("max_tokens", 4096)
             temperature = model_info.get("temperature", 0.7)
 
-            # 6) Stream based on provider
+            # 7) Stream based on provider
             full_response = ""
 
             if actual_provider == "openai":
@@ -966,7 +1092,7 @@ async def ask_stream_route(
                 yield f"{json.dumps({'event': 'error', 'data': {'error': error_msg}})}\n\n"
                 return
 
-            # 6a) Detect and stream multiple files separately
+            # 8) Detect and stream multiple files separately
             code_blocks = extract_code_blocks(full_response)
             
             if len(code_blocks) > 1:
@@ -991,7 +1117,7 @@ async def ask_stream_route(
                     
                     print(f"  ✅ File {idx}/{len(code_blocks)}: {filename} ({len(code)} chars)")
 
-            # 7) Store complete message in database
+            # 9) Store complete message in database
             ai_entry = memory.store_chat_message(
                 project_id, role_id, chat_session_id,
                 actual_provider, full_response
@@ -1001,13 +1127,13 @@ async def ask_stream_route(
                 actual_provider, "stream_complete", full_response[:300]
             )
             
-            # 7a) Generate embedding for AI response (async, don't block on errors)
+            # Generate embedding for AI response
             try:
                 store_message_with_embedding(db, ai_entry.id, full_response)
             except Exception as e:
                 print(f"[Embedding] Stream response skipped: {e}")
 
-            # 8) Send completion event
+            # 10) Send completion event
             token_count = memory.count_tokens(full_response)
             yield f"{json.dumps({'event': 'done', 'data': {'status': 'completed', 'full_response': full_response, 'tokens': token_count, 'model': chosen_model, 'provider': actual_provider, 'chat_session_id': chat_session_id}})}\n\n"
 
