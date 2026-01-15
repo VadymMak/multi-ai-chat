@@ -1,9 +1,14 @@
 """
 Smart Context Builder - Universal context engine.
-FIXED: Now includes actual file CONTENT, not just metadata!
+
+REFACTORED v2.0:
+- Removed Git structure (using file_embeddings as source of truth)
+- Reordered sections based on "Lost in the Middle" research:
+  * START (high attention): Project Tree
+  * MIDDLE (lower attention): Summaries, Messages, Semantic
+  * END (high attention): Relevant Code
 """
 
-import json
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -11,7 +16,6 @@ from sqlalchemy import text
 # Import existing services
 from app.services import vector_service
 from app.memory.manager import MemoryManager
-from app.memory.models import Project
 
 
 def format_recent(messages: List[Dict[str, Any]]) -> str:
@@ -35,38 +39,20 @@ def format_recent(messages: List[Dict[str, Any]]) -> str:
     
     for msg in messages[-5:]:  # Last 5 only
         sender = msg.get("sender", "unknown")
-        text = msg.get("text", "")
+        msg_text = msg.get("text", "")
         
         # Skip bad AI responses
         if sender in ["openai", "anthropic", "assistant"]:
-            text_lower = text.lower()
+            text_lower = msg_text.lower()
             if any(pattern in text_lower for pattern in bad_patterns):
                 print(f"⏭️ [format_recent] Skipped bad response from {sender}")
                 continue
         
         # Truncate to 200 chars
-        text_preview = text[:200]
+        text_preview = msg_text[:200]
         lines.append(f"[{sender}]: {text_preview}")
     
     return "\n".join(lines) if lines else "No relevant recent messages"
-
-
-def format_git_structure(git_data: Dict[str, Any]) -> str:
-    """Format Git structure for context"""
-    if not git_data:
-        return "No project structure"
-    
-    files = git_data.get("files", [])
-    git_url = git_data.get("git_url", "unknown")
-    files_count = len(files)
-    
-    # List first 50 files
-    file_list = "\n".join([f"  - {f['path']}" for f in files[:50]])
-    
-    if files_count > 50:
-        file_list += f"\n  ... and {files_count - 50} more files"
-    
-    return f"Repository: {git_url}\nFiles ({files_count}):\n{file_list}"
 
 
 def format_relevant_files_with_content(
@@ -77,8 +63,6 @@ def format_relevant_files_with_content(
 ) -> str:
     """
     Format relevant code files WITH actual content for AI context.
-    
-    FIXED: Previously only showed metadata, now shows real code!
     """
     if not files:
         return "No relevant files found"
@@ -152,51 +136,124 @@ async def build_smart_context(
     Build Smart Context using existing services.
     Returns ~4K tokens instead of 150K.
     
+    ORDER BASED ON RESEARCH ("Lost in the Middle" effect):
+    - START (high attention): Project structure
+    - MIDDLE (lower attention): Summaries, messages, semantic context
+    - END (high attention): Relevant code files
+    
     Components:
-    1. pgvector semantic search (relevant past conversations)
-    2. Recent 5 messages (immediate context)
-    3. Summaries (high-level context)
-    4. Git structure (if available)
-    5. Relevant code files WITH CONTENT from file_embeddings
+    1. 📁 Project Tree (START - from file_embeddings, NOT Git!)
+    2. 📝 Summaries (MIDDLE - past decisions)
+    3. 💬 Recent messages (MIDDLE - conversation flow)
+    4. 🔍 Semantic context (MIDDLE - related past discussions)
+    5. 📄 Relevant code (END - similar code with content)
     """
     
     print(f"🎯 [Smart Context] Building for project={project_id}, role={role_id}, query={query[:50]}...")
     
     parts = []
     
-    # 1. pgvector semantic search (EXISTING!)
+    # ============================================================
+    # 1. PROJECT TREE (START - high attention!)
+    # Source: file_embeddings (NOT Git!)
+    # This tells AI "where things are" in the project
+    # ============================================================
     try:
-        relevant_context = vector_service.get_relevant_context(
-            db=db,
-            query=query,
-            session_id=session_id,
-            limit=3
-        )
-        if relevant_context:
-            parts.append(f"📌 RELEVANT CONTEXT:\n{relevant_context}")
-            print(f"✅ [Smart Context] Added relevant context from pgvector")
+        tree_result = db.execute(text("""
+            SELECT 
+                fe.file_path, 
+                fe.file_name, 
+                fe.language, 
+                fe.line_count,
+                (SELECT COUNT(*) FROM file_dependencies fd 
+                 WHERE fd.project_id = fe.project_id 
+                 AND fd.source_file = fe.file_path) as import_count,
+                (SELECT COUNT(*) FROM file_dependencies fd 
+                 WHERE fd.project_id = fe.project_id 
+                 AND fd.target_file = fe.file_path) as used_by_count
+            FROM file_embeddings fe
+            WHERE fe.project_id = :project_id
+            ORDER BY fe.file_path
+            LIMIT 200
+        """), {"project_id": project_id}).fetchall()
+        
+        if tree_result:
+            # Group by directory
+            dirs = {}
+            total_lines = 0
+            languages = set()
+            
+            for row in tree_result:
+                file_path, file_name, language, line_count, import_count, used_by_count = row
+                file_parts = file_path.split("/")
+                dir_path = "/".join(file_parts[:-1]) if len(file_parts) > 1 else "."
+                
+                if dir_path not in dirs:
+                    dirs[dir_path] = []
+                dirs[dir_path].append({
+                    "name": file_name,
+                    "lang": language or "?",
+                    "lines": line_count or 0,
+                    "imports": import_count or 0,
+                    "used_by": used_by_count or 0
+                })
+                
+                total_lines += line_count or 0
+                if language:
+                    languages.add(language)
+            
+            # Build compact tree
+            tree_lines = []
+            
+            # Header with stats
+            tree_lines.append(f"📊 {len(tree_result)} files | {total_lines:,} lines | {', '.join(sorted(languages)[:5])}")
+            tree_lines.append("")
+            
+            lines_used = 2
+            max_lines = 60
+            dirs_shown = 0
+            
+            for dir_path in sorted(dirs.keys()):
+                if lines_used >= max_lines:
+                    remaining = len(dirs) - dirs_shown
+                    if remaining > 0:
+                        tree_lines.append(f"... and {remaining} more directories")
+                    break
+                
+                # Directory header with file count
+                dir_files = dirs[dir_path]
+                tree_lines.append(f"📁 {dir_path}/ ({len(dir_files)} files)")
+                lines_used += 1
+                dirs_shown += 1
+                
+                # Sort files: most "used_by" first (core files)
+                sorted_files = sorted(dir_files, key=lambda x: x["used_by"], reverse=True)
+                
+                for f in sorted_files[:8]:  # Max 8 files per dir
+                    if lines_used >= max_lines:
+                        break
+                    
+                    # Show used_by count for important files
+                    used_by_indicator = f" ⭐{f['used_by']}" if f['used_by'] > 2 else ""
+                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L){used_by_indicator}")
+                    lines_used += 1
+                
+                if len(dir_files) > 8:
+                    tree_lines.append(f"  └── ... +{len(dir_files) - 8} more")
+                    lines_used += 1
+            
+            tree_text = "\n".join(tree_lines)
+            parts.append(f"📌 PROJECT STRUCTURE (from database):\n{tree_text}")
+            print(f"✅ [Smart Context] 1. Added project tree ({len(tree_result)} files, {dirs_shown} dirs)")
+        else:
+            print(f"ℹ️ [Smart Context] 1. No indexed files found")
+            
     except Exception as e:
-        print(f"⚠️ [Smart Context] pgvector search failed: {e}")
+        print(f"⚠️ [Smart Context] 1. Project tree failed: {e}")
     
-    # 2. Recent 5 messages (EXISTING!)
-    try:
-        recent_data = memory.retrieve_messages(
-            project_id=str(project_id),
-            role_id=role_id,
-            limit=5,
-            chat_session_id=session_id,
-            for_display=False 
-        )
-        # Handle list slicing properly
-        all_messages = recent_data.get("messages", [])
-        recent_messages = all_messages[-5:] if len(all_messages) > 5 else all_messages
-        recent_text = format_recent(recent_messages)
-        parts.append(f"📌 RECENT CONVERSATION:\n{recent_text}")
-        print(f"✅ [Smart Context] Added {len(recent_messages)} recent messages")
-    except Exception as e:
-        print(f"⚠️ [Smart Context] Recent messages failed: {e}")
-    
-    # 3. Summaries (EXISTING!)
+    # ============================================================
+    # 2. SUMMARIES (MIDDLE - past decisions)
+    # ============================================================
     try:
         summaries = memory.load_recent_summaries(
             project_id=str(project_id),
@@ -205,35 +262,56 @@ async def build_smart_context(
         )
         if summaries:
             summaries_text = "\n".join(summaries)
-            parts.append(f"📌 SUMMARIES:\n{summaries_text}")
-            print(f"✅ [Smart Context] Added {len(summaries)} summaries")
+            parts.append(f"📌 PAST DECISIONS:\n{summaries_text}")
+            print(f"✅ [Smart Context] 2. Added {len(summaries)} summaries")
     except Exception as e:
-        print(f"⚠️ [Smart Context] Summaries failed: {e}")
-    
-    # 4. Git structure (if exists) - OPTIONAL BONUS
-    try:
-        project = db.query(Project).filter_by(id=project_id).first()
-        if project and project.git_url and project.project_structure:
-            db.refresh(project)
-            git_data = json.loads(project.project_structure)
-            git_text = format_git_structure(git_data)
-            parts.append(f"📌 PROJECT STRUCTURE:\n{git_text}")
-            print(f"✅ [Smart Context] Added Git structure ({len(git_data.get('files', []))} files)")
-        else:
-            print(f"ℹ️ [Smart Context] No Git structure available")
-    except Exception as e:
-        print(f"⚠️ [Smart Context] Git structure failed: {e}")
+        print(f"⚠️ [Smart Context] 2. Summaries failed: {e}")
     
     # ============================================================
-    # 5. Relevant code files WITH CONTENT (HYBRID SEARCH!)
+    # 3. RECENT MESSAGES (MIDDLE - conversation flow)
+    # ============================================================
+    try:
+        recent_data = memory.retrieve_messages(
+            project_id=str(project_id),
+            role_id=role_id,
+            limit=5,
+            chat_session_id=session_id,
+            for_display=False 
+        )
+        all_messages = recent_data.get("messages", [])
+        recent_messages = all_messages[-5:] if len(all_messages) > 5 else all_messages
+        recent_text = format_recent(recent_messages)
+        parts.append(f"📌 RECENT CONVERSATION:\n{recent_text}")
+        print(f"✅ [Smart Context] 3. Added {len(recent_messages)} recent messages")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 3. Recent messages failed: {e}")
+    
+    # ============================================================
+    # 4. SEMANTIC CONTEXT (MIDDLE - related past discussions)
+    # ============================================================
+    try:
+        relevant_context = vector_service.get_relevant_context(
+            db=db,
+            query=query,
+            session_id=session_id,
+            limit=3
+        )
+        if relevant_context:
+            parts.append(f"📌 RELATED DISCUSSIONS:\n{relevant_context}")
+            print(f"✅ [Smart Context] 4. Added semantic context from pgvector")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 4. Semantic search failed: {e}")
+    
+    # ============================================================
+    # 5. RELEVANT CODE FILES (END - high attention!)
     # Uses: Semantic (pgvector) + FTS (tsvector) + Graph (dependencies)
+    # This is the MOST IMPORTANT section - placed at END for high attention
     # ============================================================
     try:
         from app.services.hybrid_search_service import hybrid_search
         
-        print(f"🔍 [Smart Context] Hybrid search for project={project_id}...")
+        print(f"🔍 [Smart Context] 5. Hybrid search for project={project_id}...")
 
-        # Use hybrid search with default preset
         relevant_files = hybrid_search(
             query=query,
             project_id=project_id,
@@ -260,81 +338,28 @@ async def build_smart_context(
                 for src in f.get("sources", ["unknown"]):
                     sources_summary[src] = sources_summary.get(src, 0) + 1
             
-            parts.append(f"📌 RELEVANT CODE FILES:\n{files_text}")
-            print(f"✅ [Smart Context] Added {len(relevant_files)} files via HYBRID search")
+            parts.append(f"📌 RELEVANT CODE (use these patterns!):\n{files_text}")
+            print(f"✅ [Smart Context] 5. Added {len(relevant_files)} files via HYBRID search")
             print(f"   Sources: {sources_summary}")
         else:
-            print(f"ℹ️ [Smart Context] No indexed files found for query")
+            print(f"ℹ️ [Smart Context] 5. No relevant files found for query")
             
     except Exception as e:
-        print(f"⚠️ [Smart Context] Hybrid search failed: {e}")
+        print(f"⚠️ [Smart Context] 5. Hybrid search failed: {e}")
         import traceback
         traceback.print_exc()
-
-    # ============================================================
-    # 6. PROJECT DEPENDENCY TREE (AI Context - replaces print_tree.py!)
-    # ============================================================
-    try:
-        tree_result = db.execute(text("""
-            SELECT 
-                fe.file_path, fe.file_name, fe.language, fe.line_count,
-                (SELECT COUNT(*) FROM file_dependencies fd 
-                 WHERE fd.project_id = fe.project_id 
-                 AND fd.source_file = fe.file_path) as import_count
-            FROM file_embeddings fe
-            WHERE fe.project_id = :project_id
-            ORDER BY fe.file_path
-            LIMIT 200
-        """), {"project_id": project_id}).fetchall()
-        
-        if tree_result:
-            # Group by directory
-            dirs = {}
-            for row in tree_result:
-                file_path, file_name, language, line_count, import_count = row
-                file_parts = file_path.split("/")  # RENAMED: was 'parts'
-                dir_path = "/".join(file_parts[:-1]) if len(file_parts) > 1 else "."
-                
-                if dir_path not in dirs:
-                    dirs[dir_path] = []
-                dirs[dir_path].append({
-                    "name": file_name,
-                    "lang": language or "?",
-                    "lines": line_count or 0,
-                    "imports": import_count or 0
-                })
-            
-            # Build compact tree (max 80 lines for better coverage)
-            tree_lines = []
-            lines_used = 0  # RENAMED: was 'line_count' - conflicted with DB column!
-            max_lines = 80  # Increased from 50
-            dirs_shown = 0
-            
-            for dir_path in sorted(dirs.keys()):
-                if lines_used >= max_lines:
-                    remaining = len(dirs) - dirs_shown
-                    if remaining > 0:
-                        tree_lines.append(f"... and {remaining} more directories")
-                    break
-                    
-                tree_lines.append(f"📁 {dir_path}/")
-                lines_used += 1
-                dirs_shown += 1
-                
-                for f in sorted(dirs[dir_path], key=lambda x: x["name"])[:10]:
-                    if lines_used >= max_lines:
-                        break
-                    tree_lines.append(f"  ├── {f['name']} ({f['lang']}, {f['lines']}L, {f['imports']} imports)")
-                    lines_used += 1
-            
-            tree_text = "\n".join(tree_lines)
-            parts.append(f"📌 PROJECT TREE:\n{tree_text}")
-            print(f"✅ [Smart Context] Added project tree ({len(tree_result)} files, {dirs_shown} dirs)")
-    except Exception as e:
-        print(f"⚠️ [Smart Context] Project tree failed: {e}")
     
+    # ============================================================
+    # BUILD FINAL CONTEXT
+    # ============================================================
     result = "\n\n".join(parts)
-    print(f"✅ [Smart Context] Built context with {len(parts)} components")
+    
+    print(f"""
+✅ [Smart Context] Built context with {len(parts)} components:
+   Order: Tree(START) → Summaries → Messages → Semantic → Code(END)
+   Total chars: {len(result)}
+   Estimated tokens: ~{len(result) // 4}
+""")
     
     return result
 
@@ -357,10 +382,8 @@ def build_smart_context_sync(
     import asyncio
     
     try:
-        # Try to get existing event loop
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If loop is already running (e.g., in FastAPI), create task
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(
@@ -373,7 +396,6 @@ def build_smart_context_sync(
                 build_smart_context(project_id, role_id, query, session_id, db, memory)
             )
     except RuntimeError:
-        # No event loop, create new one
         return asyncio.run(
             build_smart_context(project_id, role_id, query, session_id, db, memory)
         )
