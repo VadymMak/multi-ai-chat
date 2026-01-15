@@ -111,18 +111,49 @@ FORMAT_RULES = {
     "tree": """
 
 ## RESPONSE FORMAT FOR FILE LISTINGS:
+IMPORTANT: Do NOT put directory paths or file names in code blocks!
+
 When listing files or directory structure:
-- Use tree format with ├── and └── characters
-- Group by directory
-- Show file counts per directory
-- Example:
-  📁 src/ (5 files)
-  ├── index.ts
-  ├── App.tsx
-  ├── utils.ts
-  └── types.ts
-- Do NOT put each filename in a separate code block
-- Use ONE code block for the entire tree if needed"""
+- Start with the directory path as plain text (NOT in a code block)
+- Use tree format with ├── and └── characters for files
+- Show the total file count
+- List ALL files in the directory
+
+CORRECT FORMAT EXAMPLE:
+The backend/app/services/ directory contains 19 files:
+
+📁 backend/app/services/ (19 files)
+├── __init__.py
+├── auto_learning.py
+├── debate_manager.py
+├── dependency_graph.py
+├── file_indexer.py
+├── git_service.py
+├── hybrid_search_service.py
+├── project_structure_parser.py
+├── query_classifier.py
+├── query_classifier_with_logging.py
+├── search_detection.py
+├── smart_context.py
+├── token_service.py
+├── vector_service.py
+├── version_service.py
+├── web_search_service.py
+├── youtube_http.py
+├── youtube_service.py
+└── youtube_transcript_service.py
+
+WRONG FORMAT (do NOT do this):
+```
+backend/app/services/
+```
+The directory contains...
+
+RULES:
+1. NO code blocks for directory names or file paths
+2. Use ONE continuous tree structure
+3. Show ALL files, not just a subset
+4. Use └── for the last file in the list"""
 }
 
 # Special formatting for YouTube results

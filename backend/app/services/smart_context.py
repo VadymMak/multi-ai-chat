@@ -202,38 +202,43 @@ async def build_smart_context(
                 if language:
                     languages.add(language)
             
-            # Build COMPACT tree - show ALL directories but fewer files per dir
+            # Build COMPLETE tree - show ALL files for each directory
             tree_lines = []
             
             # Header with stats
             tree_lines.append(f"📊 {len(tree_result)} files | {total_lines:,} lines | {', '.join(sorted(languages)[:5])}")
             tree_lines.append("")
             
-            # STRATEGY: Show ALL directories, but only key files (3 per dir max)
-            # This ensures AI knows the FULL structure
+            # STRATEGY: Show ALL directories with ALL files (up to 25 per dir)
+            # This ensures AI can answer "what files are in X" questions accurately
             
             for dir_path in sorted(dirs.keys()):
                 dir_files = dirs[dir_path]
                 
-                # Directory header with ALL file names (compact format)
+                # Sort files alphabetically
                 file_names = [f["name"] for f in sorted(dir_files, key=lambda x: x["name"])]
                 
                 # Show directory with file count
                 tree_lines.append(f"📁 {dir_path}/ ({len(dir_files)} files)")
                 
-                # List ALL files in compact format (just names, no metadata)
-                # This is crucial for AI to know what exists!
-                if len(file_names) <= 10:
-                    # Show all files if 10 or fewer
-                    for name in file_names:
-                        tree_lines.append(f"  ├── {name}")
+                # Show ALL files up to 25 per directory
+                if len(file_names) <= 25:
+                    # Show all files
+                    for i, name in enumerate(file_names):
+                        if i == len(file_names) - 1:
+                            tree_lines.append(f"  └── {name}")  # Last file
+                        else:
+                            tree_lines.append(f"  ├── {name}")
                 else:
-                    # Show first 5 + last 3 + count
-                    for name in file_names[:5]:
+                    # Show first 20 + count + last 3 for very large directories
+                    for name in file_names[:20]:
                         tree_lines.append(f"  ├── {name}")
-                    tree_lines.append(f"  │   ... ({len(file_names) - 8} more files)")
-                    for name in file_names[-3:]:
-                        tree_lines.append(f"  ├── {name}")
+                    tree_lines.append(f"  │   ... ({len(file_names) - 23} more files)")
+                    for i, name in enumerate(file_names[-3:]):
+                        if i == 2:
+                            tree_lines.append(f"  └── {name}")
+                        else:
+                            tree_lines.append(f"  ├── {name}")
             
             tree_text = "\n".join(tree_lines)
             parts.append(f"📌 PROJECT STRUCTURE (from database):\n{tree_text}")
