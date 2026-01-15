@@ -268,19 +268,19 @@ function calculateLayout(
   
   // Create edges with styling
   const styledEdges: Edge[] = edges.map((e, index) => ({
-    id: `e-${index}`,
-    source: e.source,
-    target: e.target,
-    type: 'smoothstep',
-    animated: false,
-    style: { stroke: '#94a3b8', strokeWidth: 1.5 },
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      color: '#94a3b8',
-      width: 15,
-      height: 15,
-    },
-  }));
+  id: `e-${index}`,
+  source: e.source,
+  target: e.target,
+  type: 'smoothstep',
+  animated: true,  // Анимация - легче увидеть
+  style: { stroke: '#3b82f6', strokeWidth: 2 },  // Синий, толще
+  markerEnd: {
+    type: MarkerType.ArrowClosed,
+    color: '#3b82f6',  // Синий
+    width: 20,
+    height: 20,
+  },
+}));
   
   return { nodes: positionedNodes, edges: styledEdges };
 }
