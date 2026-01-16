@@ -921,7 +921,10 @@ async def get_dependency_graph(
                 "metadata": row[6] if row[6] else {}
             })
         
-        # 2. Get all dependencies (edges)
+        # 2. Get all dependencies (edges) - BIDIRECTIONAL!
+        # This includes both:
+        # - Files this file imports (outgoing)
+        # - Files that import this file (incoming)
         deps_result = db.execute(text("""
             SELECT 
                 fd.source_file, fd.target_file, fd.dependency_type,
@@ -934,19 +937,43 @@ async def get_dependency_graph(
                 ON fe_target.project_id = fd.project_id 
                 AND fe_target.file_path = fd.target_file
             WHERE fd.project_id = :project_id
+              AND fe_source.id IS NOT NULL 
+              AND fe_target.id IS NOT NULL
             ORDER BY fd.source_file
         """), {"project_id": project_id}).fetchall()
         
         edges = []
+        connected_node_ids = set()  # Track which nodes have connections
+        
         for row in deps_result:
-            if row[3] and row[4]:  # Both source and target exist
-                edges.append({
-                    "source": str(row[3]),
-                    "target": str(row[4]),
-                    "source_path": row[0],
-                    "target_path": row[1],
-                    "type": row[2] or "import"
-                })
+            source_id = str(row[3])
+            target_id = str(row[4])
+            
+            edges.append({
+                "source": source_id,
+                "target": target_id,
+                "source_path": row[0],
+                "target_path": row[1],
+                "type": row[2] or "import"
+            })
+            
+            # Track connected nodes
+            connected_node_ids.add(source_id)
+            connected_node_ids.add(target_id)
+        
+        # 3. FILTER: Remove isolated nodes (no connections)
+        # Only keep nodes that have at least one edge
+        nodes_with_connections = [
+            node for node in nodes 
+            if node["id"] in connected_node_ids
+        ]
+        
+        # Log filtering results
+        isolated_count = len(nodes) - len(nodes_with_connections)
+        logger.info(f"📊 Filtered {isolated_count} isolated nodes (no dependencies)")
+        
+        # Use filtered nodes for response
+        nodes = nodes_with_connections
         
         # 3. Build tree string for AI context
         tree_lines = [f"Project: {project.name}", ""]
@@ -975,10 +1002,11 @@ async def get_dependency_graph(
         
         # 4. Calculate stats
         stats = {
-            "total_files": len(nodes),
+            "total_files": len(nodes),  # Now only connected files
             "total_dependencies": len(edges),
             "languages": list(set(n["language"] for n in nodes if n["language"])),
             "total_lines": sum(n["line_count"] for n in nodes),
+            "isolated_files_hidden": isolated_count,  # NEW: show how many hidden
         }
         
         logger.info(f"📊 Dependency graph: {stats['total_files']} nodes, {stats['total_dependencies']} edges")
