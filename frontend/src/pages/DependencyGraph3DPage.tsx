@@ -9,6 +9,7 @@
  * - Focus mode (show only dependencies of selected file)
  * - Labels on nodes
  * - Color legend
+ * - Sidebar with file details
  */
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
@@ -78,6 +79,13 @@ const LANGUAGE_COLORS: Record<string, string> = {
 };
 
 // ============================================================
+// CONSTANTS
+// ============================================================
+
+const SIDEBAR_WIDTH = 320;
+const TOOLBAR_HEIGHT = 56;
+
+// ============================================================
 // MAIN COMPONENT
 // ============================================================
 
@@ -86,12 +94,13 @@ const DependencyGraph3DPage: React.FC = () => {
   const navigate = useNavigate();
   const { isAuthenticated, token } = useAuthStore();
   const graphRef = useRef<any>();
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Data state
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
-  const [allData, setAllData] = useState<GraphData>({ nodes: [], links: [] }); // Original data
+  const [allData, setAllData] = useState<GraphData>({ nodes: [], links: [] });
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [projectName, setProjectName] = useState('');
   const [stats, setStats] = useState({ total_files: 0, total_dependencies: 0, total_lines: 0 });
@@ -101,6 +110,24 @@ const DependencyGraph3DPage: React.FC = () => {
   const [showLabels, setShowLabels] = useState(true);
   const [focusMode, setFocusMode] = useState(false);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+
+  // ============================================================
+  // HANDLE RESIZE
+  // ============================================================
+
+  useEffect(() => {
+    const updateDimensions = () => {
+      setDimensions({
+        width: window.innerWidth - SIDEBAR_WIDTH,
+        height: window.innerHeight,
+      });
+    };
+
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    return () => window.removeEventListener('resize', updateDimensions);
+  }, []);
 
   // ============================================================
   // FETCH DATA
@@ -139,7 +166,7 @@ const DependencyGraph3DPage: React.FC = () => {
         };
 
         setGraphData(graphData);
-        setAllData(graphData); // Save original
+        setAllData(graphData);
         setProjectName(data.project_name);
         setStats(data.stats);
       } catch (err) {
@@ -172,7 +199,6 @@ const DependencyGraph3DPage: React.FC = () => {
     setSearchQuery('');
     setSelectedNode(node);
     
-    // Focus on selected node
     if (graphRef.current) {
       const distance = 200;
       const distRatio = 1 + distance / Math.hypot(node.x || 0, node.y || 0, node.z || 0);
@@ -185,12 +211,11 @@ const DependencyGraph3DPage: React.FC = () => {
   };
 
   // ============================================================
-  // FOCUS MODE - Show only dependencies of selected file
+  // FOCUS MODE
   // ============================================================
 
   const handleFocusNode = useCallback((nodeId: string) => {
     if (focusedNodeId === nodeId) {
-      // Unfocus - show all
       setFocusedNodeId(null);
       setFocusMode(false);
       setGraphData(allData);
@@ -200,7 +225,6 @@ const DependencyGraph3DPage: React.FC = () => {
     setFocusedNodeId(nodeId);
     setFocusMode(true);
 
-    // Find all connected nodes
     const connectedNodeIds = new Set<string>();
     connectedNodeIds.add(nodeId);
 
@@ -208,15 +232,10 @@ const DependencyGraph3DPage: React.FC = () => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
       const targetId = typeof link.target === 'string' ? link.target : link.target.id;
       
-      if (sourceId === nodeId) {
-        connectedNodeIds.add(targetId);
-      }
-      if (targetId === nodeId) {
-        connectedNodeIds.add(sourceId);
-      }
+      if (sourceId === nodeId) connectedNodeIds.add(targetId);
+      if (targetId === nodeId) connectedNodeIds.add(sourceId);
     });
 
-    // Filter nodes and links
     const filteredNodes = allData.nodes.filter(n => connectedNodeIds.has(n.id));
     const filteredLinks = allData.links.filter(link => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
@@ -224,10 +243,7 @@ const DependencyGraph3DPage: React.FC = () => {
       return connectedNodeIds.has(sourceId) && connectedNodeIds.has(targetId);
     });
 
-    setGraphData({
-      nodes: filteredNodes,
-      links: filteredLinks,
-    });
+    setGraphData({ nodes: filteredNodes, links: filteredLinks });
   }, [focusedNodeId, allData]);
 
   const handleResetFocus = () => {
@@ -242,10 +258,7 @@ const DependencyGraph3DPage: React.FC = () => {
   // ============================================================
 
   const getNodeColor = useCallback((node: GraphNode) => {
-    // Highlight focused node
-    if (focusedNodeId === node.id) {
-      return '#ef4444'; // Red for focused
-    }
+    if (focusedNodeId === node.id) return '#ef4444';
     return NODE_COLORS[node.type] || LANGUAGE_COLORS[node.language] || '#6b7280';
   }, [focusedNodeId]);
 
@@ -297,7 +310,7 @@ const DependencyGraph3DPage: React.FC = () => {
   };
 
   // ============================================================
-  // GET DEPENDENCIES COUNT FOR SELECTED NODE
+  // DEPENDENCIES COUNT
   // ============================================================
 
   const selectedNodeDeps = useMemo(() => {
@@ -318,7 +331,7 @@ const DependencyGraph3DPage: React.FC = () => {
   }, [selectedNode, allData.links]);
 
   // ============================================================
-  // RENDER
+  // RENDER - LOADING
   // ============================================================
 
   if (loading) {
@@ -326,21 +339,25 @@ const DependencyGraph3DPage: React.FC = () => {
       <div className="flex items-center justify-center h-screen bg-slate-900 text-white">
         <div className="text-center">
           <div className="text-5xl mb-4">🧠</div>
-          <div className="text-text-secondary">Loading 3D Brain...</div>
+          <div className="text-slate-400">Loading 3D Brain...</div>
         </div>
       </div>
     );
   }
+
+  // ============================================================
+  // RENDER - ERROR
+  // ============================================================
 
   if (error) {
     return (
       <div className="flex items-center justify-center h-screen bg-slate-900 text-white">
         <div className="text-center">
           <div className="text-5xl mb-4">❌</div>
-          <div className="text-error mb-4">{error}</div>
+          <div className="text-red-400 mb-4">{error}</div>
           <button
             onClick={() => navigate(-1)}
-            className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/80 transition"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
           >
             Go Back
           </button>
@@ -349,79 +366,173 @@ const DependencyGraph3DPage: React.FC = () => {
     );
   }
 
+  // ============================================================
+  // RENDER - MAIN
+  // ============================================================
+
   return (
-    <div className="flex h-screen bg-slate-900">
-      {/* 3D Graph */}
-      <div className="flex-1 relative">
+    <div 
+      style={{ 
+        display: 'flex', 
+        height: '100vh', 
+        width: '100vw',
+        backgroundColor: '#0f172a',
+        overflow: 'hidden'
+      }}
+    >
+      {/* 3D Graph Container */}
+      <div 
+        ref={containerRef}
+        style={{ 
+          flex: 1,
+          position: 'relative',
+          width: `calc(100vw - ${SIDEBAR_WIDTH}px)`,
+          height: '100vh'
+        }}
+      >
         {/* Toolbar */}
-        <div className="absolute top-0 left-0 right-0 px-5 py-3 bg-slate-900/95 z-10 flex items-center gap-4 border-b border-slate-700">
+        <div 
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: TOOLBAR_HEIGHT,
+            padding: '0 20px',
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            borderBottom: '1px solid #334155',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            zIndex: 100
+          }}
+        >
           <button
             onClick={() => navigate(-1)}
-            className="px-3 py-1.5 bg-slate-800 border border-slate-600 rounded-md text-white hover:bg-slate-700 transition"
+            style={{
+              padding: '6px 12px',
+              backgroundColor: '#1e293b',
+              border: '1px solid #475569',
+              borderRadius: 6,
+              color: 'white',
+              cursor: 'pointer'
+            }}
           >
             ← Back
           </button>
           
-          <h1 className="text-lg font-semibold text-white m-0">
+          <h1 style={{ fontSize: 18, fontWeight: 600, color: 'white', margin: 0 }}>
             🧠 {projectName}
           </h1>
 
           {/* Search */}
-          <div className="relative ml-4">
+          <div style={{ position: 'relative', marginLeft: 16 }}>
             <input
               type="text"
               placeholder="🔍 Search file..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-64 px-3 py-1.5 bg-slate-800 border border-slate-600 rounded-md text-white text-sm placeholder-slate-500 focus:outline-none focus:border-primary"
+              style={{
+                width: 256,
+                padding: '6px 12px',
+                backgroundColor: '#1e293b',
+                border: '1px solid #475569',
+                borderRadius: 6,
+                color: 'white',
+                fontSize: 14,
+                outline: 'none'
+              }}
             />
             
-            {/* Search Results Dropdown */}
             {searchResults.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-600 rounded-md shadow-xl max-h-64 overflow-auto z-50">
+              <div 
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  marginTop: 4,
+                  backgroundColor: '#1e293b',
+                  border: '1px solid #475569',
+                  borderRadius: 6,
+                  maxHeight: 256,
+                  overflowY: 'auto',
+                  zIndex: 200
+                }}
+              >
                 {searchResults.map(node => (
                   <button
                     key={node.id}
                     onClick={() => handleSearchSelect(node)}
-                    className="w-full px-3 py-2 text-left text-sm text-white hover:bg-slate-700 flex items-center gap-2"
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      backgroundColor: 'transparent',
+                      border: 'none',
+                      color: 'white',
+                      fontSize: 14,
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#334155'}
+                    onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
                   >
                     <span 
-                      className="w-3 h-3 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: getNodeColor(node) }}
+                      style={{
+                        width: 12,
+                        height: 12,
+                        borderRadius: '50%',
+                        backgroundColor: getNodeColor(node),
+                        flexShrink: 0
+                      }}
                     />
-                    <span className="truncate">{node.label}</span>
-                    <span className="text-slate-500 text-xs ml-auto">{node.language}</span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {node.label}
+                    </span>
+                    <span style={{ color: '#64748b', fontSize: 12 }}>{node.language}</span>
                   </button>
                 ))}
               </div>
             )}
           </div>
 
-          {/* Controls */}
-          <div className="flex items-center gap-3 ml-4">
-            <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={showLabels}
-                onChange={(e) => setShowLabels(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-primary focus:ring-primary"
-              />
-              Labels
-            </label>
-          </div>
+          {/* Labels Toggle */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#cbd5e1', fontSize: 14, cursor: 'pointer', marginLeft: 16 }}>
+            <input
+              type="checkbox"
+              checked={showLabels}
+              onChange={(e) => setShowLabels(e.target.checked)}
+              style={{ width: 16, height: 16 }}
+            />
+            Labels
+          </label>
 
           {/* Focus Mode Badge */}
           {focusMode && (
             <button
               onClick={handleResetFocus}
-              className="px-3 py-1 bg-red-500/20 border border-red-500/50 rounded-full text-red-400 text-xs hover:bg-red-500/30 transition flex items-center gap-1"
+              style={{
+                padding: '4px 12px',
+                backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                borderRadius: 16,
+                color: '#f87171',
+                fontSize: 12,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4
+              }}
             >
-              <span>🎯 Focus Mode</span>
-              <span className="font-bold">×</span>
+              🎯 Focus Mode ×
             </button>
           )}
           
-          <div className="ml-auto flex gap-4 text-sm text-slate-400">
+          {/* Stats */}
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 16, color: '#94a3b8', fontSize: 14 }}>
             <span>📁 {graphData.nodes.length}{focusMode ? `/${allData.nodes.length}` : ''}</span>
             <span>🔗 {graphData.links.length}</span>
             <span>📝 {stats.total_lines.toLocaleString()}</span>
@@ -431,6 +542,8 @@ const DependencyGraph3DPage: React.FC = () => {
         {/* 3D Force Graph */}
         <ForceGraph3D
           ref={graphRef}
+          width={dimensions.width}
+          height={dimensions.height}
           graphData={graphData}
           nodeLabel={(node: any) => `${node.label}\n${node.language} • ${node.line_count} lines`}
           nodeColor={(node: any) => getNodeColor(node)}
@@ -450,114 +563,161 @@ const DependencyGraph3DPage: React.FC = () => {
         />
 
         {/* Legend */}
-        <div className="absolute bottom-5 left-5 bg-slate-800/90 border border-slate-700 rounded-lg p-3 text-white">
-          <div className="text-xs text-slate-400 mb-2 font-medium">Legend</div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div 
+          style={{
+            position: 'absolute',
+            bottom: 20,
+            left: 20,
+            backgroundColor: 'rgba(30, 41, 59, 0.95)',
+            border: '1px solid #334155',
+            borderRadius: 8,
+            padding: 12,
+            color: 'white',
+            zIndex: 100
+          }}
+        >
+          <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8, fontWeight: 500 }}>Legend</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
             {LEGEND_ITEMS.map(item => (
-              <div key={item.type} className="flex items-center gap-2 text-xs">
+              <div key={item.type} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
                 <span 
-                  className="w-3 h-3 rounded-full"
-                  style={{ backgroundColor: item.color }}
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    backgroundColor: item.color
+                  }}
                 />
-                <span className="text-slate-300">{item.label}</span>
+                <span style={{ color: '#cbd5e1' }}>{item.label}</span>
               </div>
             ))}
           </div>
-          <div className="mt-2 pt-2 border-t border-slate-700 text-xs text-slate-500">
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #334155', fontSize: 11, color: '#64748b' }}>
             🖱️ Drag to rotate • Scroll to zoom
           </div>
         </div>
       </div>
 
-      {/* Sidebar - Node Details */}
-      <div className="w-80 bg-slate-800 border-l border-slate-700 overflow-auto text-white">
+      {/* Sidebar */}
+      <div 
+        style={{
+          width: SIDEBAR_WIDTH,
+          minWidth: SIDEBAR_WIDTH,
+          height: '100vh',
+          backgroundColor: '#1e293b',
+          borderLeft: '1px solid #334155',
+          overflowY: 'auto',
+          color: 'white'
+        }}
+      >
         {selectedNode ? (
-          <div className="p-5">
+          <div style={{ padding: 20 }}>
             {/* Header */}
-            <div className="mb-5">
+            <div style={{ marginBottom: 20 }}>
               <div 
-                className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl mb-3"
-                style={{ backgroundColor: getNodeColor(selectedNode) }}
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 12,
+                  backgroundColor: getNodeColor(selectedNode),
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 24,
+                  marginBottom: 12
+                }}
               >
                 {getLanguageIcon(selectedNode.language)}
               </div>
-              <h2 className="text-base font-semibold break-all mb-1">
+              <h2 style={{ fontSize: 16, fontWeight: 600, wordBreak: 'break-all', marginBottom: 4 }}>
                 {selectedNode.label}
               </h2>
-              <div className="text-xs text-slate-400 break-all">
+              <div style={{ fontSize: 12, color: '#94a3b8', wordBreak: 'break-all' }}>
                 {selectedNode.file_path}
               </div>
             </div>
 
             {/* File Info */}
-            <div className="p-3 bg-slate-900 rounded-lg mb-4">
-              <div className="grid grid-cols-2 gap-3 text-sm">
+            <div style={{ padding: 12, backgroundColor: '#0f172a', borderRadius: 8, marginBottom: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Language</div>
-                  <div className="font-medium">{selectedNode.language}</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Language</div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{selectedNode.language}</div>
                 </div>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Type</div>
-                  <div className="font-medium">{selectedNode.type}</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Type</div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{selectedNode.type}</div>
                 </div>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Lines</div>
-                  <div className="font-medium">{selectedNode.line_count}</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Lines</div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{selectedNode.line_count}</div>
                 </div>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Size</div>
-                  <div className="font-medium">
-                    {(selectedNode.file_size / 1024).toFixed(1)} KB
-                  </div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Size</div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{(selectedNode.file_size / 1024).toFixed(1)} KB</div>
                 </div>
               </div>
             </div>
 
             {/* Dependencies Info */}
-            <div className="p-3 bg-slate-900 rounded-lg mb-4">
-              <div className="text-slate-400 text-xs mb-2 font-medium">Dependencies</div>
-              <div className="grid grid-cols-2 gap-3 text-sm">
+            <div style={{ padding: 12, backgroundColor: '#0f172a', borderRadius: 8, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8, fontWeight: 500 }}>Dependencies</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Imports</div>
-                  <div className="font-medium text-blue-400">{selectedNodeDeps.imports} files</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Imports</div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: '#60a5fa' }}>{selectedNodeDeps.imports} files</div>
                 </div>
                 <div>
-                  <div className="text-slate-500 text-xs mb-0.5">Imported by</div>
-                  <div className="font-medium text-green-400">{selectedNodeDeps.importedBy} files</div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 2 }}>Imported by</div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: '#4ade80' }}>{selectedNodeDeps.importedBy} files</div>
                 </div>
               </div>
             </div>
 
             {/* Actions */}
-            <div className="space-y-2">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button
                 onClick={() => handleFocusNode(selectedNode.id)}
-                className={`w-full py-2.5 rounded-lg transition text-sm flex items-center justify-center gap-2 ${
-                  focusedNodeId === selectedNode.id
-                    ? 'bg-red-500/20 text-red-400 border border-red-500/50'
-                    : 'bg-primary text-white hover:bg-primary/80'
-                }`}
+                style={{
+                  width: '100%',
+                  padding: '10px 16px',
+                  backgroundColor: focusedNodeId === selectedNode.id ? 'rgba(239, 68, 68, 0.2)' : '#3b82f6',
+                  border: focusedNodeId === selectedNode.id ? '1px solid rgba(239, 68, 68, 0.5)' : 'none',
+                  borderRadius: 8,
+                  color: focusedNodeId === selectedNode.id ? '#f87171' : 'white',
+                  fontSize: 14,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8
+                }}
               >
-                {focusedNodeId === selectedNode.id ? (
-                  <>🔄 Show All</>
-                ) : (
-                  <>🎯 Focus Dependencies</>
-                )}
+                {focusedNodeId === selectedNode.id ? '🔄 Show All' : '🎯 Focus Dependencies'}
               </button>
               
               <button
                 onClick={() => navigator.clipboard.writeText(selectedNode.file_path)}
-                className="w-full py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-600 transition text-sm"
+                style={{
+                  width: '100%',
+                  padding: '10px 16px',
+                  backgroundColor: '#334155',
+                  border: 'none',
+                  borderRadius: 8,
+                  color: 'white',
+                  fontSize: 14,
+                  cursor: 'pointer'
+                }}
               >
                 📋 Copy Path
               </button>
             </div>
           </div>
         ) : (
-          <div className="p-10 text-center text-slate-500">
-            <div className="text-5xl mb-3">👆</div>
+          <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>👆</div>
             <div>Click a node to see details</div>
-            <div className="text-xs mt-2">or search for a file above</div>
+            <div style={{ fontSize: 12, marginTop: 8 }}>or search for a file above</div>
           </div>
         )}
       </div>
