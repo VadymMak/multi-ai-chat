@@ -13,6 +13,7 @@ import { useSettingsStore } from "./store/settingsStore";
 import ToastContainer from "./components/Shared/ToastContainer";
 import { NetworkStatus } from "./components/NetworkStatus";
 import DependencyGraphPage from './pages/DependencyGraphPage';
+import DependencyGraph3DPage from './pages/DependencyGraph3DPage';
 
 // In Routes:
 <Route path="/project/:projectId/graph" element={<DependencyGraphPage />} />
@@ -113,6 +114,7 @@ const App: React.FC = () => {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/project/:projectId/graph" element={<DependencyGraphPage />} />
+        <Route path="/project/:projectId/graph3d" element={<DependencyGraph3DPage />} />
         <Route
           path="/chat"
           element={

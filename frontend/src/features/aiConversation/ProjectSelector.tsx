@@ -286,7 +286,7 @@ const ProjectSelector: React.FC<ProjectSelectorProps> = ({
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(`/project/${project.id}/graph`);
+                      navigate(`/project/${project.id}/graph3d`);
                     }}
                     className="opacity-0 group-hover:opacity-100 p-1 hover:bg-primary/10 rounded transition-opacity"
                     title="View Dependency Graph"
