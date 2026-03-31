@@ -65,3 +65,6 @@ passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 cryptography==41.0.7
 bcrypt==4.1.2
+
+# MCP (Model Context Protocol) server
+mcp>=1.0.0

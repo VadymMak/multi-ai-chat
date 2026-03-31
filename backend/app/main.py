@@ -249,6 +249,16 @@ app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
+# ─────────────────────── MCP server (SSE) ────────────────────────
+# GET  /mcp/sse        — Claude connects here to open an SSE stream
+# POST /mcp/messages/  — Claude sends JSON-RPC messages here
+try:
+    from app.mcp_server import mcp_starlette_app  # noqa: E402
+    app.mount("/mcp", mcp_starlette_app)
+    logger.info("✅ MCP server mounted at /mcp")
+except Exception as _mcp_exc:
+    logger.warning(f"⚠️  MCP server not loaded: {_mcp_exc}")
+
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
 from app.config.model_registry import MODEL_REGISTRY  # noqa: E402
