@@ -31,6 +31,7 @@ from app.services.file_indexer import (
     save_file_dependencies,
 )
 from app.services import vector_service
+from app.services.hybrid_search_service import hybrid_search, fts_search
 from datetime import datetime
 
 from app.models import (
@@ -164,43 +165,50 @@ async def search_files(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(5, ge=1, le=20, description="Max results"),
     language: Optional[str] = Query(None, description="Filter by language"),
+    mode: str = Query("semantic", description="Search mode: semantic | hybrid | fts"),
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Search files by semantic similarity.
-    
+    Search files by semantic similarity, hybrid (semantic+FTS+graph), or FTS.
+
     Examples:
     - q="authentication" → finds auth-related files
     - q="error handling" → finds error handler files
     - q="API client" → finds API-related code
-    
+
     Args:
         project_id: Project ID to search in
         q: Search query
         limit: Maximum number of results (1-20)
         language: Filter by language (e.g., "typescript", "python")
+        mode: Search mode — "semantic" (default), "hybrid", or "fts"
     """
-    logger.info(f"🔍 Search: project={project_id}, query='{q}', limit={limit}")
-    
+    logger.info(f"🔍 Search: project={project_id}, query='{q}', limit={limit}, mode={mode}")
+
     # Verify project access
     project = db.query(Project).filter(
         Project.id == project_id,
         Project.user_id == current_user.id
     ).first()
-    
+
     if not project:
         raise HTTPException(404, "Project not found")
-    
+
     try:
-        indexer = FileIndexer(db)
-        results = await indexer.search_files(
-            project_id=project_id,
-            query=q,
-            limit=limit,
-            language=language
-        )
-        
+        if mode == "hybrid":
+            results = hybrid_search(q, project_id, db, limit=limit)
+        elif mode == "fts":
+            results = fts_search(q, project_id, db, limit=limit)
+        else:
+            indexer = FileIndexer(db)
+            results = await indexer.search_files(
+                project_id=project_id,
+                query=q,
+                limit=limit,
+                language=language
+            )
+
         return SearchResponse(
             project_id=project_id,
             query=q,

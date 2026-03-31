@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import logging
+import re
 
 from app.services import vector_service
 
@@ -74,12 +75,8 @@ def fts_search(
     try:
         # Convert query to tsquery format
         # "useState React hook" → "useState & React & hook"
-        words = query.strip().split()
-        if not words:
-            return []
-        
-        # Filter out very short words and special characters
-        words = [w for w in words if len(w) >= 2 and w.isalnum()]
+        # re.sub keeps underscores so identifiers like fts_search tokenize correctly
+        words = [w for w in re.sub(r'[^\w]', ' ', query).split() if len(w) >= 2]
         if not words:
             return []
         
