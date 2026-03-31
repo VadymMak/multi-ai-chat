@@ -19,11 +19,28 @@ Tools
 7. get_file_versions          — change history for an indexed file
 8. build_context_for_query    — full RAG context (calls smart_context)
 
+Transport layer
+---------------
+Uses FastMCP (mcp.server.fastmcp.FastMCP) instead of the low-level
+Server + SseServerTransport pair. FastMCP fixes two issues that caused
+the connection to drop immediately after initialize:
+
+  1. Protocol version: the low-level Server is hardcoded to "2024-11-05".
+     FastMCP negotiates the latest supported version (2025-03-26 / 2025-11-25)
+     so Claude Desktop no longer rejects the handshake.
+
+  2. SSE lifecycle: FastMCP.sse_app() keeps the connection alive for the
+     full session and cleans up stale sessions on disconnect. The manual
+     Starlette routing used previously did not handle this correctly.
+
 Design rules
 ------------
 - Every tool is an async function.
 - DB sessions are opened and closed inside each handler (not via FastAPI DI).
 - Exceptions are caught; {"error": str(exc)} is returned instead of raising.
+- _tool_* handler functions are not modified — @mcp.tool() wrappers are
+  thin dispatchers that convert kwargs into the args dict and JSON-encode
+  the return value.
 - No existing router files are modified.
 """
 
@@ -33,13 +50,11 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from mcp import types
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+# FastMCP is the officially recommended high-level API (replaces low-level
+# Server + SseServerTransport).  It handles protocol-version negotiation,
+# SSE connection keep-alive, and session cleanup automatically.
+from mcp.server.fastmcp import FastMCP
 from sqlalchemy import text
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.routing import Mount, Route
 
 from app.memory.db import SessionLocal
 from app.memory.manager import MemoryManager
@@ -52,7 +67,7 @@ logger = logging.getLogger(__name__)
 # MCP Server instance
 # ─────────────────────────────────────────────────────────────────
 
-mcp = Server("multi-ai-chat-mcp")
+mcp = FastMCP("multi-ai-chat-mcp")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -62,269 +77,6 @@ mcp = Server("multi-ai-chat-mcp")
 def _open_db():
     """Return a new SQLAlchemy Session. Caller is responsible for closing it."""
     return SessionLocal()
-
-
-# ─────────────────────────────────────────────────────────────────
-# Tool registry
-# ─────────────────────────────────────────────────────────────────
-
-@mcp.list_tools()
-async def _list_tools() -> List[types.Tool]:
-    return [
-        types.Tool(
-            name="search_project_files",
-            description=(
-                "Semantic search across indexed project files using pgvector cosine similarity. "
-                "Returns a ranked list of matching files with similarity scores, language, "
-                "line count, and extracted metadata (functions, classes, imports)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "integer",
-                        "description": "Numeric project ID to search within.",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 5,
-                        "description": "Maximum number of results to return (default 5).",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": (
-                            "Optional language filter "
-                            "(e.g. 'python', 'typescript', 'javascript', 'go')."
-                        ),
-                    },
-                },
-                "required": ["project_id", "query"],
-            },
-        ),
-        types.Tool(
-            name="get_file_content",
-            description=(
-                "Retrieve the full source content of a specific indexed file "
-                "along with its detected language, line count, and extracted metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "integer",
-                        "description": "Numeric project ID.",
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Exact file path as stored in the index (e.g. 'backend/app/main.py').",
-                    },
-                },
-                "required": ["project_id", "file_path"],
-            },
-        ),
-        types.Tool(
-            name="get_file_dependencies",
-            description=(
-                "Get the import/dependency graph from the file_dependencies table. "
-                "When file_path is provided, returns only that file's outgoing imports. "
-                "When file_path is omitted, returns all dependencies in the project."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "integer",
-                        "description": "Numeric project ID.",
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": (
-                            "Optional. File path to scope the query "
-                            "(omit to get all project dependencies)."
-                        ),
-                    },
-                },
-                "required": ["project_id"],
-            },
-        ),
-        types.Tool(
-            name="search_conversation_memory",
-            description=(
-                "Semantic search over conversation history stored in memory_entries "
-                "using pgvector cosine similarity. Returns past messages and summaries "
-                "ranked by semantic similarity to the query."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID as stored in memory_entries (string).",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query to find semantically similar messages.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 5,
-                        "description": "Maximum number of results to return (default 5).",
-                    },
-                    "role_id": {
-                        "type": "integer",
-                        "description": "Optional. Filter messages by assistant/role ID.",
-                    },
-                },
-                "required": ["project_id", "query"],
-            },
-        ),
-        types.Tool(
-            name="list_canon_items",
-            description=(
-                "List canonical knowledge items from the canon_items table. "
-                "Supported types: ADR (architectural decisions), CHANGELOG, "
-                "BACKLOG, GLOSSARY, PMD. "
-                "Only active items are returned by default."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID as stored in canon_items (string).",
-                    },
-                    "type": {
-                        "type": "string",
-                        "description": (
-                            "Optional type filter: "
-                            "ADR | CHANGELOG | BACKLOG | GLOSSARY | PMD."
-                        ),
-                    },
-                    "is_active": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "When true (default), only active items are returned.",
-                    },
-                },
-                "required": ["project_id"],
-            },
-        ),
-        types.Tool(
-            name="get_project_stats",
-            description=(
-                "Return file indexing statistics for a project: total file count, "
-                "number of distinct languages, total line count, total size in KB, "
-                "last index timestamp, per-language breakdown, and dependency counts."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "integer",
-                        "description": "Numeric project ID.",
-                    },
-                },
-                "required": ["project_id"],
-            },
-        ),
-        types.Tool(
-            name="get_file_versions",
-            description=(
-                "Return the full version history for an indexed file from the "
-                "file_versions table. Each entry includes version number, change type "
-                "(create/edit/delete/rollback), change source (user/ai_edit/ai_create/ai_fix), "
-                "commit-style message, AI model used (if any), and timestamp."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "integer",
-                        "description": "Numeric project ID.",
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Exact file path as stored in file_embeddings.",
-                    },
-                },
-                "required": ["project_id", "file_path"],
-            },
-        ),
-        types.Tool(
-            name="build_context_for_query",
-            description=(
-                "Build a full RAG context string for a query against a project. "
-                "Internally calls build_smart_context() which combines: "
-                "project file tree (START position), past decision summaries (MIDDLE), "
-                "recent conversation messages (MIDDLE), semantically similar past "
-                "discussions (MIDDLE), and relevant code files with content (END). "
-                "Returns ~4 000-token context string ready for LLM injection."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project_id": {
-                        "type": "string",
-                        "description": "Project ID – accepted as string or integer.",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "The user query to build context for.",
-                    },
-                    "role_id": {
-                        "type": "integer",
-                        "description": "Optional assistant/role ID (defaults to 0).",
-                    },
-                },
-                "required": ["project_id", "query"],
-            },
-        ),
-    ]
-
-
-# ─────────────────────────────────────────────────────────────────
-# Tool call dispatcher
-# ─────────────────────────────────────────────────────────────────
-
-@mcp.call_tool()
-async def _call_tool(
-    name: str,
-    arguments: Optional[Dict[str, Any]],
-) -> List[types.TextContent]:
-    """Route incoming tool calls to individual async handlers."""
-    args: Dict[str, Any] = arguments or {}
-
-    _handlers = {
-        "search_project_files": _tool_search_project_files,
-        "get_file_content": _tool_get_file_content,
-        "get_file_dependencies": _tool_get_file_dependencies,
-        "search_conversation_memory": _tool_search_conversation_memory,
-        "list_canon_items": _tool_list_canon_items,
-        "get_project_stats": _tool_get_project_stats,
-        "get_file_versions": _tool_get_file_versions,
-        "build_context_for_query": _tool_build_context_for_query,
-    }
-
-    handler = _handlers.get(name)
-    if handler is None:
-        result: Any = {"error": f"Unknown tool: {name!r}"}
-    else:
-        try:
-            result = await handler(args)
-        except Exception as exc:
-            logger.exception("MCP tool %r raised unexpectedly", name)
-            result = {"error": str(exc)}
-
-    return [
-        types.TextContent(
-            type="text",
-            text=json.dumps(result, default=str, ensure_ascii=False),
-        )
-    ]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -700,33 +452,211 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
 
 
 # ─────────────────────────────────────────────────────────────────
-# SSE transport + Starlette sub-application
+# @mcp.tool() wrappers
 #
-# FastAPI mounts this at /mcp (see main.py).
-# Claude connects to:
-#   GET  /mcp/sse          — opens the SSE stream
-#   POST /mcp/messages/    — sends JSON-RPC messages back to the server
+# Each wrapper is a thin dispatcher: it converts the typed kwargs that
+# FastMCP passes in (from the Claude-generated tool call) into the
+# args dict that the existing _tool_* handler expects, then JSON-encodes
+# the result as a string for FastMCP to return as TextContent.
+#
+# WHY return str?  FastMCP wraps the return value in a TextContent
+# automatically.  Returning a pre-serialised JSON string avoids a
+# double-encode and guarantees datetime/custom objects are handled
+# correctly via the default=str fallback.
 # ─────────────────────────────────────────────────────────────────
 
-_sse_transport = SseServerTransport("/mcp/messages/")
+@mcp.tool()
+async def search_project_files(
+    project_id: int,
+    query: str,
+    limit: int = 5,
+    language: Optional[str] = None,
+) -> str:
+    """
+    Semantic search across indexed project files using pgvector cosine similarity.
+    Returns a ranked list of matching files with similarity scores, language,
+    line count, and extracted metadata (functions, classes, imports).
+
+    Args:
+        project_id: Numeric project ID to search within.
+        query: Natural language search query.
+        limit: Maximum number of results to return (default 5).
+        language: Optional language filter (e.g. 'python', 'typescript', 'go').
+    """
+    result = await _tool_search_project_files(
+        {"project_id": project_id, "query": query, "limit": limit, "language": language}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
 
 
-async def _handle_sse(request: Request) -> None:
-    """Accept a new SSE connection and run the MCP server on it."""
-    async with _sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as (read_stream, write_stream):
-        await mcp.run(
-            read_stream,
-            write_stream,
-            mcp.create_initialization_options(),
-        )
+@mcp.tool()
+async def get_file_content(
+    project_id: int,
+    file_path: str,
+) -> str:
+    """
+    Retrieve the full source content of a specific indexed file along with its
+    detected language, line count, and extracted metadata.
+
+    Args:
+        project_id: Numeric project ID.
+        file_path: Exact file path as stored in the index (e.g. 'backend/app/main.py').
+    """
+    result = await _tool_get_file_content(
+        {"project_id": project_id, "file_path": file_path}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
 
 
-# Starlette sub-app that main.py mounts at /mcp
-mcp_starlette_app = Starlette(
-    routes=[
-        Route("/sse", endpoint=_handle_sse),
-        Mount("/messages/", app=_sse_transport.handle_post_message),
-    ]
-)
+@mcp.tool()
+async def get_file_dependencies(
+    project_id: int,
+    file_path: Optional[str] = None,
+) -> str:
+    """
+    Get the import/dependency graph from the file_dependencies table.
+    When file_path is provided, returns only that file's outgoing imports.
+    When file_path is omitted, returns all dependencies in the project.
+
+    Args:
+        project_id: Numeric project ID.
+        file_path: Optional file path to scope the query (omit for all dependencies).
+    """
+    result = await _tool_get_file_dependencies(
+        {"project_id": project_id, "file_path": file_path}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+@mcp.tool()
+async def search_conversation_memory(
+    project_id: str,
+    query: str,
+    limit: int = 5,
+    role_id: Optional[int] = None,
+) -> str:
+    """
+    Semantic search over conversation history stored in memory_entries using
+    pgvector cosine similarity. Returns past messages and summaries ranked by
+    semantic similarity to the query.
+
+    Args:
+        project_id: Project ID as stored in memory_entries (string).
+        query: Search query to find semantically similar messages.
+        limit: Maximum number of results to return (default 5).
+        role_id: Optional. Filter messages by assistant/role ID.
+    """
+    result = await _tool_search_conversation_memory(
+        {"project_id": project_id, "query": query, "limit": limit, "role_id": role_id}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_canon_items(
+    project_id: str,
+    type: Optional[str] = None,
+    is_active: bool = True,
+) -> str:
+    """
+    List canonical knowledge items from the canon_items table.
+    Supported types: ADR (architectural decisions), CHANGELOG, BACKLOG, GLOSSARY, PMD.
+    Only active items are returned by default.
+
+    Args:
+        project_id: Project ID as stored in canon_items (string).
+        type: Optional type filter: ADR | CHANGELOG | BACKLOG | GLOSSARY | PMD.
+        is_active: When true (default), only active items are returned.
+    """
+    result = await _tool_list_canon_items(
+        {"project_id": project_id, "type": type, "is_active": is_active}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_project_stats(
+    project_id: int,
+) -> str:
+    """
+    Return file indexing statistics for a project: total file count, number of
+    distinct languages, total line count, total size in KB, last index timestamp,
+    per-language breakdown, and dependency counts.
+
+    Args:
+        project_id: Numeric project ID.
+    """
+    result = await _tool_get_project_stats({"project_id": project_id})
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_file_versions(
+    project_id: int,
+    file_path: str,
+) -> str:
+    """
+    Return the full version history for an indexed file from the file_versions
+    table. Each entry includes version number, change type (create/edit/delete/
+    rollback), change source (user/ai_edit/ai_create/ai_fix), commit-style
+    message, AI model used (if any), and timestamp.
+
+    Args:
+        project_id: Numeric project ID.
+        file_path: Exact file path as stored in file_embeddings.
+    """
+    result = await _tool_get_file_versions(
+        {"project_id": project_id, "file_path": file_path}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+@mcp.tool()
+async def build_context_for_query(
+    project_id: str,
+    query: str,
+    role_id: int = 0,
+) -> str:
+    """
+    Build a full RAG context string for a query against a project.
+    Internally calls build_smart_context() which combines:
+      - Project file tree (START position, high attention)
+      - Past decision summaries (MIDDLE)
+      - Recent conversation messages (MIDDLE)
+      - Semantically similar past discussions (MIDDLE)
+      - Relevant code files with content (END position, high attention)
+    Returns ~4 000-token context string ready for LLM injection.
+
+    Args:
+        project_id: Project ID — accepted as string or integer.
+        query: The user query to build context for.
+        role_id: Optional assistant/role ID (defaults to 0).
+    """
+    result = await _tool_build_context_for_query(
+        {"project_id": project_id, "query": query, "role_id": role_id}
+    )
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Starlette sub-application
+#
+# FastMCP.sse_app() returns a fully self-contained Starlette ASGI app
+# that wires up the SSE + POST message routes internally and handles:
+#   - Protocol version negotiation (supports 2025-11-25 and earlier)
+#   - SSE keep-alive for the full session lifetime
+#   - Automatic session cleanup on client disconnect
+#
+# mount_path="/mcp" tells FastMCP the prefix under which it is mounted
+# in the parent FastAPI app so it can advertise the correct POST URL
+# (/mcp/messages/) in the SSE initialisation event.
+#
+# FastAPI mounts this at /mcp in main.py:
+#   app.mount("/mcp", mcp_starlette_app)
+#
+# Claude connects to:
+#   GET  /mcp/sse          — opens the persistent SSE stream
+#   POST /mcp/messages/    — sends JSON-RPC messages into that stream
+# ─────────────────────────────────────────────────────────────────
+
+mcp_starlette_app = mcp.sse_app(mount_path="/mcp")

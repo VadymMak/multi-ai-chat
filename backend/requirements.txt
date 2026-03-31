@@ -67,4 +67,9 @@ cryptography==41.0.7
 bcrypt==4.1.2
 
 # MCP (Model Context Protocol) server
-mcp>=1.0.0
+# Requires Python >=3.10 (Docker backend satisfies this).
+# >=1.6.0 is needed for:
+#   - FastMCP high-level API with sse_app()
+#   - Protocol version "2025-03-26" / "2025-11-25" negotiation
+#   - Proper SSE session lifecycle (connection stays alive after initialize)
+mcp>=1.6.0
