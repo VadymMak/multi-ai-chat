@@ -435,4 +435,64 @@ async def build_context_for_query(
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
+@mcp.tool()
+async def get_active_project(folder_identifier: str) -> str:
+    """
+    Find a project by its VSCode folder identifier.
+    Returns project_id, name, git_url and file stats.
+    Use this at the start of every session to identify
+    which project the user is working on.
+
+    Args:
+        folder_identifier: The VSCode workspace folder identifier (e.g. 'my-project').
+    """
+    db = _open_db()
+    try:
+        row = db.execute(
+            text("""
+                SELECT id, name, git_url, files_count, indexed_at
+                FROM projects
+                WHERE folder_identifier = :folder_identifier
+                LIMIT 1
+            """),
+            {"folder_identifier": folder_identifier},
+        ).fetchone()
+
+        if row is None:
+            row = db.execute(
+                text("""
+                    SELECT id, name, git_url, files_count, indexed_at
+                    FROM projects
+                    WHERE name ILIKE :pattern
+                    LIMIT 1
+                """),
+                {"pattern": f"%{folder_identifier}%"},
+            ).fetchone()
+
+        if row is None:
+            return json.dumps(
+                {"found": False, "folder_identifier": folder_identifier},
+                default=str,
+                ensure_ascii=False,
+            )
+
+        return json.dumps(
+            {
+                "found": True,
+                "project_id": row[0],
+                "name": row[1],
+                "git_url": row[2],
+                "files_count": row[3],
+                "last_indexed": row[4].isoformat() if row[4] else None,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_active_project error: %s", exc)
+        return json.dumps({"error": str(exc), "found": False}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
 __all__ = ["mcp"]
