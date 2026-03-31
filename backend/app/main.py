@@ -277,7 +277,9 @@ try:
         app.router.routes.append(_mcp_route)
     logger.info("✅ MCP routes registered: GET /mcp/sse, POST /mcp/messages/")
 except Exception as _mcp_exc:
-    logger.warning(f"⚠️  MCP server not loaded: {_mcp_exc}")
+    import traceback
+    logger.error(f"❌ MCP server failed to load: {_mcp_exc}")
+    logger.error(traceback.format_exc())
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
