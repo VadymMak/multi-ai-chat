@@ -138,3 +138,4 @@ Planned / optional features:
 
 MIT – Use freely and fork to learn or build your own AI agent!
 # auto-reindex test
+# brain system test
