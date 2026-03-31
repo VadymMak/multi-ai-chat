@@ -262,6 +262,12 @@ try:
     from app.mcp_server import mcp_http_app  # noqa: E402
     app.mount("/mcp", mcp_http_app)
     logger.info("✅ MCP server mounted at /mcp (streamable HTTP)")
+
+    # DEBUG: print all routes
+    for route in app.routes:
+        logger.info(f"Route: {route}")
+    for route in mcp_http_app.routes:
+        logger.info(f"MCP internal route: {route}")
 except Exception as e:
     import traceback
     logger.error(f"❌ MCP failed: {e}")
