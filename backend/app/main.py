@@ -1,4 +1,7 @@
 from __future__ import annotations
+import re
+from app.mcp_server import mcp   # ← MCP instance with all tools
+from app.memory.db import init_db, DATABASE_URL
 
 import logging
 import os
@@ -13,22 +16,19 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-
-
 # ───────────────────── .env & logging ─────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
-# DB init (ensures all tables exist, including CanonItem)
-from app.memory.db import init_db, DATABASE_URL
-from app.mcp_server import mcp
+# DB init + MCP import
 
 
 # ──────────────────── App lifespan hook ───────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with AsyncExitStack() as stack:
+        # Start MCP Streamable HTTP session manager (required for mcp==1.26.0)
         await stack.enter_async_context(mcp.session_manager.run())
 
         logger.info(f"Initializing database… URL={DATABASE_URL}")
@@ -39,11 +39,13 @@ async def lifespan(app: FastAPI):
             from sqlalchemy import create_engine, text
             engine = create_engine(DATABASE_URL)
             with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE roles ALTER COLUMN description TYPE TEXT;"))
+                conn.execute(
+                    text("ALTER TABLE roles ALTER COLUMN description TYPE TEXT;"))
                 conn.commit()
                 logger.info("✅ Migration: roles.description -> TEXT")
         except Exception as e:
-            logger.info(f"ℹ️ Migration skipped (already done or not needed): {e}")
+            logger.info(
+                f"ℹ️ Migration skipped (already done or not needed): {e}")
 
         # Create superuser on startup if configured
         await create_superuser()
@@ -77,27 +79,23 @@ raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
 allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
 
 # Build regex pattern from allowed origins
-import re
 escaped_origins = []
 for origin in allow_origins:
     if origin == "*":
-        # Keep wildcard support
         escaped_origins.append(".*")
     elif origin == "vscode-webview://*":
-        # ✅ VS Code webview support (any guid)
         escaped_origins.append(r"vscode-webview://[a-z0-9]+")
     else:
-        # Escape special regex characters and replace * with \d+ for ports
-        escaped = re.escape(origin).replace(r"\*", ".*").replace(r":\d+", r":\d+")
+        escaped = re.escape(origin).replace(
+            r"\*", ".*").replace(r":\d+", r":\d+")
         escaped_origins.append(escaped)
 
-# Create final regex pattern
 origin_pattern = "^(" + "|".join(escaped_origins) + ")$"
 logger.info(f"CORS allow_origin_regex: {origin_pattern}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=origin_pattern,  # ✅ ИЗМЕНЕНО: используем regex вместо списка
+    allow_origin_regex=origin_pattern,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,10 +115,6 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 
 def _sanitize_pydantic_errors(errors: Any) -> list[Dict[str, Any]]:
-    """
-    Convert Pydantic/Starlette validation errors into JSON-serializable dictionaries.
-    Avoid putting non-serializable objects (e.g., raw Exceptions) into the payload.
-    """
     out: list[dict] = []
     if not isinstance(errors, list):
         return out
@@ -133,15 +127,14 @@ def _sanitize_pydantic_errors(errors: Any) -> list[Dict[str, Any]]:
             "msg": e.get("msg"),
             "type": e.get("type"),
         }
-        # Optional: include input only if it's simple/serializable
         if "input" in e:
             try:
                 val = e.get("input")
-                item["input"] = val if isinstance(val, (str, int, float, bool, type(None))) else str(val)
+                item["input"] = val if isinstance(
+                    val, (str, int, float, bool, type(None))) else str(val)
             except Exception:
                 item["input"] = None
 
-        # Sanitize ctx (can contain raw Exception objects)
         ctx = e.get("ctx")
         if isinstance(ctx, dict):
             safe_ctx: Dict[str, Any] = {}
@@ -172,7 +165,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled exception at %s %s", request.method, request.url.path)
+    logger.exception("Unhandled exception at %s %s",
+                     request.method, request.url.path)
     traceback.print_exc()
     return JSONResponse(
         status_code=500,
@@ -208,22 +202,22 @@ from app.routers import (  # noqa: E402
     auto_learning
 )
 
-# Optional routers (guarded so startup doesn't crash if missing)
+# Optional routers
 try:
-    from app.routers.upload_file import router as upload_router  # type: ignore  # noqa: E402
+    from app.routers.upload_file import router as upload_router  # type: ignore
     logger.info("Loaded optional router: upload_file")
 except Exception as e:
-    upload_router = None  # type: ignore
+    upload_router = None
     logger.info(f"Optional router 'upload_file' not available: {e}")
 
 try:
-    from app.routers.prompt_template import router as prompt_template_router  # type: ignore  # noqa: E402
+    from app.routers.prompt_template import router as prompt_template_router  # type: ignore
     logger.info("Loaded optional router: prompt_template")
 except Exception as e:
-    prompt_template_router = None  # type: ignore
+    prompt_template_router = None
     logger.info(f"Optional router 'prompt_template' not available: {e}")
 
-# Single API prefix for everything
+# Include all routers under /api
 app.include_router(init.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(api_keys.router, prefix="/api")
@@ -244,12 +238,14 @@ app.include_router(balance.router, prefix="/api")
 app.include_router(debate.router, prefix="/api")
 app.include_router(project_builder.router, prefix="/api")
 app.include_router(vscode.router, prefix="/api")
-app.include_router(file_indexer.router, prefix="/api"),
+app.include_router(file_indexer.router, prefix="/api")
 app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
 # ─────────────────────── MCP server ──────────────────────────────
+# Mount Streamable HTTP MCP server at /mcp
+# With stateless_http=True in mcp_server.py, client should call exactly /mcp
 app.mount("/mcp", mcp.streamable_http_app())
 
 # ───────────────────── Runtime config (safe) ──────────────
@@ -268,7 +264,6 @@ def _resolve_key_for_model_name(name: str | None) -> str | None:
 
 @app.get("/api/config")
 def read_config():
-    # NEVER return secrets; only presence flags + non-sensitive config
     return {
         "env": {
             "OPENAI_API_KEY_present": bool(os.getenv("OPENAI_API_KEY")),
@@ -326,23 +321,24 @@ async def health_check():
 async def create_superuser():
     """Create superuser if configured and doesn't exist"""
     if not settings.SUPERUSER_EMAIL or not settings.SUPERUSER_PASSWORD:
-        logger.info("⚠️ No SUPERUSER_EMAIL/SUPERUSER_PASSWORD configured - skipping superuser creation")
+        logger.info(
+            "⚠️ No SUPERUSER_EMAIL/SUPERUSER_PASSWORD configured - skipping superuser creation")
         return
-    
+
     from app.memory.db import SessionLocal
     from app.memory.models import User
     from passlib.hash import bcrypt
     from datetime import datetime
-    
+
     db = SessionLocal()
     try:
-        # Check if superuser exists
-        existing = db.query(User).filter(User.email == settings.SUPERUSER_EMAIL).first()
+        existing = db.query(User).filter(
+            User.email == settings.SUPERUSER_EMAIL).first()
         if existing:
-            logger.info(f"✅ Superuser already exists: {settings.SUPERUSER_EMAIL}")
+            logger.info(
+                f"✅ Superuser already exists: {settings.SUPERUSER_EMAIL}")
             return
-        
-        # Create superuser
+
         superuser = User(
             email=settings.SUPERUSER_EMAIL,
             username=settings.SUPERUSER_USERNAME,
@@ -350,17 +346,17 @@ async def create_superuser():
             status="active",
             is_superuser=True,
             is_active=True,
-            trial_ends_at=None,  # Superuser doesn't need trial
+            trial_ends_at=None,
             subscription_ends_at=None
         )
-        
+
         db.add(superuser)
         db.commit()
-        
+
         logger.info(f"✅ Superuser created: {settings.SUPERUSER_EMAIL}")
         logger.info(f"   Username: {settings.SUPERUSER_USERNAME}")
         logger.info(f"   Password: *** (from SUPERUSER_PASSWORD env var)")
-        
+
     except Exception as e:
         logger.error(f"❌ Error creating superuser: {e}")
         db.rollback()

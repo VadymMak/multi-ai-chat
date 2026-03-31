@@ -1,12 +1,11 @@
 """
 MCP (Model Context Protocol) server for multi-ai-chat.
 
-Exposes 8 tools over SSE transport so Claude Desktop / Claude Code
+Exposes 8 tools over Streamable HTTP transport so Claude Desktop / Claude Code
 can query the existing FastAPI backend data without touching the REST API.
 
-Mount point  : /mcp             (added in main.py)
-SSE endpoint : /mcp/sse
-POST endpoint: /mcp/messages/
+Mount point (in main.py): /mcp
+Client endpoint after correct mounting: https://your-domain.com/mcp
 
 Tools
 -----
@@ -21,17 +20,9 @@ Tools
 
 Transport layer
 ---------------
-Uses FastMCP (mcp.server.fastmcp.FastMCP) instead of the low-level
-Server + SseServerTransport pair. FastMCP fixes two issues that caused
-the connection to drop immediately after initialize:
-
-  1. Protocol version: the low-level Server is hardcoded to "2024-11-05".
-     FastMCP negotiates the latest supported version (2025-03-26 / 2025-11-25)
-     so Claude Desktop no longer rejects the handshake.
-
-  2. SSE lifecycle: FastMCP.sse_app() keeps the connection alive for the
-     full session and cleans up stale sessions on disconnect. The manual
-     Starlette routing used previously did not handle this correctly.
+Uses FastMCP with Streamable HTTP (recommended for mcp>=1.9.0).
+This fixes protocol version negotiation and session lifecycle issues that
+existed with the old low-level SSE + custom Starlette routing.
 
 Design rules
 ------------
@@ -50,9 +41,6 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-# FastMCP is the officially recommended high-level API (replaces low-level
-# Server + SseServerTransport).  It handles protocol-version negotiation,
-# SSE connection keep-alive, and session cleanup automatically.
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import text
 
@@ -67,7 +55,11 @@ logger = logging.getLogger(__name__)
 # MCP Server instance
 # ─────────────────────────────────────────────────────────────────
 
-mcp = FastMCP("multi-ai-chat-mcp")
+mcp = FastMCP(
+    "multi-ai-chat-mcp",
+    json_response=True,      # Recommended: returns proper JSON content
+    stateless_http=True,     # Important for clean mounting under prefix
+)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -221,8 +213,6 @@ async def _tool_get_file_dependencies(args: Dict[str, Any]) -> Any:
 # ─────────────────────────────────────────────────────────────────
 # Tool 4 — search_conversation_memory
 # Direct pgvector query on memory_entries scoped to project_id.
-# (vector_service.search_similar_messages is scoped to chat_session_id;
-#  for the MCP layer we need project-level search instead.)
 # ─────────────────────────────────────────────────────────────────
 
 async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
@@ -235,8 +225,6 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
 
     db = _open_db()
     try:
-        # Import here to keep module-level imports clean and avoid
-        # triggering the lazy OpenAI client before it is needed.
         from app.services.vector_service import create_embedding
 
         query_embedding: List[float] = create_embedding(query)
@@ -453,16 +441,6 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # @mcp.tool() wrappers
-#
-# Each wrapper is a thin dispatcher: it converts the typed kwargs that
-# FastMCP passes in (from the Claude-generated tool call) into the
-# args dict that the existing _tool_* handler expects, then JSON-encodes
-# the result as a string for FastMCP to return as TextContent.
-#
-# WHY return str?  FastMCP wraps the return value in a TextContent
-# automatically.  Returning a pre-serialised JSON string avoids a
-# double-encode and guarantees datetime/custom objects are handled
-# correctly via the default=str fallback.
 # ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -474,17 +452,10 @@ async def search_project_files(
 ) -> str:
     """
     Semantic search across indexed project files using pgvector cosine similarity.
-    Returns a ranked list of matching files with similarity scores, language,
-    line count, and extracted metadata (functions, classes, imports).
-
-    Args:
-        project_id: Numeric project ID to search within.
-        query: Natural language search query.
-        limit: Maximum number of results to return (default 5).
-        language: Optional language filter (e.g. 'python', 'typescript', 'go').
     """
     result = await _tool_search_project_files(
-        {"project_id": project_id, "query": query, "limit": limit, "language": language}
+        {"project_id": project_id, "query": query,
+            "limit": limit, "language": language}
     )
     return json.dumps(result, default=str, ensure_ascii=False)
 
@@ -495,12 +466,7 @@ async def get_file_content(
     file_path: str,
 ) -> str:
     """
-    Retrieve the full source content of a specific indexed file along with its
-    detected language, line count, and extracted metadata.
-
-    Args:
-        project_id: Numeric project ID.
-        file_path: Exact file path as stored in the index (e.g. 'backend/app/main.py').
+    Retrieve the full source content of a specific indexed file.
     """
     result = await _tool_get_file_content(
         {"project_id": project_id, "file_path": file_path}
@@ -515,12 +481,6 @@ async def get_file_dependencies(
 ) -> str:
     """
     Get the import/dependency graph from the file_dependencies table.
-    When file_path is provided, returns only that file's outgoing imports.
-    When file_path is omitted, returns all dependencies in the project.
-
-    Args:
-        project_id: Numeric project ID.
-        file_path: Optional file path to scope the query (omit for all dependencies).
     """
     result = await _tool_get_file_dependencies(
         {"project_id": project_id, "file_path": file_path}
@@ -536,18 +496,11 @@ async def search_conversation_memory(
     role_id: Optional[int] = None,
 ) -> str:
     """
-    Semantic search over conversation history stored in memory_entries using
-    pgvector cosine similarity. Returns past messages and summaries ranked by
-    semantic similarity to the query.
-
-    Args:
-        project_id: Project ID as stored in memory_entries (string).
-        query: Search query to find semantically similar messages.
-        limit: Maximum number of results to return (default 5).
-        role_id: Optional. Filter messages by assistant/role ID.
+    Semantic search over conversation history stored in memory_entries.
     """
     result = await _tool_search_conversation_memory(
-        {"project_id": project_id, "query": query, "limit": limit, "role_id": role_id}
+        {"project_id": project_id, "query": query,
+            "limit": limit, "role_id": role_id}
     )
     return json.dumps(result, default=str, ensure_ascii=False)
 
@@ -560,13 +513,6 @@ async def list_canon_items(
 ) -> str:
     """
     List canonical knowledge items from the canon_items table.
-    Supported types: ADR (architectural decisions), CHANGELOG, BACKLOG, GLOSSARY, PMD.
-    Only active items are returned by default.
-
-    Args:
-        project_id: Project ID as stored in canon_items (string).
-        type: Optional type filter: ADR | CHANGELOG | BACKLOG | GLOSSARY | PMD.
-        is_active: When true (default), only active items are returned.
     """
     result = await _tool_list_canon_items(
         {"project_id": project_id, "type": type, "is_active": is_active}
@@ -579,12 +525,7 @@ async def get_project_stats(
     project_id: int,
 ) -> str:
     """
-    Return file indexing statistics for a project: total file count, number of
-    distinct languages, total line count, total size in KB, last index timestamp,
-    per-language breakdown, and dependency counts.
-
-    Args:
-        project_id: Numeric project ID.
+    Return file indexing statistics for a project.
     """
     result = await _tool_get_project_stats({"project_id": project_id})
     return json.dumps(result, default=str, ensure_ascii=False)
@@ -596,14 +537,7 @@ async def get_file_versions(
     file_path: str,
 ) -> str:
     """
-    Return the full version history for an indexed file from the file_versions
-    table. Each entry includes version number, change type (create/edit/delete/
-    rollback), change source (user/ai_edit/ai_create/ai_fix), commit-style
-    message, AI model used (if any), and timestamp.
-
-    Args:
-        project_id: Numeric project ID.
-        file_path: Exact file path as stored in file_embeddings.
+    Return the full version history for an indexed file.
     """
     result = await _tool_get_file_versions(
         {"project_id": project_id, "file_path": file_path}
@@ -619,24 +553,11 @@ async def build_context_for_query(
 ) -> str:
     """
     Build a full RAG context string for a query against a project.
-    Internally calls build_smart_context() which combines:
-      - Project file tree (START position, high attention)
-      - Past decision summaries (MIDDLE)
-      - Recent conversation messages (MIDDLE)
-      - Semantically similar past discussions (MIDDLE)
-      - Relevant code files with content (END position, high attention)
-    Returns ~4 000-token context string ready for LLM injection.
-
-    Args:
-        project_id: Project ID — accepted as string or integer.
-        query: The user query to build context for.
-        role_id: Optional assistant/role ID (defaults to 0).
     """
     result = await _tool_build_context_for_query(
         {"project_id": project_id, "query": query, "role_id": role_id}
     )
     return json.dumps(result, default=str, ensure_ascii=False)
-
 
 
 __all__ = ["mcp"]
