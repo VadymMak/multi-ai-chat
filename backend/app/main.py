@@ -54,7 +54,14 @@ async def lifespan(app: FastAPI):
             import traceback
             traceback.print_exc()
         
-        yield
+        try:
+            from app.mcp_server import mcp_http_app as _mcp_http_app
+            async with _mcp_http_app.run():
+                yield
+        except Exception as _mcp_lifespan_exc:
+            logger.error(f"❌ MCP lifespan failed: {_mcp_lifespan_exc}")
+            logger.error(traceback.format_exc())
+            yield
     finally:
         pass
 
