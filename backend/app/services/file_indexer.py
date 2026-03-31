@@ -1164,11 +1164,133 @@ Imports: {', '.join(metadata.get('imports', []))}
         self.db.execute(text("""
             DELETE FROM file_dependencies WHERE project_id = :project_id
         """), {"project_id": project_id})
-        
+
         # Then delete files
         result = self.db.execute(text("""
             DELETE FROM file_embeddings WHERE project_id = :project_id
         """), {"project_id": project_id})
         self.db.commit()
-        
+
         return result.rowcount
+
+    async def index_single_file(
+        self,
+        project_id: int,
+        file_path: str,
+        content: str,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Index or update a single file in file_embeddings.
+
+        Returns:
+            {success, file_path, action: "updated"|"inserted"|"skipped", embedding_id}
+        """
+        # 1. Determine language
+        language = get_file_language(file_path)
+        if not language:
+            return {"success": False, "file_path": file_path, "action": "skipped", "embedding_id": None}
+
+        # 2. Compute content hash
+        content_hash = compute_content_hash(content)
+
+        # 3. Check for existing record
+        existing = self.db.execute(text("""
+            SELECT id, content_hash FROM file_embeddings
+            WHERE project_id = :project_id AND file_path = :file_path
+        """), {"project_id": project_id, "file_path": file_path}).fetchone()
+
+        # 4. Skip if unchanged (unless force)
+        if existing and existing[1] == content_hash and not force:
+            return {"success": True, "file_path": file_path, "action": "skipped", "embedding_id": existing[0]}
+
+        # 5. Extract metadata
+        metadata = extract_metadata(content, language)
+
+        # 6. Generate embedding
+        embedding_text = f"""File: {file_path}
+Language: {language}
+Classes: {', '.join(metadata.get('classes', []))}
+Functions: {', '.join(metadata.get('functions', []))}
+Imports: {', '.join(metadata.get('imports', []))}
+
+{content[:8000]}""".strip()
+
+        embedding = vector_service.create_embedding(embedding_text)
+
+        file_name = file_path.split("/")[-1].split("\\")[-1]
+        line_count = content.count("\n") + 1
+        file_size = len(content.encode("utf-8"))
+        now = datetime.utcnow()
+
+        # 7. UPDATE or INSERT
+        if existing:
+            self.db.execute(text("""
+                UPDATE file_embeddings SET
+                    content = :content,
+                    content_hash = :content_hash,
+                    file_size = :file_size,
+                    line_count = :line_count,
+                    embedding = :embedding,
+                    metadata = :metadata,
+                    updated_at = :now
+                WHERE project_id = :project_id AND file_path = :file_path
+            """), {
+                "content": content,
+                "content_hash": content_hash,
+                "file_size": file_size,
+                "line_count": line_count,
+                "embedding": embedding,
+                "metadata": json.dumps(metadata),
+                "now": now,
+                "project_id": project_id,
+                "file_path": file_path,
+            })
+            embedding_id = existing[0]
+            action = "updated"
+        else:
+            result = self.db.execute(text("""
+                INSERT INTO file_embeddings
+                (project_id, file_path, file_name, language, content, content_hash,
+                 file_size, line_count, embedding, metadata, indexed_at, updated_at)
+                VALUES
+                (:project_id, :file_path, :file_name, :language, :content, :content_hash,
+                 :file_size, :line_count, :embedding, :metadata, :now, :now)
+                RETURNING id
+            """), {
+                "project_id": project_id,
+                "file_path": file_path,
+                "file_name": file_name,
+                "language": language,
+                "content": content,
+                "content_hash": content_hash,
+                "file_size": file_size,
+                "line_count": line_count,
+                "embedding": embedding,
+                "metadata": json.dumps(metadata),
+                "now": now,
+            })
+            embedding_id = result.fetchone()[0]
+            action = "inserted"
+
+        # 8. Save file dependencies
+        deps_count = 0
+        if metadata.get("imports"):
+            deps_count = save_file_dependencies(
+                project_id=project_id,
+                source_file=file_path,
+                imports=metadata["imports"],
+                language=language,
+                db=self.db,
+            )
+
+        self.db.commit()
+
+        # 9. Update projects.indexed_at
+        self.db.execute(text("""
+            UPDATE projects SET indexed_at = :now WHERE id = :project_id
+        """), {"now": now, "project_id": project_id})
+        self.db.commit()
+
+        logger.info(f"  ✅ {action}: {file_path} ({deps_count} deps)")
+        return {"success": True, "file_path": file_path, "action": action, "embedding_id": embedding_id}

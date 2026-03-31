@@ -17,8 +17,6 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
-import hashlib
-import json
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -26,11 +24,11 @@ from app.memory.db import get_db
 from app.memory.models import Project
 from app.deps import get_current_user
 from app.services.file_indexer import (
-    FileIndexer, 
-    SUPPORTED_EXTENSIONS, 
-    should_skip_file, 
+    FileIndexer,
+    SUPPORTED_EXTENSIONS,
+    should_skip_file,
     extract_metadata,
-    save_file_dependencies,  # NEW!
+    save_file_dependencies,
 )
 from app.services import vector_service
 from datetime import datetime
@@ -712,133 +710,24 @@ async def reindex_single_file(
         raise HTTPException(404, "Project not found")
     
     try:
-        # Get language from extension
-        language = None
-        for ext, lang in SUPPORTED_EXTENSIONS.items():
-            if request.file_path.endswith(ext):
-                language = lang
-                break
-        
-        if not language:
-            raise HTTPException(400, f"Unsupported file type: {request.file_path}")
-        
-        # Compute hash
-        content_hash = hashlib.sha256(request.content.encode("utf-8")).hexdigest()
-        
-        # Extract metadata
-        metadata = extract_metadata(request.content, language)
-        
-        # Generate embedding
-        embedding_text = f"""
-File: {request.file_path}
-Language: {language}
-Classes: {', '.join(metadata.get('classes', []))}
-Functions: {', '.join(metadata.get('functions', []))}
-Imports: {', '.join(metadata.get('imports', []))}
-
-{request.content[:8000]}
-""".strip()
-        
-        embedding = vector_service.create_embedding(embedding_text)
-        
-        # File info
-        file_name = request.file_path.split("/")[-1].split("\\")[-1]
-        line_count = request.content.count("\n") + 1
-        file_size = len(request.content.encode("utf-8"))
-        
-        # Check if file exists
-        existing = db.execute(text("""
-            SELECT id FROM file_embeddings
-            WHERE project_id = :project_id AND file_path = :file_path
-        """), {"project_id": request.project_id, "file_path": request.file_path}).fetchone()
-        
-        if existing:
-            # Update existing
-            db.execute(text("""
-                UPDATE file_embeddings SET
-                    content = :content,
-                    content_hash = :content_hash,
-                    file_size = :file_size,
-                    line_count = :line_count,
-                    embedding = :embedding,
-                    metadata = :metadata,
-                    updated_at = :now
-                WHERE project_id = :project_id AND file_path = :file_path
-            """), {
-                "content": request.content,
-                "content_hash": content_hash,
-                "file_size": file_size,
-                "line_count": line_count,
-                "embedding": embedding,
-                "metadata": json.dumps(metadata),
-                "now": datetime.utcnow(),
-                "project_id": request.project_id,
-                "file_path": request.file_path
-            })
-            embedding_id = existing[0]
-            logger.info(f"  ✅ Updated: {request.file_path}")
-        else:
-            # Insert new
-            result = db.execute(text("""
-                INSERT INTO file_embeddings 
-                (project_id, file_path, file_name, language, content, content_hash,
-                 file_size, line_count, embedding, metadata, indexed_at, updated_at)
-                VALUES 
-                (:project_id, :file_path, :file_name, :language, :content, :content_hash,
-                 :file_size, :line_count, :embedding, :metadata, :now, :now)
-                RETURNING id
-            """), {
-                "project_id": request.project_id,
-                "file_path": request.file_path,
-                "file_name": file_name,
-                "language": language,
-                "content": request.content,
-                "content_hash": content_hash,
-                "file_size": file_size,
-                "line_count": line_count,
-                "embedding": embedding,
-                "metadata": json.dumps(metadata),
-                "now": datetime.utcnow()
-            })
-            embedding_id = result.fetchone()[0]
-            logger.info(f"  ✅ Inserted: {request.file_path}")
-        
-        # ============================================================
-        # NEW: UPDATE FILE DEPENDENCIES
-        # ============================================================
-        deps_count = 0
-        if metadata.get("imports"):
-            deps_count = save_file_dependencies(
-                project_id=request.project_id,
-                source_file=request.file_path,
-                imports=metadata["imports"],
-                language=language,
-                db=db
-            )
-            logger.info(f"  💾 Updated {deps_count} dependencies")
-        # ============================================================
-        
-        db.commit()
-        
-        # UPDATE PROJECT indexed_at
-        db.execute(text("""
-            UPDATE projects 
-            SET indexed_at = :now
-            WHERE id = :project_id
-        """), {
-            "now": datetime.utcnow(),
-            "project_id": request.project_id
-        })
-        db.commit()
-        
-        return ReindexFileResponse(
-            success=True,
+        indexer = FileIndexer(db)
+        result = await indexer.index_single_file(
             project_id=request.project_id,
             file_path=request.file_path,
-            message=f"File re-indexed successfully ({deps_count} deps)",
-            embedding_id=embedding_id
+            content=request.content,
         )
-        
+
+        if not result["success"] and result["action"] == "skipped":
+            raise HTTPException(400, f"Unsupported file type: {request.file_path}")
+
+        return ReindexFileResponse(
+            success=result["success"],
+            project_id=request.project_id,
+            file_path=result["file_path"],
+            message=f"File {result['action']}",
+            embedding_id=result["embedding_id"],
+        )
+
     except HTTPException:
         raise
     except Exception as e:
