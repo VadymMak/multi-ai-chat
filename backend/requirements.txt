@@ -72,4 +72,4 @@ bcrypt==4.1.2
 #   - FastMCP high-level API with sse_app()
 #   - Protocol version "2025-03-26" / "2025-11-25" negotiation
 #   - Proper SSE session lifecycle (connection stays alive after initialize)
-mcp>=1.6.0
+mcp==1.6.0

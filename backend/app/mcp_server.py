@@ -639,20 +639,49 @@ async def build_context_for_query(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Starlette sub-application
+# Starlette sub-application — low-level SseServerTransport approach
 #
-# sse_app(mount_path="/mcp") does two things:
-#   1. Initialises SseServerTransport with endpoint="/mcp/messages/"
-#      so the SSE initialisation event advertises the correct POST URL
-#      to the client — independent of scope["root_path"].
-#   2. Produces internal routes at /sse and /messages (no /mcp prefix).
+# Why low-level instead of mcp.sse_app()?
+#   FastMCP.sse_app() is a convenience wrapper that creates an internal
+#   Starlette sub-app.  When that sub-app is mounted via app.mount("/mcp")
+#   FastAPI strips "/mcp" from scope["path"] before dispatching, making
+#   the internal routes unreachable.  By building the Starlette app
+#   ourselves with the full paths (/mcp/sse, /mcp/messages/) and mounting
+#   at "/" we sidestep path-stripping entirely.
 #
-# main.py then does app.mount("/mcp", mcp_starlette_app), which serves
-# those routes at /mcp/sse and /mcp/messages/ respectively.
+# SseServerTransport("/mcp/messages/") hardcodes that string into the
+# SSE "endpoint" event so the client always POSTs to the right URL,
+# regardless of scope["root_path"].
 #
 # Claude connects to:
 #   GET  /mcp/sse          — opens the persistent SSE stream
 #   POST /mcp/messages/    — sends JSON-RPC messages into that stream
 # ─────────────────────────────────────────────────────────────────
 
-mcp_starlette_app = mcp.sse_app(mount_path="/mcp")
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+
+
+def create_mcp_starlette_app(fastmcp_instance):
+    transport = SseServerTransport("/mcp/messages/")
+
+    async def handle_sse(request):
+        async with transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await fastmcp_instance._mcp_server.run(
+                streams[0],
+                streams[1],
+                fastmcp_instance._mcp_server.create_initialization_options(),
+            )
+
+    return Starlette(
+        routes=[
+            Route("/mcp/sse", endpoint=handle_sse),
+            Mount("/mcp/messages/", app=transport.handle_post_message),
+        ]
+    )
+
+
+mcp_starlette_app = create_mcp_starlette_app(mcp)
