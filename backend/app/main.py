@@ -260,7 +260,7 @@ app.include_router(auto_learning.router, prefix="/api")
 # routes at /mcp/sse and /mcp/messages/ respectively.
 try:
     from app.mcp_server import mcp_http_app  # noqa: E402
-    app.mount("/mcp", mcp_http_app)
+    app.mount("/", mcp_http_app)
     logger.info("✅ MCP server mounted at /mcp (streamable HTTP)")
 
     # DEBUG: print all routes
