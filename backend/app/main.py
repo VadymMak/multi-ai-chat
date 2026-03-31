@@ -59,26 +59,6 @@ async def lifespan(app: FastAPI):
         pass
 
 
-# ────────────── MCP routes — must be built BEFORE FastAPI() ───────────────
-# FastAPI/Starlette compiles its route table at construction time.
-# Routes appended to app.router.routes after construction are silently
-# ignored by the compiled router.  Seeding them via the `routes=` kwarg
-# is the only reliable way to register Starlette Route/Mount objects
-# alongside FastAPI's own endpoint functions.
-_mcp_routes: list = []
-try:
-    from app.mcp_server import mcp as _mcp_instance  # noqa: E402
-    _mcp_sse_app = _mcp_instance.sse_app(
-        sse_path="/mcp/sse",
-        message_path="/mcp/messages/",
-    )
-    _mcp_routes = list(_mcp_sse_app.routes)
-    logger.info(f"✅ MCP routes pre-built ({len(_mcp_routes)}): GET /mcp/sse, POST /mcp/messages/")
-except Exception as _mcp_pre_exc:
-    logger.error(f"❌ MCP pre-build failed: {_mcp_pre_exc}")
-    logger.error(traceback.format_exc())
-
-
 # ────────────────────── FastAPI app ───────────────────────
 app = FastAPI(
     title="Multi LLM Assistant",
@@ -89,7 +69,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
     redirect_slashes=False,
-    routes=_mcp_routes if _mcp_routes else None,
 )
 
 # ──────────────────── CORS configuration ──────────────────
@@ -270,6 +249,22 @@ app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
+# ─────────────────────── MCP server (SSE) ────────────────────────
+# GET  /mcp/sse        — Claude connects here to open an SSE stream
+# POST /mcp/messages/  — Claude sends JSON-RPC messages here
+#
+# mcp_starlette_app was built with mount_path="/mcp", which hardcodes
+# "/mcp/messages/" into SseServerTransport so the client always gets
+# the correct POST URL regardless of scope["root_path"].
+# app.mount("/mcp", ...) then serves the internal /sse and /messages
+# routes at /mcp/sse and /mcp/messages/ respectively.
+try:
+    from app.mcp_server import mcp_starlette_app  # noqa: E402
+    app.mount("/mcp", mcp_starlette_app)
+    logger.info("✅ MCP server mounted at /mcp (GET /mcp/sse, POST /mcp/messages/)")
+except Exception as _mcp_exc:
+    logger.error(f"❌ MCP server failed to load: {_mcp_exc}")
+    logger.error(traceback.format_exc())
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
