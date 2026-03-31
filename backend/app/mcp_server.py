@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     "multi-ai-chat-mcp",
     json_response=True,
+    host="0.0.0.0",
 )
 
 
