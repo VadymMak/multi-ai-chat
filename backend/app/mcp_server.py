@@ -595,4 +595,28 @@ async def ensure_project_indexed(git_url: str, project_name: str) -> str:
         db.close()
 
 
+@mcp.tool()
+async def hybrid_search_files(
+    project_id: int,
+    query: str,
+    mode: str = "hybrid",
+    limit: int = 5,
+) -> str:
+    """
+    Search project files using hybrid mode (semantic + FTS + graph).
+    mode options: "semantic", "fts", "hybrid"
+    Use "hybrid" for best results combining all search methods.
+    Use "fts" for exact identifier search (function names, class names).
+    """
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"http://localhost:8080/api/file-indexer/search/{project_id}",
+            params={"q": query, "mode": mode, "limit": limit},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        return resp.text
+
+
 __all__ = ["mcp"]
