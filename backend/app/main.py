@@ -51,7 +51,6 @@ async def lifespan(app: FastAPI):
             run_seed()
         except Exception as e:
             logger.error(f"❌ Failed to seed database: {e}")
-            import traceback
             traceback.print_exc()
         
         try:
