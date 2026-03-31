@@ -253,8 +253,8 @@ app.include_router(auto_learning.router, prefix="/api")
 # GET  /mcp/sse        — Claude connects here to open an SSE stream
 # POST /mcp/messages/  — Claude sends JSON-RPC messages here
 try:
-    from app.mcp_server import mcp_starlette_app  # noqa: E402
-    app.mount("/mcp", mcp_starlette_app)
+    from app.mcp_server import mcp  # noqa: E402
+    app.mount("/mcp", mcp.sse_app())
     logger.info("✅ MCP server mounted at /mcp")
 except Exception as _mcp_exc:
     logger.warning(f"⚠️  MCP server not loaded: {_mcp_exc}")

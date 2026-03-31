@@ -659,4 +659,4 @@ async def build_context_for_query(
 #   POST /mcp/messages/    — sends JSON-RPC messages into that stream
 # ─────────────────────────────────────────────────────────────────
 
-mcp_starlette_app = mcp.sse_app(mount_path="/mcp")
+mcp_starlette_app = mcp.sse_app()
