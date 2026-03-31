@@ -85,17 +85,20 @@ def mask_api_key(key: str) -> str:
 
 # === JWT Token Management ===
 
-def create_access_token(data: dict) -> str:
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create JWT access token"""
     to_encode = data.copy()
-    
+
     # CRITICAL FIX: JWT 'sub' claim must be a string
     if 'sub' in to_encode:
         to_encode['sub'] = str(to_encode['sub'])
-    
+
     # FIX: Use UNIX timestamp for expiration (more reliable)
     now_timestamp = int(time.time())
-    expire_seconds = settings.JWT_EXPIRATION_HOURS * 3600
+    if expires_delta is not None:
+        expire_seconds = int(expires_delta.total_seconds())
+    else:
+        expire_seconds = settings.JWT_EXPIRATION_HOURS * 3600
     expire_timestamp = now_timestamp + expire_seconds
     
     to_encode.update({"exp": expire_timestamp})

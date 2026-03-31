@@ -180,13 +180,12 @@ async def change_password(
     return {"message": "Password changed successfully"}
 
 @router.post("/mcp-token")
-async def create_mcp_token(current_user: User = Depends(get_superuser)):
+async def create_mcp_token(current_user: User = Depends(get_current_active_user)):
     """
     Generate a long-lived JWT token (365 days) for MCP/service use.
-    Requires superuser privileges.
     """
     token = create_access_token(
-        data={"sub": current_user.id},
+        data={"sub": str(current_user.id)},
         expires_delta=timedelta(days=365),
     )
     return {"access_token": token, "expires_in_days": 365}
