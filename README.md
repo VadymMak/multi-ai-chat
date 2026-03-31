@@ -137,3 +137,4 @@ Planned / optional features:
 ## 📄 License
 
 MIT – Use freely and fork to learn or build your own AI agent!
+# auto-reindex test
