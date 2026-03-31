@@ -198,8 +198,24 @@ async def search_files(
     try:
         if mode == "hybrid":
             results = hybrid_search(q, project_id, db, limit=limit)
+            search_results = [
+                SearchResult(
+                    **{k: v for k, v in r.items() if k not in ("id", "similarity")},
+                    id=r.get("file_id", 0),
+                    similarity=r.get("combined_score", 0.0),
+                )
+                for r in results
+            ]
         elif mode == "fts":
             results = fts_search(q, project_id, db, limit=limit)
+            search_results = [
+                SearchResult(
+                    **{k: v for k, v in r.items() if k not in ("id", "similarity")},
+                    id=r.get("file_id", 0),
+                    similarity=r.get("score", 0.0),
+                )
+                for r in results
+            ]
         else:
             indexer = FileIndexer(db)
             results = await indexer.search_files(
@@ -208,12 +224,13 @@ async def search_files(
                 limit=limit,
                 language=language
             )
+            search_results = [SearchResult(**r) for r in results]
 
         return SearchResponse(
             project_id=project_id,
             query=q,
-            results=[SearchResult(**r) for r in results],
-            total_results=len(results)
+            results=search_results,
+            total_results=len(search_results)
         )
     except Exception as e:
         logger.exception(f"Search failed: {e}")
