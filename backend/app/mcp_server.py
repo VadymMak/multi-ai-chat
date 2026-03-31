@@ -641,22 +641,41 @@ async def build_context_for_query(
 # ─────────────────────────────────────────────────────────────────
 # Starlette sub-application
 #
-# FastMCP.sse_app() returns a fully self-contained Starlette ASGI app
-# that wires up the SSE + POST message routes internally and handles:
-#   - Protocol version negotiation (supports 2025-11-25 and earlier)
-#   - SSE keep-alive for the full session lifetime
-#   - Automatic session cleanup on client disconnect
+# WHY root-level mount instead of app.mount("/mcp", ...):
 #
-# mount_path="/mcp" tells FastMCP the prefix under which it is mounted
-# in the parent FastAPI app so it can advertise the correct POST URL
-# (/mcp/messages/) in the SSE initialisation event.
+# FastAPI's app.mount("/mcp", sub_app) strips the "/mcp" prefix from
+# scope["path"] before handing off to the sub-app, but does NOT reliably
+# set scope["root_path"] = "/mcp".  SseServerTransport constructs the
+# advertised POST URL as:
 #
-# FastAPI mounts this at /mcp in main.py:
-#   app.mount("/mcp", mcp_starlette_app)
+#   scope.get("root_path", "") + self._endpoint
+#
+# With root_path="" (not propagated) and endpoint="/messages/" the client
+# receives "/messages/" and tries to POST there → 404.
+#
+# FIX: mount the Starlette app at "/" so root_path stays "".  Pass the
+# full /mcp-prefixed paths as sse_path / message_path so that:
+#   • SseServerTransport("/mcp/messages/") advertises "/mcp/messages/" ✓
+#   • The internal Starlette routes sit at "/mcp/sse" and "/mcp/messages/" ✓
+#   • FastAPI's own routes (registered first) take priority; unmatched
+#     requests fall through to this sub-app ✓
+#
+# If the installed SDK version does not support sse_path/message_path
+# kwargs the fallback mounts at "/" with default paths (/sse, /messages/).
+# In that case update the Claude config URL to /sse instead of /mcp/sse.
 #
 # Claude connects to:
 #   GET  /mcp/sse          — opens the persistent SSE stream
 #   POST /mcp/messages/    — sends JSON-RPC messages into that stream
 # ─────────────────────────────────────────────────────────────────
 
-mcp_starlette_app = mcp.sse_app()
+try:
+    mcp_starlette_app = mcp.sse_app(
+        sse_path="/mcp/sse",
+        message_path="/mcp/messages/",
+    )
+except TypeError:
+    # Older SDK builds whose sse_app() accepts no kwargs.
+    # Falls back to default paths: GET /sse  POST /messages/
+    # Update your Claude config URL to /sse if this branch is taken.
+    mcp_starlette_app = mcp.sse_app()

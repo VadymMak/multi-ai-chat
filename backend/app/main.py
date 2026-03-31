@@ -252,10 +252,15 @@ app.include_router(auto_learning.router, prefix="/api")
 # ─────────────────────── MCP server (SSE) ────────────────────────
 # GET  /mcp/sse        — Claude connects here to open an SSE stream
 # POST /mcp/messages/  — Claude sends JSON-RPC messages here
+#
+# Mounted at "/" (root) so the Starlette sub-app receives the full
+# un-stripped path.  FastAPI's own routes take priority (registered
+# first); unmatched requests fall through to the MCP sub-app.
+# See mcp_server.py for why app.mount("/mcp", ...) breaks the POST URL.
 try:
-    from app.mcp_server import mcp  # noqa: E402
-    app.mount("/mcp", mcp.sse_app())
-    logger.info("✅ MCP server mounted at /mcp")
+    from app.mcp_server import mcp_starlette_app  # noqa: E402
+    app.mount("/", mcp_starlette_app)
+    logger.info("✅ MCP server mounted at / (routes: /mcp/sse, /mcp/messages/)")
 except Exception as _mcp_exc:
     logger.warning(f"⚠️  MCP server not loaded: {_mcp_exc}")
 
