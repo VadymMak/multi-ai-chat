@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import text
@@ -490,6 +493,103 @@ async def get_active_project(folder_identifier: str) -> str:
         )
     except Exception as exc:
         logger.error("get_active_project error: %s", exc)
+        return json.dumps({"error": str(exc), "found": False}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def ensure_project_indexed(git_url: str, project_name: str) -> str:
+    """
+    Ensures a project exists in the database and is indexed.
+    Call this automatically when starting work on any project.
+
+    Steps:
+    1. Check if project exists by git_url
+    2. If not exists — create it automatically
+    3. Check if project has indexed files (files_count > 0)
+    4. If not indexed — trigger full indexing
+    5. Return status with project_id
+
+    Args:
+        git_url: GitHub repository URL (e.g. https://github.com/owner/repo).
+        project_name: Human-readable project name used when creating a new record.
+    """
+    # Normalize: strip scheme, trailing slash, .git suffix
+    normalized = (
+        git_url.strip()
+        .rstrip("/")
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace(".git", "")
+    )
+
+    db = _open_db()
+    try:
+        # 1. Look up existing project
+        row = db.execute(
+            text("""
+                SELECT id, name, files_count
+                FROM projects
+                WHERE git_url LIKE :pattern
+                LIMIT 1
+            """),
+            {"pattern": f"%{normalized}%"},
+        ).fetchone()
+
+        if row:
+            project_id: int = row[0]
+            name: str = row[1]
+            files_count: int = row[2] or 0
+            created = False
+        else:
+            # 2. Create project (user_id=1 — superuser / service account)
+            result = db.execute(
+                text("""
+                    INSERT INTO projects (name, git_url, user_id)
+                    VALUES (:name, :git_url, 1)
+                    RETURNING id
+                """),
+                {"name": project_name, "git_url": git_url.strip()},
+            )
+            db.commit()
+            project_id = result.fetchone()[0]
+            name = project_name
+            files_count = 0
+            created = True
+
+        # 3. Trigger indexing if no files yet
+        status: str
+        if files_count > 0:
+            status = "already_indexed"
+        else:
+            backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{backend_url}/api/file-indexer/index/{project_id}",
+                        headers={"Authorization": "Bearer internal"},
+                    )
+                    resp.raise_for_status()
+                status = "created_and_indexing" if created else "indexing_started"
+            except Exception as http_exc:
+                logger.error("ensure_project_indexed: trigger failed: %s", http_exc)
+                status = "created_trigger_failed" if created else "trigger_failed"
+
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "name": name,
+                "status": status,
+                "files_count": files_count,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+
+    except Exception as exc:
+        db.rollback()
+        logger.error("ensure_project_indexed error: %s", exc)
         return json.dumps({"error": str(exc), "found": False}, ensure_ascii=False)
     finally:
         db.close()
