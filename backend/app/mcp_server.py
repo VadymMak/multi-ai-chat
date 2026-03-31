@@ -638,12 +638,5 @@ async def build_context_for_query(
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Streamable HTTP transport (replaces SSE)
-#
-# mcp.streamable_http_app() returns a Starlette ASGI app that handles
-# the MCP Streamable HTTP transport (protocol 2025-03-26+).
-# main.py mounts it at /mcp.
-# ─────────────────────────────────────────────────────────────────
 
-mcp_http_app = mcp.streamable_http_app()
+__all__ = ["mcp"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import traceback
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, Dict
 
 from dotenv import load_dotenv
@@ -22,12 +22,15 @@ logger = logging.getLogger("app")
 
 # DB init (ensures all tables exist, including CanonItem)
 from app.memory.db import init_db, DATABASE_URL
+from app.mcp_server import mcp
 
 
 # ──────────────────── App lifespan hook ───────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(mcp.session_manager.run())
+
         logger.info(f"Initializing database… URL={DATABASE_URL}")
         init_db()
 
@@ -41,10 +44,10 @@ async def lifespan(app: FastAPI):
                 logger.info("✅ Migration: roles.description -> TEXT")
         except Exception as e:
             logger.info(f"ℹ️ Migration skipped (already done or not needed): {e}")
-        
+
         # Create superuser on startup if configured
         await create_superuser()
-        
+
         # 🌱 Seed database with default data
         try:
             from app.seed import run_seed
@@ -52,17 +55,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Failed to seed database: {e}")
             traceback.print_exc()
-        
-        try:
-            from app.mcp_server import mcp_http_app as _mcp_http_app
-            async with _mcp_http_app.run():
-                yield
-        except Exception as _mcp_lifespan_exc:
-            logger.error(f"❌ MCP lifespan failed: {_mcp_lifespan_exc}")
-            logger.error(traceback.format_exc())
-            yield
-    finally:
-        pass
+
+        yield
 
 
 # ────────────────────── FastAPI app ───────────────────────
@@ -255,29 +249,8 @@ app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
-# ─────────────────────── MCP server (SSE) ────────────────────────
-# GET  /mcp/sse        — Claude connects here to open an SSE stream
-# POST /mcp/messages/  — Claude sends JSON-RPC messages here
-#
-# mcp_starlette_app was built with mount_path="/mcp", which hardcodes
-# "/mcp/messages/" into SseServerTransport so the client always gets
-# the correct POST URL regardless of scope["root_path"].
-# app.mount("/mcp", ...) then serves the internal /sse and /messages
-# routes at /mcp/sse and /mcp/messages/ respectively.
-try:
-    from app.mcp_server import mcp_http_app  # noqa: E402
-    app.mount("/", mcp_http_app)
-    logger.info("✅ MCP server mounted at /mcp (streamable HTTP)")
-
-    # DEBUG: print all routes
-    for route in app.routes:
-        logger.info(f"Route: {route}")
-    for route in mcp_http_app.routes:
-        logger.info(f"MCP internal route: {route}")
-except Exception as e:
-    import traceback
-    logger.error(f"❌ MCP failed: {e}")
-    logger.error(traceback.format_exc())
+# ─────────────────────── MCP server ──────────────────────────────
+app.mount("/mcp", mcp.streamable_http_app())
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
