@@ -1292,5 +1292,17 @@ Imports: {', '.join(metadata.get('imports', []))}
         """), {"now": now, "project_id": project_id})
         self.db.commit()
 
+        # 10. Update projects.files_count
+        self.db.execute(text("""
+            UPDATE projects
+            SET files_count = (
+                SELECT COUNT(*) FROM file_embeddings
+                WHERE project_id = :project_id
+            ),
+            indexed_at = NOW()
+            WHERE id = :project_id
+        """), {"project_id": project_id})
+        self.db.commit()
+
         logger.info(f"  ✅ {action}: {file_path} ({deps_count} deps)")
         return {"success": True, "file_path": file_path, "action": action, "embedding_id": embedding_id}
