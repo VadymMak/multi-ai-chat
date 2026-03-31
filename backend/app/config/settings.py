@@ -140,6 +140,9 @@ class _Settings:
     # Password requirements
     PASSWORD_MIN_LENGTH: int = _getenv_int("PASSWORD_MIN_LENGTH", 8)
 
+    # === GitHub webhook ===
+    GITHUB_WEBHOOK_SECRET: str = _getenv_str("GITHUB_WEBHOOK_SECRET", "")
+
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")
     YOUTUBE_SAFESEARCH: str = _getenv_str("YOUTUBE_SAFESEARCH", "moderate")  # none|moderate|strict

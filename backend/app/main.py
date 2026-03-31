@@ -199,7 +199,8 @@ from app.routers import (  # noqa: E402
     file_indexer,
     agentic,
     versions,
-    auto_learning
+    auto_learning,
+    webhooks,
 )
 
 # Optional routers
@@ -242,6 +243,7 @@ app.include_router(file_indexer.router, prefix="/api")
 app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
+app.include_router(webhooks.router, prefix="/api")
 
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
