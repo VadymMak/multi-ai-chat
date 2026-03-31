@@ -2,37 +2,9 @@
 MCP (Model Context Protocol) server for multi-ai-chat.
 
 Exposes 8 tools over Streamable HTTP transport so Claude Desktop / Claude Code
-can query the existing FastAPI backend data without touching the REST API.
+can query the backend.
 
-Mount point (in main.py): /mcp
-Client endpoint after correct mounting: https://your-domain.com/mcp
-
-Tools
------
-1. search_project_files       — semantic code search via pgvector
-2. get_file_content           — full content of an indexed file
-3. get_file_dependencies      — import graph for a file or whole project
-4. search_conversation_memory — semantic search over chat history
-5. list_canon_items           — ADR / CHANGELOG / BACKLOG / GLOSSARY / PMD items
-6. get_project_stats          — indexing statistics for a project
-7. get_file_versions          — change history for an indexed file
-8. build_context_for_query    — full RAG context (calls smart_context)
-
-Transport layer
----------------
-Uses FastMCP with Streamable HTTP (recommended for mcp>=1.9.0).
-This fixes protocol version negotiation and session lifecycle issues that
-existed with the old low-level SSE + custom Starlette routing.
-
-Design rules
-------------
-- Every tool is an async function.
-- DB sessions are opened and closed inside each handler (not via FastAPI DI).
-- Exceptions are caught; {"error": str(exc)} is returned instead of raising.
-- _tool_* handler functions are not modified — @mcp.tool() wrappers are
-  thin dispatchers that convert kwargs into the args dict and JSON-encode
-  the return value.
-- No existing router files are modified.
+Client endpoint: https://ion.up.railway.app/mcp
 """
 
 from __future__ import annotations
@@ -54,18 +26,16 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────
 # MCP Server instance
 # ─────────────────────────────────────────────────────────────────
-
 mcp = FastMCP(
     "multi-ai-chat-mcp",
-    json_response=True,      # Recommended: returns proper JSON content
-    stateless_http=True,     # Important for clean mounting under prefix
+    json_response=True,
+    stateless_http=True,          # Recommended for mounting
 )
 
 
 # ─────────────────────────────────────────────────────────────────
-# Helper – open a short-lived DB session (bypasses FastAPI DI)
+# Helper – open a short-lived DB session
 # ─────────────────────────────────────────────────────────────────
-
 def _open_db():
     """Return a new SQLAlchemy Session. Caller is responsible for closing it."""
     return SessionLocal()
@@ -73,9 +43,7 @@ def _open_db():
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 1 — search_project_files
-# Calls: FileIndexer.search_files(project_id, query, limit, language, db)
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_search_project_files(args: Dict[str, Any]) -> Any:
     project_id: int = int(args["project_id"])
     query: str = str(args["query"])
@@ -92,7 +60,6 @@ async def _tool_search_project_files(args: Dict[str, Any]) -> Any:
             language=language,
             db=db,
         )
-        # Normalise metadata: may arrive as raw JSON string from the DB row
         for r in results:
             raw_meta = r.get("metadata")
             if isinstance(raw_meta, str):
@@ -110,9 +77,7 @@ async def _tool_search_project_files(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 2 — get_file_content
-# Direct DB query on file_embeddings
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_get_file_content(args: Dict[str, Any]) -> Any:
     project_id: int = int(args["project_id"])
     file_path: str = str(args["file_path"])
@@ -131,13 +96,7 @@ async def _tool_get_file_content(args: Dict[str, Any]) -> Any:
         ).fetchone()
 
         if row is None:
-            return {
-                "error": (
-                    f"File not found: {file_path!r} "
-                    f"in project {project_id}. "
-                    "Make sure the project is indexed."
-                )
-            }
+            return {"error": f"File not found: {file_path!r} in project {project_id}"}
 
         metadata: Any = row.metadata
         if isinstance(metadata, str):
@@ -161,9 +120,7 @@ async def _tool_get_file_content(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 3 — get_file_dependencies
-# Direct DB query on file_dependencies
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_get_file_dependencies(args: Dict[str, Any]) -> Any:
     project_id: int = int(args["project_id"])
     file_path: Optional[str] = args.get("file_path")
@@ -197,9 +154,7 @@ async def _tool_get_file_dependencies(args: Dict[str, Any]) -> Any:
                 "source_file": r.source_file,
                 "target_file": r.target_file,
                 "dependency_type": r.dependency_type,
-                "imports_what": (
-                    json.loads(r.imports_what) if r.imports_what else []
-                ),
+                "imports_what": json.loads(r.imports_what) if r.imports_what else [],
             }
             for r in rows
         ]
@@ -212,21 +167,17 @@ async def _tool_get_file_dependencies(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 4 — search_conversation_memory
-# Direct pgvector query on memory_entries scoped to project_id.
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
     project_id: str = str(args["project_id"])
     query: str = str(args["query"])
     limit: int = int(args.get("limit", 5))
-    role_id: Optional[int] = (
-        int(args["role_id"]) if args.get("role_id") is not None else None
-    )
+    role_id: Optional[int] = int(args["role_id"]) if args.get(
+        "role_id") is not None else None
 
     db = _open_db()
     try:
         from app.services.vector_service import create_embedding
-
         query_embedding: List[float] = create_embedding(query)
 
         role_clause = "AND role_id = :role_id" if role_id is not None else ""
@@ -240,16 +191,12 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
 
         rows = db.execute(
             text(f"""
-                SELECT
-                    raw_text,
-                    summary,
-                    timestamp,
-                    is_summary,
-                    1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
+                SELECT raw_text, summary, timestamp, is_summary,
+                       1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
                 FROM memory_entries
-                WHERE project_id  = :project_id
-                  AND embedding   IS NOT NULL
-                  AND deleted     = FALSE
+                WHERE project_id = :project_id
+                  AND embedding IS NOT NULL
+                  AND deleted = FALSE
                   {role_clause}
                 ORDER BY embedding <=> CAST(:query_embedding AS vector)
                 LIMIT :limit
@@ -261,9 +208,7 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
             {
                 "raw_text": r.raw_text,
                 "summary": r.summary,
-                "timestamp": (
-                    r.timestamp.isoformat() if r.timestamp else None
-                ),
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
                 "is_summary": r.is_summary,
                 "similarity": float(r.similarity),
             }
@@ -278,9 +223,7 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 5 — list_canon_items
-# Direct DB query on canon_items
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
     project_id: str = str(args["project_id"])
     item_type: Optional[str] = args.get("type")
@@ -290,9 +233,7 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
     try:
         type_clause = "AND type = :item_type" if item_type else ""
         params: Dict[str, Any] = {
-            "project_id": project_id,
-            "is_active": is_active,
-        }
+            "project_id": project_id, "is_active": is_active}
         if item_type:
             params["item_type"] = item_type
 
@@ -323,9 +264,7 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
                     "title": r.title,
                     "body": r.body,
                     "tags": tags,
-                    "created_at": (
-                        r.created_at.isoformat() if r.created_at else None
-                    ),
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
             )
         return results
@@ -338,9 +277,7 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 6 — get_project_stats
-# Calls: FileIndexer.get_project_stats(project_id)
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_get_project_stats(args: Dict[str, Any]) -> Any:
     project_id: int = int(args["project_id"])
 
@@ -358,9 +295,7 @@ async def _tool_get_project_stats(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 7 — get_file_versions
-# Direct DB query on file_versions JOIN file_embeddings
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_get_file_versions(args: Dict[str, Any]) -> Any:
     project_id: int = int(args["project_id"])
     file_path: str = str(args["file_path"])
@@ -369,14 +304,9 @@ async def _tool_get_file_versions(args: Dict[str, Any]) -> Any:
     try:
         rows = db.execute(
             text("""
-                SELECT
-                    fv.version_number,
-                    fv.change_type,
-                    fv.change_source,
-                    fv.change_message,
-                    fv.ai_model,
-                    fv.created_at
-                FROM file_versions   fv
+                SELECT fv.version_number, fv.change_type, fv.change_source,
+                       fv.change_message, fv.ai_model, fv.created_at
+                FROM file_versions fv
                 JOIN file_embeddings fe ON fe.id = fv.file_id
                 WHERE fe.project_id = :project_id
                   AND fe.file_path  = :file_path
@@ -392,9 +322,7 @@ async def _tool_get_file_versions(args: Dict[str, Any]) -> Any:
                 "change_source": r.change_source,
                 "change_message": r.change_message,
                 "ai_model": r.ai_model,
-                "created_at": (
-                    r.created_at.isoformat() if r.created_at else None
-                ),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
         ]
@@ -407,9 +335,7 @@ async def _tool_get_file_versions(args: Dict[str, Any]) -> Any:
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 8 — build_context_for_query
-# Calls: build_smart_context() from services/smart_context.py
 # ─────────────────────────────────────────────────────────────────
-
 async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
     raw_pid: Any = args["project_id"]
     query: str = str(args["query"])
@@ -427,7 +353,7 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
             project_id=project_id_int,
             role_id=role_id,
             query=query,
-            session_id="",   # no active chat session for MCP queries
+            session_id="",
             db=db,
             memory=memory,
         )
@@ -445,14 +371,8 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
 
 @mcp.tool()
 async def search_project_files(
-    project_id: int,
-    query: str,
-    limit: int = 5,
-    language: Optional[str] = None,
+    project_id: int, query: str, limit: int = 5, language: Optional[str] = None
 ) -> str:
-    """
-    Semantic search across indexed project files using pgvector cosine similarity.
-    """
     result = await _tool_search_project_files(
         {"project_id": project_id, "query": query,
             "limit": limit, "language": language}
@@ -461,43 +381,21 @@ async def search_project_files(
 
 
 @mcp.tool()
-async def get_file_content(
-    project_id: int,
-    file_path: str,
-) -> str:
-    """
-    Retrieve the full source content of a specific indexed file.
-    """
-    result = await _tool_get_file_content(
-        {"project_id": project_id, "file_path": file_path}
-    )
+async def get_file_content(project_id: int, file_path: str) -> str:
+    result = await _tool_get_file_content({"project_id": project_id, "file_path": file_path})
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
 @mcp.tool()
-async def get_file_dependencies(
-    project_id: int,
-    file_path: Optional[str] = None,
-) -> str:
-    """
-    Get the import/dependency graph from the file_dependencies table.
-    """
-    result = await _tool_get_file_dependencies(
-        {"project_id": project_id, "file_path": file_path}
-    )
+async def get_file_dependencies(project_id: int, file_path: Optional[str] = None) -> str:
+    result = await _tool_get_file_dependencies({"project_id": project_id, "file_path": file_path})
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
 @mcp.tool()
 async def search_conversation_memory(
-    project_id: str,
-    query: str,
-    limit: int = 5,
-    role_id: Optional[int] = None,
+    project_id: str, query: str, limit: int = 5, role_id: Optional[int] = None
 ) -> str:
-    """
-    Semantic search over conversation history stored in memory_entries.
-    """
     result = await _tool_search_conversation_memory(
         {"project_id": project_id, "query": query,
             "limit": limit, "role_id": role_id}
@@ -507,13 +405,8 @@ async def search_conversation_memory(
 
 @mcp.tool()
 async def list_canon_items(
-    project_id: str,
-    type: Optional[str] = None,
-    is_active: bool = True,
+    project_id: str, type: Optional[str] = None, is_active: bool = True
 ) -> str:
-    """
-    List canonical knowledge items from the canon_items table.
-    """
     result = await _tool_list_canon_items(
         {"project_id": project_id, "type": type, "is_active": is_active}
     )
@@ -521,39 +414,21 @@ async def list_canon_items(
 
 
 @mcp.tool()
-async def get_project_stats(
-    project_id: int,
-) -> str:
-    """
-    Return file indexing statistics for a project.
-    """
+async def get_project_stats(project_id: int) -> str:
     result = await _tool_get_project_stats({"project_id": project_id})
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
 @mcp.tool()
-async def get_file_versions(
-    project_id: int,
-    file_path: str,
-) -> str:
-    """
-    Return the full version history for an indexed file.
-    """
-    result = await _tool_get_file_versions(
-        {"project_id": project_id, "file_path": file_path}
-    )
+async def get_file_versions(project_id: int, file_path: str) -> str:
+    result = await _tool_get_file_versions({"project_id": project_id, "file_path": file_path})
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
 @mcp.tool()
 async def build_context_for_query(
-    project_id: str,
-    query: str,
-    role_id: int = 0,
+    project_id: str, query: str, role_id: int = 0
 ) -> str:
-    """
-    Build a full RAG context string for a query against a project.
-    """
     result = await _tool_build_context_for_query(
         {"project_id": project_id, "query": query, "role_id": role_id}
     )

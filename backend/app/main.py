@@ -244,9 +244,8 @@ app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
 # ─────────────────────── MCP server ──────────────────────────────
-# Mount Streamable HTTP MCP server at /mcp
-# With stateless_http=True in mcp_server.py, client should call exactly /mcp
-app.mount("/mcp", mcp.streamable_http_app())
+# Correct mounting for mcp==1.26.0 → client calls exactly /mcp
+app.mount("/mcp", mcp.streamable_http_app(path="/"))
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
