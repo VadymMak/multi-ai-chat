@@ -259,11 +259,12 @@ app.include_router(auto_learning.router, prefix="/api")
 # app.mount("/mcp", ...) then serves the internal /sse and /messages
 # routes at /mcp/sse and /mcp/messages/ respectively.
 try:
-    from app.mcp_server import mcp_starlette_app  # noqa: E402
-    app.mount("/", mcp_starlette_app)
-    logger.info("✅ MCP server mounted at / (routes: GET /mcp/sse, POST /mcp/messages/)")
-except Exception as _mcp_exc:
-    logger.error(f"❌ MCP server failed to load: {_mcp_exc}")
+    from app.mcp_server import mcp_http_app  # noqa: E402
+    app.mount("/mcp", mcp_http_app)
+    logger.info("✅ MCP server mounted at /mcp (streamable HTTP)")
+except Exception as e:
+    import traceback
+    logger.error(f"❌ MCP failed: {e}")
     logger.error(traceback.format_exc())
 
 # ───────────────────── Runtime config (safe) ──────────────
