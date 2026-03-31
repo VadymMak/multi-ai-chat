@@ -59,6 +59,26 @@ async def lifespan(app: FastAPI):
         pass
 
 
+# ────────────── MCP routes — must be built BEFORE FastAPI() ───────────────
+# FastAPI/Starlette compiles its route table at construction time.
+# Routes appended to app.router.routes after construction are silently
+# ignored by the compiled router.  Seeding them via the `routes=` kwarg
+# is the only reliable way to register Starlette Route/Mount objects
+# alongside FastAPI's own endpoint functions.
+_mcp_routes: list = []
+try:
+    from app.mcp_server import mcp as _mcp_instance  # noqa: E402
+    _mcp_sse_app = _mcp_instance.sse_app(
+        sse_path="/mcp/sse",
+        message_path="/mcp/messages/",
+    )
+    _mcp_routes = list(_mcp_sse_app.routes)
+    logger.info(f"✅ MCP routes pre-built ({len(_mcp_routes)}): GET /mcp/sse, POST /mcp/messages/")
+except Exception as _mcp_pre_exc:
+    logger.error(f"❌ MCP pre-build failed: {_mcp_pre_exc}")
+    logger.error(traceback.format_exc())
+
+
 # ────────────────────── FastAPI app ───────────────────────
 app = FastAPI(
     title="Multi LLM Assistant",
@@ -69,6 +89,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
     redirect_slashes=False,
+    routes=_mcp_routes if _mcp_routes else None,
 )
 
 # ──────────────────── CORS configuration ──────────────────
@@ -249,37 +270,6 @@ app.include_router(agentic.router, prefix="/api")
 app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 
-# ─────────────────────── MCP server (SSE) ────────────────────────
-# GET  /mcp/sse        — Claude connects here to open an SSE stream
-# POST /mcp/messages/  — Claude sends JSON-RPC messages here
-#
-# We splice the Starlette routes produced by mcp.sse_app() directly
-# into FastAPI's router instead of using app.mount().
-#
-# Why not app.mount("/mcp", ...)?
-#   FastAPI strips the prefix from scope["path"] but doesn't set
-#   scope["root_path"], so SseServerTransport advertises "/messages/"
-#   and the client POSTs to the wrong URL → 404.
-#
-# Why not app.mount("/", ...)?
-#   A catch-all mount at "/" intercepts requests before FastAPI's own
-#   routes can match them, breaking the whole API.
-#
-# This approach:
-#   mcp.sse_app(sse_path="/mcp/sse", message_path="/mcp/messages/")
-#   builds a Starlette app with routes already at the full paths.
-#   Appending those Route/Mount objects to app.router.routes registers
-#   them as first-class FastAPI routes with no path-stripping and no
-#   catch-all interference.
-try:
-    from app.mcp_server import mcp_starlette_app  # noqa: E402
-    for _mcp_route in mcp_starlette_app.routes:
-        app.router.routes.append(_mcp_route)
-    logger.info("✅ MCP routes registered: GET /mcp/sse, POST /mcp/messages/")
-except Exception as _mcp_exc:
-    import traceback
-    logger.error(f"❌ MCP server failed to load: {_mcp_exc}")
-    logger.error(traceback.format_exc())
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
