@@ -1,7 +1,7 @@
 # Core FastAPI stack
 fastapi==0.116.1
 uvicorn==0.35.0
-starlette==0.47.1
+starlette>=0.41.2,<0.50.0
 sse-starlette==1.6.5
 
 # Pydantic + typing
@@ -72,4 +72,4 @@ bcrypt==4.1.2
 #   - FastMCP high-level API with sse_app()
 #   - Protocol version "2025-03-26" / "2025-11-25" negotiation
 #   - Proper SSE session lifecycle (connection stays alive after initialize)
-mcp>=1.9.0
+mcp==1.26.0
