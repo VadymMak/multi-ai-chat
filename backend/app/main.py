@@ -253,14 +253,29 @@ app.include_router(auto_learning.router, prefix="/api")
 # GET  /mcp/sse        — Claude connects here to open an SSE stream
 # POST /mcp/messages/  — Claude sends JSON-RPC messages here
 #
-# Mounted at "/" (root) so the Starlette sub-app receives the full
-# un-stripped path.  FastAPI's own routes take priority (registered
-# first); unmatched requests fall through to the MCP sub-app.
-# See mcp_server.py for why app.mount("/mcp", ...) breaks the POST URL.
+# We splice the Starlette routes produced by mcp.sse_app() directly
+# into FastAPI's router instead of using app.mount().
+#
+# Why not app.mount("/mcp", ...)?
+#   FastAPI strips the prefix from scope["path"] but doesn't set
+#   scope["root_path"], so SseServerTransport advertises "/messages/"
+#   and the client POSTs to the wrong URL → 404.
+#
+# Why not app.mount("/", ...)?
+#   A catch-all mount at "/" intercepts requests before FastAPI's own
+#   routes can match them, breaking the whole API.
+#
+# This approach:
+#   mcp.sse_app(sse_path="/mcp/sse", message_path="/mcp/messages/")
+#   builds a Starlette app with routes already at the full paths.
+#   Appending those Route/Mount objects to app.router.routes registers
+#   them as first-class FastAPI routes with no path-stripping and no
+#   catch-all interference.
 try:
     from app.mcp_server import mcp_starlette_app  # noqa: E402
-    app.mount("/", mcp_starlette_app)
-    logger.info("✅ MCP server mounted at / (routes: /mcp/sse, /mcp/messages/)")
+    for _mcp_route in mcp_starlette_app.routes:
+        app.router.routes.append(_mcp_route)
+    logger.info("✅ MCP routes registered: GET /mcp/sse, POST /mcp/messages/")
 except Exception as _mcp_exc:
     logger.warning(f"⚠️  MCP server not loaded: {_mcp_exc}")
 
