@@ -946,12 +946,16 @@ async def get_dependency_graph(
 @router.post("/extract-knowledge/{project_id}")
 async def extract_knowledge(
     project_id: int,
+    background_tasks: BackgroundTasks,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Analyze indexed files and extract architectural knowledge
     into knowledge_entities and knowledge_relationships tables.
+
+    Extraction runs in the background — returns immediately.
+    Check Railway logs for progress.
     """
     project = db.query(Project).filter(
         Project.id == project_id,
@@ -961,17 +965,19 @@ async def extract_knowledge(
     if not project:
         raise HTTPException(404, "Project not found")
 
+    background_tasks.add_task(_extract_knowledge_background, project_id)
+
+    return {"status": "started", "project_id": project_id}
+
+
+async def _extract_knowledge_background(project_id: int):
+    """Background task to extract knowledge from project files."""
     try:
         from app.services.knowledge_extractor import KnowledgeExtractor
         extractor = KnowledgeExtractor()
         result = extractor.extract_from_project(project_id, limit=50)
-
-        return {
-            "project_id": project_id,
-            "files_processed": result["files_processed"],
-            "entities_added": result["entities_added"],
-            "relationships_added": result["relationships_added"],
-        }
+        logger.info(
+            "✅ Knowledge extraction complete for project %d: %s", project_id, result
+        )
     except Exception as e:
-        logger.exception(f"Knowledge extraction failed for project {project_id}: {e}")
-        raise HTTPException(500, f"Extraction failed: {str(e)}")
+        logger.exception("❌ Knowledge extraction failed for project %d: %s", project_id, e)
