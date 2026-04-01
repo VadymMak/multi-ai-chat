@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import settings
 from app.memory.db import SessionLocal
-from app.services.file_indexer import FileIndexer
+from app.services.file_indexer import FileIndexer, get_file_language
+from app.services.knowledge_extractor import KnowledgeExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,14 @@ async def github_webhook(
                     if result["action"] != "skipped":
                         indexed += 1
                         logger.info(f"[webhook] {result['action']}: {file_path}")
+                        language = get_file_language(file_path) or "unknown"
+                        extractor = KnowledgeExtractor()
+                        extractor.extract_from_file(
+                            project_id=project_id,
+                            file_path=file_path,
+                            content=content,
+                            language=language,
+                        )
                 except Exception as exc:
                     logger.error(f"[webhook] Failed to index {file_path}: {exc}")
 
