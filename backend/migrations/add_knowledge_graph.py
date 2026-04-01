@@ -224,6 +224,30 @@ def run_migration():
             except Exception as e:
                 print(f"  ⚠️ Vector index idx_ke_embedding: {e}")
 
+        # ============================================================
+        # Step 6: UNIQUE constraint on knowledge_entities(project_id, name, entity_type)
+        # ============================================================
+        print("  🔑 Checking unique constraint uq_ke_project_name_type...")
+        result = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_ke_project_name_type'
+            )
+        """))
+        if result.scalar():
+            print("  ℹ️ Unique constraint uq_ke_project_name_type already exists, skipping")
+        else:
+            try:
+                conn.execute(text("""
+                    ALTER TABLE knowledge_entities
+                    ADD CONSTRAINT uq_ke_project_name_type
+                    UNIQUE (project_id, name, entity_type)
+                """))
+                conn.commit()
+                print("  ✅ Unique constraint uq_ke_project_name_type created")
+            except Exception as e:
+                print(f"  ⚠️ Unique constraint uq_ke_project_name_type: {e}")
+
         print("🎉 Migration completed successfully!")
         return True
 
@@ -253,6 +277,17 @@ def verify_migration():
                 """), {"t": table})
                 col_count = result.scalar()
                 print(f"  ✅ Table {table} exists ({col_count} columns)")
+
+        result = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_ke_project_name_type'
+            )
+        """))
+        if result.scalar():
+            print("  ✅ Unique constraint uq_ke_project_name_type present")
+        else:
+            print("  ⚠️ Unique constraint uq_ke_project_name_type missing")
 
         for idx in ("idx_ke_project", "idx_ke_type", "idx_kr_from", "idx_kr_to", "idx_ke_embedding"):
             result = conn.execute(text("""
