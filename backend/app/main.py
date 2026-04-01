@@ -58,13 +58,6 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Failed to seed database: {e}")
             traceback.print_exc()
 
-        # 🧠 Knowledge graph tables migration
-        try:
-            from migrations.add_knowledge_graph import run_migration as run_kg_migration
-            run_kg_migration()
-        except Exception as e:
-            logger.info(f"ℹ️ Knowledge graph migration skipped (already done or not needed): {e}")
-
         yield
 
 
