@@ -619,4 +619,130 @@ async def hybrid_search_files(
         return resp.text
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool 12 — get_developer_patterns
+# ─────────────────────────────────────────────────────────────────
+async def _tool_get_developer_patterns(
+    query: str,
+    project_id: Optional[int],
+) -> Any:
+    from app.services.vector_service import create_embedding
+
+    db = _open_db()
+    try:
+        # ── 1. Fetch entities (all projects or one) ──────────────
+        if project_id is not None:
+            rows = db.execute(
+                text("""
+                    SELECT ke.name, ke.entity_type, ke.description,
+                           ke.source_file, p.name AS project_name
+                    FROM knowledge_entities ke
+                    JOIN projects p ON p.id = ke.project_id
+                    WHERE ke.project_id = :project_id
+                    ORDER BY ke.entity_type, ke.name
+                """),
+                {"project_id": project_id},
+            ).fetchall()
+        else:
+            # Semantic search across ALL projects
+            try:
+                query_embedding = create_embedding(query)
+                rows = db.execute(
+                    text("""
+                        SELECT ke.name, ke.entity_type, ke.description,
+                               ke.source_file, p.name AS project_name
+                        FROM knowledge_entities ke
+                        JOIN projects p ON p.id = ke.project_id
+                        WHERE ke.embedding IS NOT NULL
+                        ORDER BY ke.embedding <=> CAST(:embedding AS vector),
+                                 ke.entity_type, ke.name
+                        LIMIT 100
+                    """),
+                    {"embedding": query_embedding},
+                ).fetchall()
+            except Exception:
+                # Fallback: return all without semantic ranking
+                rows = db.execute(
+                    text("""
+                        SELECT ke.name, ke.entity_type, ke.description,
+                               ke.source_file, p.name AS project_name
+                        FROM knowledge_entities ke
+                        JOIN projects p ON p.id = ke.project_id
+                        ORDER BY ke.entity_type, ke.name
+                        LIMIT 100
+                    """),
+                ).fetchall()
+
+        if not rows:
+            return {
+                "query": query,
+                "projects_searched": 0,
+                "patterns": {},
+                "message": "No knowledge entities found. Run extract_from_project first.",
+            }
+
+        # ── 2. Group by project → entity_type ───────────────────
+        # entity_type → plural key used in output
+        TYPE_KEY = {
+            "framework":              "frameworks",
+            "library":                "libraries",
+            "pattern":                "patterns",
+            "architectural_decision": "architectural_decisions",
+            "component":              "components",
+            "style_approach":         "style_approaches",
+        }
+
+        patterns: Dict[str, Any] = {}
+        projects_seen: set = set()
+
+        for r in rows:
+            proj = r.project_name
+            projects_seen.add(proj)
+            if proj not in patterns:
+                patterns[proj] = {}
+
+            bucket = TYPE_KEY.get(r.entity_type, r.entity_type)
+            if bucket not in patterns[proj]:
+                patterns[proj][bucket] = []
+
+            patterns[proj][bucket].append({
+                "name": r.name,
+                "description": r.description,
+                "source_file": r.source_file,
+            })
+
+        return {
+            "query": query,
+            "projects_searched": len(projects_seen),
+            "patterns": patterns,
+        }
+
+    except Exception as exc:
+        logger.error("get_developer_patterns error: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def get_developer_patterns(
+    query: str,
+    project_id: Optional[int] = None,
+) -> str:
+    """
+    Search developer patterns across all projects.
+    Use when user says:
+    - "Начинаю новый проект"
+    - "Как я обычно делаю X?"
+    - "Что я использовал раньше?"
+    - "Найди похожий код"
+
+    If project_id is None — searches ALL projects.
+    Returns frameworks, libraries, patterns, components
+    that match the query.
+    """
+    result = await _tool_get_developer_patterns(query=query, project_id=project_id)
+    return json.dumps(result, default=str, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
