@@ -937,3 +937,41 @@ async def get_dependency_graph(
     except Exception as e:
         logger.exception(f"Failed to get dependency graph: {e}")
         raise HTTPException(500, f"Failed: {str(e)}")
+
+
+# ====================================================================
+# KNOWLEDGE GRAPH EXTRACTION
+# ====================================================================
+
+@router.post("/extract-knowledge/{project_id}")
+async def extract_knowledge(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Analyze indexed files and extract architectural knowledge
+    into knowledge_entities and knowledge_relationships tables.
+    """
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id,
+    ).first()
+
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    try:
+        from app.services.knowledge_extractor import KnowledgeExtractor
+        extractor = KnowledgeExtractor()
+        result = extractor.extract_from_project(project_id, limit=50)
+
+        return {
+            "project_id": project_id,
+            "files_processed": result["files_processed"],
+            "entities_added": result["entities_added"],
+            "relationships_added": result["relationships_added"],
+        }
+    except Exception as e:
+        logger.exception(f"Knowledge extraction failed for project {project_id}: {e}")
+        raise HTTPException(500, f"Extraction failed: {str(e)}")
