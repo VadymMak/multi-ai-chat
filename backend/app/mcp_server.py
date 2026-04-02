@@ -563,7 +563,8 @@ async def ensure_project_indexed(git_url: str, project_name: str) -> str:
         if files_count > 0:
             status = "already_indexed"
         else:
-            backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+            backend_url = os.getenv(
+                "BACKEND_URL", "http://localhost:8080").rstrip("/")
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(
@@ -573,7 +574,8 @@ async def ensure_project_indexed(git_url: str, project_name: str) -> str:
                     resp.raise_for_status()
                 status = "created_and_indexing" if created else "indexing_started"
             except Exception as http_exc:
-                logger.error("ensure_project_indexed: trigger failed: %s", http_exc)
+                logger.error(
+                    "ensure_project_indexed: trigger failed: %s", http_exc)
                 status = "created_trigger_failed" if created else "trigger_failed"
 
         return json.dumps(
@@ -609,14 +611,22 @@ async def hybrid_search_files(
     Use "fts" for exact identifier search (function names, class names).
     """
     token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"http://localhost:8080/api/file-indexer/search/{project_id}",
-            params={"q": query, "mode": mode, "limit": limit},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        return resp.text
+
+    # ✅ FIX: использовать BACKEND_URL из env, не localhost
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{backend_url}/api/file-indexer/search/{project_id}",
+                params={"q": query, "mode": mode, "limit": limit},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            return resp.text
+    except Exception as exc:
+        logger.error("hybrid_search_files error: %s", exc)
+        return json.dumps({"error": str(exc), "project_id": project_id, "query": query, "results": [], "total_results": 0})
 
 
 # ─────────────────────────────────────────────────────────────────
