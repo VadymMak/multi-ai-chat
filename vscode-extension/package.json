@@ -1,0 +1,70 @@
+{
+  "name": "smartcontext-brain",
+  "displayName": "SmartContext Brain",
+  "description": "Active suggestions from the project brain while you code",
+  "version": "0.1.0",
+  "publisher": "smartcontext",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "smartcontext.toggleSuggestions",
+        "title": "SmartContext: Toggle Active Suggestions"
+      },
+      {
+        "command": "smartcontext.showPanel",
+        "title": "SmartContext: Show Suggestions Panel"
+      }
+    ],
+    "configuration": {
+      "title": "SmartContext Brain",
+      "properties": {
+        "smartcontext.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the SmartContext backend"
+        },
+        "smartcontext.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for authentication"
+        },
+        "smartcontext.projectId": {
+          "type": "number",
+          "default": 0,
+          "description": "Project ID in the brain (0 = disabled)"
+        },
+        "smartcontext.debounceMs": {
+          "type": "number",
+          "default": 1500,
+          "description": "Milliseconds to wait after typing before fetching suggestions"
+        },
+        "smartcontext.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable active suggestions"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/vscode": "^1.110.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -15,6 +15,7 @@ from uuid import uuid4
 import json
 import re
 import difflib
+import asyncio
 
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User, Role, Project
@@ -25,6 +26,7 @@ from app.services.smart_context import build_smart_context
 from app.services.vector_service import store_message_with_embedding
 from app.services.version_service import VersionService
 from app.services.auto_learning import AutoLearningService
+from app.services.hybrid_search_service import hybrid_search
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 
@@ -1716,5 +1718,186 @@ def _detect_language(file_path: str) -> str:
     for ext, lang in ext_map.items():
         if file_path.endswith(ext):
             return lang
-    
+
     return 'text'
+
+
+# ============================================================
+# ACTIVE SUGGESTIONS — Step 4
+# ============================================================
+
+class ActiveSuggestionRequest(BaseModel):
+    project_id: int
+    file_path: str
+    file_content: str
+    cursor_line: int           # 0-indexed line number
+    language: Optional[str] = None
+    context_lines: int = 30   # lines to send around cursor
+
+
+class Suggestion(BaseModel):
+    type: str                           # "pattern" | "similar_code" | "warning" | "related"
+    message: str
+    related_file: Optional[str] = None
+    related_snippet: Optional[str] = None
+    confidence: float                   # 0.0–1.0
+    line: Optional[int] = None          # line in current file this applies to
+
+
+class ActiveSuggestionResponse(BaseModel):
+    success: bool
+    suggestions: List[Suggestion]
+    query_used: str
+    search_ms: Optional[int] = None
+
+
+@router.post("/active-suggestions", response_model=ActiveSuggestionResponse)
+async def active_suggestions(
+    request: ActiveSuggestionRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return contextual suggestions for the code around the cursor.
+
+    Algorithm:
+    1. Extract ±context_lines around cursor_line
+    2. Build a query from the code snippet (identifiers + imports)
+    3. Hybrid search for similar files in the project
+    4. Analyse auto_learning error history for risky patterns
+    5. Return structured suggestion list
+    """
+    import time
+    t0 = time.monotonic()
+
+    lines = request.file_content.splitlines()
+    total = len(lines)
+    start = max(0, request.cursor_line - request.context_lines)
+    end   = min(total, request.cursor_line + request.context_lines + 1)
+    snippet = "\n".join(lines[start:end])
+
+    # ── derive a concise query from the snippet ──────────────────────
+    # Pick identifiers: words ≥4 chars that look like code names
+    words = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]{3,})\b', snippet)
+    # Remove very common noise words
+    noise = {
+        'import', 'from', 'return', 'const', 'function', 'async', 'await',
+        'type', 'interface', 'class', 'export', 'default', 'undefined',
+        'null', 'true', 'false', 'self', 'None', 'True', 'False',
+        'pass', 'elif', 'else', 'with', 'yield',
+    }
+    keywords = [w for w in dict.fromkeys(words) if w not in noise][:12]
+    query = " ".join(keywords) if keywords else (snippet[:200] if snippet else request.file_path)
+
+    print(f"🧠 [ActiveSuggestions] query='{query[:80]}' cursor={request.cursor_line}")
+
+    suggestions: List[Suggestion] = []
+
+    # ── 1. Hybrid search for similar files ───────────────────────────
+    try:
+        similar = hybrid_search(
+            query=query,
+            project_id=request.project_id,
+            db=db,
+            preset="code",
+            limit=6,
+        )
+    except Exception as exc:
+        print(f"⚠️ [ActiveSuggestions] hybrid_search failed: {exc}")
+        similar = []
+
+    for item in similar:
+        fp = item.get("file_path", "")
+        # Skip the file being edited
+        if fp and request.file_path.endswith(fp.lstrip("/")):
+            continue
+        if fp and fp.endswith(request.file_path.lstrip("/")):
+            continue
+
+        score = float(item.get("combined_score", item.get("score", 0)))
+        if score < 0.05:
+            continue
+
+        # Get a short snippet from the matching file
+        raw_content: Optional[str] = None
+        try:
+            row = db.execute(text("""
+                SELECT content FROM file_embeddings
+                WHERE project_id = :pid AND file_path = :fp
+                LIMIT 1
+            """), {"pid": request.project_id, "fp": fp}).fetchone()
+            if row and row[0]:
+                raw_content = row[0][:400]
+        except Exception:
+            pass
+
+        suggestions.append(Suggestion(
+            type="similar_code",
+            message=f"Similar pattern found in {fp.split('/')[-1]}",
+            related_file=fp,
+            related_snippet=raw_content,
+            confidence=min(score * 2, 1.0),
+        ))
+
+    # ── 2. Scan for risky patterns via auto_learning history ─────────
+    try:
+        al_service = AutoLearningService(db)
+        warnings = al_service.get_warnings_for_prompt(
+            project_id=request.project_id,
+            file_path=_normalize_file_path(request.file_path),
+            limit=3,
+        )
+        for w in warnings:
+            pat = w.get("error_pattern") or ""
+            sol = w.get("solution_pattern") or ""
+            count = w.get("occurrence_count", 1)
+            # Only surface if the error pattern appears in the current snippet
+            if pat and pat.lower() in snippet.lower():
+                msg = f"Known error ({count}x): {pat}"
+                if sol:
+                    msg += f" → {sol[:80]}"
+                suggestions.append(Suggestion(
+                    type="warning",
+                    message=msg,
+                    confidence=min(0.5 + count * 0.05, 0.95),
+                ))
+    except Exception as exc:
+        print(f"⚠️ [ActiveSuggestions] auto_learning check failed: {exc}")
+
+    # ── 3. Check canon_items (architectural decisions) ─────────────────
+    try:
+        mm = MemoryManager(db)
+        canon_items = mm.search_canon_items(
+            project_id=str(request.project_id),
+            query_terms=keywords[:5],
+            top_k=3,
+        )
+        snippet_words = set(w.lower() for w in keywords)
+        for item in (canon_items or [])[:3]:
+            item_text = getattr(item, "body", None) or getattr(item, "title", None) or ""
+            if not item_text:
+                continue
+            item_words = set(re.findall(r'\b\w{4,}\b', item_text.lower()))
+            overlap = item_words & snippet_words
+            if len(overlap) >= 2:
+                suggestions.append(Suggestion(
+                    type="pattern",
+                    message=f"Architectural note: {item_text[:150]}",
+                    confidence=min(len(overlap) * 0.15, 0.85),
+                ))
+    except Exception as exc:
+        print(f"⚠️ [ActiveSuggestions] canon_items check failed: {exc}")
+
+    # Sort by confidence descending, cap at 8
+    suggestions.sort(key=lambda s: s.confidence, reverse=True)
+    suggestions = suggestions[:8]
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    print(f"✅ [ActiveSuggestions] {len(suggestions)} suggestions in {elapsed_ms}ms")
+
+    return ActiveSuggestionResponse(
+        success=True,
+        suggestions=suggestions,
+        query_used=query,
+        search_ms=elapsed_ms,
+    )
