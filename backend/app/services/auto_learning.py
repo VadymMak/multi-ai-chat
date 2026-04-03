@@ -267,9 +267,36 @@ class AutoLearningService:
                 lines.append(f"  ✅ Fix: {w['solution_pattern']}")
             
             lines.append("")
-        
+
+        # Cross-project tips for unresolved warnings
+        try:
+            from app.services.pattern_analyzer import PatternAnalyzer
+            analyzer = PatternAnalyzer(self.db)
+
+            # Find cross-project solutions for warnings without solutions (max 2 tips)
+            tips_added = 0
+            for w in warnings:
+                if tips_added >= 2:
+                    break
+                if w['solution_pattern']:
+                    continue  # already has solution, skip
+
+                cross = analyzer.cross_project_search(
+                    error_pattern=w['error_pattern'],
+                    exclude_project_id=project_id
+                )
+                if cross:
+                    best = cross[0]
+                    lines.append(
+                        f"  💡 Cross-project tip: {best['solution_pattern']}"
+                        f" (worked in project '{best.get('project_name', 'other')}')"
+                    )
+                    tips_added += 1
+        except Exception as e:
+            print(f"⚠️ [AutoLearn] Cross-project tips skipped: {e}")
+
         return "\n".join(lines)
-    
+
     # ==================== BREAKING CHANGES ====================
     
     def detect_breaking_change(

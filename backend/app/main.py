@@ -202,6 +202,7 @@ from app.routers import (  # noqa: E402
     auto_learning,
     webhooks,
     prediction,
+    pattern_analyzer,
 )
 
 # Optional routers
@@ -246,6 +247,7 @@ app.include_router(versions.router, prefix="/api")
 app.include_router(auto_learning.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 app.include_router(prediction.router, prefix="/api")
+app.include_router(pattern_analyzer.router, prefix="/api")
 
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
