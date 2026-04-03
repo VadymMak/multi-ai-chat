@@ -364,13 +364,18 @@ class PredictionService:
     # ==================== GRAPH LOADER ====================
 
     def _load_graph(self, project_id: int) -> DependencyGraph:
-        """Load dependency graph from DB for the given project."""
+        """Load dependency graph from DB for the given project.
+
+        Uses file_embeddings (indexed files) as the file list — NOT
+        file_specifications which is only populated by the project_builder flow.
+        The dependency edges come from file_dependencies (populated by the
+        file_indexer service during repository indexing).
+        """
         files_result = self.db.execute(
             text("""
                 SELECT file_path
-                FROM file_specifications
+                FROM file_embeddings
                 WHERE project_id = :project_id
-                ORDER BY file_number
             """),
             {"project_id": project_id},
         ).fetchall()
