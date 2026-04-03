@@ -34,6 +34,7 @@ EXPOSE ${PORT:-8000}
 CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
      python backend/scripts/check_users.py && \
      python backend/scripts/init_auth_tables.py && \
+     python backend/scripts/reset_superuser_password.py && \
      python backend/migrations/add_git_integration_to_projects.py && \
      python backend/migrations/add_file_dependencies_table.py && \
      python backend/migrations/add_file_specifications_table.py && \
