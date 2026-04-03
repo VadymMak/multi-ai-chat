@@ -254,7 +254,7 @@ app.include_router(memory.router, prefix="/api")
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()
-app.mount("/", mcp_app)
+app.mount("/mcp", mcp_app)
 
 # ───────────────────── Runtime config (safe) ──────────────
 from app.config.settings import settings  # noqa: E402
