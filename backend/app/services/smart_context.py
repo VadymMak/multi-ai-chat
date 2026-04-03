@@ -266,6 +266,40 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] 2. Summaries failed: {e}")
     
     # ============================================================
+    # 2.5. SESSION SUMMARIES (MIDDLE - previous session context)
+    # Queries canon_items WHERE type='SESSION_SUMMARY', last 2 entries.
+    # Gives AI memory of decisions made in prior work sessions.
+    # ============================================================
+    try:
+        session_rows = db.execute(
+            text("""
+                SELECT title, body, created_at
+                FROM canon_items
+                WHERE project_id  = :project_id
+                  AND type        = 'SESSION_SUMMARY'
+                  AND is_active   = TRUE
+                ORDER BY created_at DESC
+                LIMIT 2
+            """),
+            {"project_id": str(project_id)},
+        ).fetchall()
+
+        if session_rows:
+            session_lines = []
+            for row in session_rows:
+                date = row.created_at.strftime("%Y-%m-%d") if row.created_at else ""
+                body_preview = (row.body or "")[:500]
+                session_lines.append(f"**{row.title}** ({date})\n{body_preview}")
+            parts.append(
+                "📌 PREVIOUS SESSION CONTEXT:\n" + "\n\n".join(session_lines)
+            )
+            print(f"✅ [Smart Context] 2.5. Added {len(session_rows)} session summaries")
+        else:
+            print("ℹ️ [Smart Context] 2.5. No session summaries yet")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 2.5. Session summaries failed: {e}")
+
+    # ============================================================
     # 3. RECENT MESSAGES (MIDDLE - conversation flow)
     # ============================================================
     try:
