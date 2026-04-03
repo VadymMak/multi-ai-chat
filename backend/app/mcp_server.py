@@ -755,4 +755,168 @@ async def get_developer_patterns(
     return json.dumps(result, default=str, ensure_ascii=False)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool 13 — save_session_summary
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def save_session_summary(
+    project_id: int,
+    content: str,
+    topics: List[str] = [],
+) -> str:
+    """
+    Save current session summary to brain for future reference.
+
+    Call this when the conversation is getting long or at the end of a
+    work session. The summary is stored in canon_items as SESSION_SUMMARY
+    and will be retrieved automatically in future sessions via
+    build_context_for_query.
+
+    Args:
+        project_id: ID of the current project.
+        content: Text describing what was discussed/decided this session.
+        topics: List of main topics (e.g. ["auth", "migration", "FastAPI"]).
+    """
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{backend_url}/api/memory/save-session-summary",
+                json={
+                    "project_id": project_id,
+                    "session_content": content,
+                    "topics": topics,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        summary_preview = (data.get("summary") or "")[:200]
+        summary_id = data.get("summary_id")
+
+        logger.info("save_session_summary: saved id=%s project=%s", summary_id, project_id)
+        return json.dumps(
+            {
+                "saved": True,
+                "summary_id": summary_id,
+                "summary": summary_preview + ("..." if len(data.get("summary", "")) > 200 else ""),
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as exc:
+        logger.error("save_session_summary error: %s", exc)
+        return json.dumps({"error": str(exc), "saved": False}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 14 — get_session_summaries
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_session_summaries(
+    project_id: int,
+    limit: int = 5,
+) -> str:
+    """
+    Get recent session summaries for a project.
+
+    Returns the last N saved sessions with their dates and content.
+    Use this to recall what was worked on in previous sessions.
+
+    Args:
+        project_id: ID of the project.
+        limit: How many recent sessions to return (default 5, max 50).
+    """
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{backend_url}/api/memory/session-summaries/{project_id}",
+                params={"limit": limit},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            summaries = resp.json()
+
+        if not summaries:
+            return "No session summaries found for this project"
+
+        result = f"Last {len(summaries)} sessions:\n\n"
+        for s in summaries:
+            date = (s.get("created_at") or "")[:10]
+            body_preview = (s.get("body") or "")[:300]
+            result += f"**{s.get('title', '?')}** ({date})\n"
+            result += f"{body_preview}{'...' if len(s.get('body',''))>300 else ''}\n\n"
+
+        return result
+
+    except Exception as exc:
+        logger.error("get_session_summaries error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 15 — search_session_memory
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def search_session_memory(
+    project_id: int,
+    query: str,
+    limit: int = 3,
+) -> str:
+    """
+    Search past session summaries by topic or keyword.
+
+    Fetches up to 20 recent summaries and filters them by keyword match
+    in title or body. Use when you need to recall a specific past decision
+    or piece of work.
+
+    Args:
+        project_id: ID of the project.
+        query: Keyword or phrase to search for.
+        limit: Max number of matching sessions to return (default 3).
+    """
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
+    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{backend_url}/api/memory/session-summaries/{project_id}",
+                params={"limit": 20},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            summaries = resp.json()
+
+        query_lower = query.lower()
+        relevant = [
+            s for s in summaries
+            if query_lower in (s.get("body") or "").lower()
+            or query_lower in (s.get("title") or "").lower()
+        ][:limit]
+
+        if not relevant:
+            return json.dumps(
+                {"found": 0, "message": f"No sessions found matching: {query}"},
+                ensure_ascii=False,
+            )
+
+        result = f"Found {len(relevant)} relevant sessions:\n\n"
+        for s in relevant:
+            body_preview = (s.get("body") or "")[:400]
+            result += f"**{s.get('title', '?')}**\n{body_preview}\n\n"
+
+        return result
+
+    except Exception as exc:
+        logger.error("search_session_memory error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
