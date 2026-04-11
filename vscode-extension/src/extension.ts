@@ -32,6 +32,9 @@ let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let lastSuggestions: Suggestion[] = [];
 let enabled = true;
 
+let diagnosticDebounce: ReturnType<typeof setTimeout> | undefined;
+const reportedErrors = new Set<string>();
+
 // ─────────────────────────────────────────────
 // Activation
 // ─────────────────────────────────────────────
@@ -55,6 +58,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(onTextChange),
     vscode.window.onDidChangeActiveTextEditor(onEditorChange),
+    vscode.languages.onDidChangeDiagnostics(onDiagnosticsChange),
   );
 
   // Run once for the current editor
@@ -81,6 +85,60 @@ function onTextChange(e: vscode.TextDocumentChangeEvent) {
 function onEditorChange(editor: vscode.TextEditor | undefined) {
   if (!enabled || !editor) return;
   scheduleFetch(editor);
+}
+
+function onDiagnosticsChange(e: vscode.DiagnosticChangeEvent) {
+  if (diagnosticDebounce) clearTimeout(diagnosticDebounce);
+  diagnosticDebounce = setTimeout(() => reportErrors(e.uris), 3000);
+}
+
+async function reportErrors(uris: readonly vscode.Uri[]) {
+  const cfg = getConfig();
+  if (!cfg.apiToken || !cfg.projectId) return;
+
+  for (const uri of uris) {
+    const diagnostics = vscode.languages.getDiagnostics(uri);
+    const errors = diagnostics.filter(
+      d => d.severity === vscode.DiagnosticSeverity.Error,
+    );
+
+    for (const diag of errors.slice(0, 3)) {
+      const key = `${uri.fsPath}:${diag.range.start.line}:${diag.message}`;
+      if (reportedErrors.has(key)) continue;
+      reportedErrors.add(key);
+
+      const errorCode = diag.code === undefined ? undefined
+        : typeof diag.code === 'object' ? String(diag.code.value)
+        : String(diag.code);
+
+      const body = JSON.stringify({
+        project_id: cfg.projectId,
+        error_pattern: diag.message.slice(0, 500),
+        error_type: classifyErrorType(diag),
+        error_code: errorCode,
+        file_path: vscode.workspace.asRelativePath(uri),
+        line_number: diag.range.start.line + 1,
+      });
+
+      // Fire and forget — never surface failures to the user
+      post<unknown>(`${cfg.apiUrl}/vscode/report-error`, body, cfg.apiToken)
+        .catch(() => {});
+    }
+  }
+
+  // Prevent unbounded growth
+  if (reportedErrors.size > 500) reportedErrors.clear();
+}
+
+function classifyErrorType(diag: vscode.Diagnostic): string {
+  const src = (diag.source ?? '').toLowerCase();
+  const msg = diag.message.toLowerCase();
+
+  if (src === 'eslint' || src === 'stylelint') return 'lint';
+  if (msg.includes('cannot find module') || msg.includes('has no exported member')) return 'import';
+  if (src === 'ts' || src === 'typescript') return 'type';
+  if (msg.includes('syntax') || msg.includes('unexpected token')) return 'syntax';
+  return 'runtime';
 }
 
 function scheduleFetch(editor: vscode.TextEditor) {
