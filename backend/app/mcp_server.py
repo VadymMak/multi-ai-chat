@@ -777,39 +777,46 @@ async def save_session_summary(
         content: Text describing what was discussed/decided this session.
         topics: List of main topics (e.g. ["auth", "migration", "FastAPI"]).
     """
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
-
+    from datetime import datetime, timezone
+    db = _open_db()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{backend_url}/api/memory/save-session-summary",
-                json={
-                    "project_id": project_id,
-                    "session_content": content,
-                    "topics": topics,
-                },
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        now = datetime.now(timezone.utc)
+        title = f"Session {now.strftime('%Y-%m-%d %H:%M')}"
+        terms = " ".join(topics)[:1000] if topics else None
+        tags_json = json.dumps(topics) if topics else None
 
-        summary_preview = (data.get("summary") or "")[:200]
-        summary_id = data.get("summary_id")
+        row = db.execute(
+            text("""
+                INSERT INTO canon_items
+                    (project_id, project_id_int, role_id, type, title, body, tags, terms, created_at, is_active)
+                VALUES
+                    (:project_id, :project_id_int, NULL, 'SESSION_SUMMARY', :title, :body, :tags::jsonb, :terms, :created_at, TRUE)
+                RETURNING id
+            """),
+            {
+                "project_id": str(project_id),
+                "project_id_int": project_id,
+                "title": title[:256],
+                "body": content[:8000],
+                "tags": tags_json,
+                "terms": terms,
+                "created_at": now,
+            },
+        ).fetchone()
+        db.commit()
 
+        summary_id = row[0] if row else None
         logger.info("save_session_summary: saved id=%s project=%s", summary_id, project_id)
         return json.dumps(
-            {
-                "saved": True,
-                "summary_id": summary_id,
-                "summary": summary_preview + ("..." if len(data.get("summary", "")) > 200 else ""),
-            },
+            {"saved": True, "summary_id": summary_id, "title": title},
             ensure_ascii=False,
         )
-
     except Exception as exc:
+        db.rollback()
         logger.error("save_session_summary error: %s", exc)
         return json.dumps({"error": str(exc), "saved": False}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -830,34 +837,37 @@ async def get_session_summaries(
         project_id: ID of the project.
         limit: How many recent sessions to return (default 5, max 50).
     """
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
-
+    db = _open_db()
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"{backend_url}/api/memory/session-summaries/{project_id}",
-                params={"limit": limit},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            summaries = resp.json()
+        rows = db.execute(
+            text("""
+                SELECT id, title, body, tags, created_at
+                FROM canon_items
+                WHERE project_id = :project_id
+                  AND type = 'SESSION_SUMMARY'
+                  AND is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """),
+            {"project_id": str(project_id), "limit": max(1, min(limit, 50))},
+        ).fetchall()
 
-        if not summaries:
+        if not rows:
             return "No session summaries found for this project"
 
-        result = f"Last {len(summaries)} sessions:\n\n"
-        for s in summaries:
-            date = (s.get("created_at") or "")[:10]
-            body_preview = (s.get("body") or "")[:300]
-            result += f"**{s.get('title', '?')}** ({date})\n"
-            result += f"{body_preview}{'...' if len(s.get('body',''))>300 else ''}\n\n"
+        result = f"Last {len(rows)} sessions:\n\n"
+        for r in rows:
+            date = r.created_at.strftime("%Y-%m-%d") if r.created_at else ""
+            body_preview = (r.body or "")[:300]
+            result += f"**{r.title}** ({date})\n"
+            result += f"{body_preview}{'...' if len(r.body or '') > 300 else ''}\n\n"
 
         return result
-
     except Exception as exc:
         logger.error("get_session_summaries error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -881,24 +891,26 @@ async def search_session_memory(
         query: Keyword or phrase to search for.
         limit: Max number of matching sessions to return (default 3).
     """
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
-
+    db = _open_db()
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"{backend_url}/api/memory/session-summaries/{project_id}",
-                params={"limit": 20},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            summaries = resp.json()
+        rows = db.execute(
+            text("""
+                SELECT id, title, body, tags, created_at
+                FROM canon_items
+                WHERE project_id = :project_id
+                  AND type = 'SESSION_SUMMARY'
+                  AND is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 20
+            """),
+            {"project_id": str(project_id)},
+        ).fetchall()
 
         query_lower = query.lower()
         relevant = [
-            s for s in summaries
-            if query_lower in (s.get("body") or "").lower()
-            or query_lower in (s.get("title") or "").lower()
+            r for r in rows
+            if query_lower in (r.body or "").lower()
+            or query_lower in (r.title or "").lower()
         ][:limit]
 
         if not relevant:
@@ -908,15 +920,16 @@ async def search_session_memory(
             )
 
         result = f"Found {len(relevant)} relevant sessions:\n\n"
-        for s in relevant:
-            body_preview = (s.get("body") or "")[:400]
-            result += f"**{s.get('title', '?')}**\n{body_preview}\n\n"
+        for r in relevant:
+            body_preview = (r.body or "")[:400]
+            result += f"**{r.title}**\n{body_preview}\n\n"
 
         return result
-
     except Exception as exc:
         logger.error("search_session_memory error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 __all__ = ["mcp"]
