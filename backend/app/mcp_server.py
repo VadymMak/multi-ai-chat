@@ -790,7 +790,7 @@ async def save_session_summary(
                 INSERT INTO canon_items
                     (project_id, project_id_int, role_id, type, title, body, tags, terms, created_at, is_active)
                 VALUES
-                    (:project_id, :project_id_int, NULL, 'SESSION_SUMMARY', :title, :body, :tags::jsonb, :terms, :created_at, TRUE)
+                    (:project_id, :project_id_int, NULL, 'SESSION_SUMMARY', :title, :body, cast(:tags AS jsonb), :terms, :created_at, TRUE)
                 RETURNING id
             """),
             {
