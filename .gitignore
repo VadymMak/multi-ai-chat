@@ -69,6 +69,10 @@ backup.sql
 .railway/
 docker-compose.override.yml
 
+# Claude Code local settings (may contain credentials)
+.claude/settings.local.json
+.claude/settings.json
+
 # Testing
 coverage/
 .coverage

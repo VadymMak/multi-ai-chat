@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "multi-ai-chat": {
+      "type": "http",
+      "url": "https://multi-ai-chat-production.up.railway.app/mcp/mcp"
+    }
+  }
+}
