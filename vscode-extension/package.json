@@ -1,58 +1,32 @@
 {
   "name": "smartcontext-brain",
   "displayName": "SmartContext Brain",
-  "description": "Active suggestions from the project brain while you code",
-  "version": "0.1.0",
+  "description": "Silent background service — reports diagnostics to the project brain",
+  "version": "0.2.0",
   "publisher": "smartcontext",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.110.0"
   },
   "categories": [
-    "Other",
-    "AI"
+    "Other"
   ],
   "activationEvents": [
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": [
-      {
-        "command": "smartcontext.toggleSuggestions",
-        "title": "SmartContext: Toggle Active Suggestions"
-      },
-      {
-        "command": "smartcontext.showPanel",
-        "title": "SmartContext: Show Suggestions Panel"
-      }
-    ],
     "configuration": {
       "title": "SmartContext Brain",
       "properties": {
         "smartcontext.apiUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
-          "description": "Base URL of the SmartContext backend"
+          "default": "",
+          "description": "Base URL of the SmartContext backend (e.g. https://multi-ai-chat-production.up.railway.app/api)"
         },
         "smartcontext.apiToken": {
           "type": "string",
           "default": "",
           "description": "Bearer token for authentication"
-        },
-        "smartcontext.projectId": {
-          "type": "number",
-          "default": 0,
-          "description": "Project ID in the brain (0 = disabled)"
-        },
-        "smartcontext.debounceMs": {
-          "type": "number",
-          "default": 1500,
-          "description": "Milliseconds to wait after typing before fetching suggestions"
-        },
-        "smartcontext.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable active suggestions"
         }
       }
     }
