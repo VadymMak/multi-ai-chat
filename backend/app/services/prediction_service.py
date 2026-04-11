@@ -296,6 +296,31 @@ class PredictionService:
         self.db.commit()
         return entry_id
 
+    def record_feedback(
+        self, history_id: int, project_id: int, accuracy_score: float
+    ) -> bool:
+        """
+        Record accuracy feedback for a past prediction.
+        accuracy_score: 0.0 = completely wrong, 1.0 = completely correct.
+        Returns True if the record was found and updated.
+        """
+        score = max(0.0, min(1.0, accuracy_score))
+        result = self.db.execute(
+            text("""
+                UPDATE prediction_history
+                SET accuracy_score = :score
+                WHERE id = :id AND project_id = :project_id
+            """),
+            {"id": history_id, "project_id": project_id, "score": score},
+        )
+        self.db.commit()
+        updated = result.rowcount > 0
+        print(
+            f"📊 [Prediction] Feedback: history_id={history_id} "
+            f"score={score} updated={updated}"
+        )
+        return updated
+
     # ==================== CACHE HELPERS ====================
 
     def _make_cache_key(self, changed_files: List[str]) -> str:

@@ -69,6 +69,19 @@ class SummaryResponse(BaseModel):
     summary: str
 
 
+class FeedbackRequest(BaseModel):
+    """Record accuracy feedback for a past prediction"""
+    history_id: int
+    project_id: int
+    accuracy_score: float  # 0.0 = wrong, 1.0 = correct
+
+
+class FeedbackResponse(BaseModel):
+    """Result of recording feedback"""
+    success: bool
+    recorded: bool
+
+
 class PredictionStatsResponse(BaseModel):
     """Response with prediction usage statistics"""
     success: bool
@@ -224,6 +237,34 @@ async def get_prediction_stats(
 
     except Exception as e:
         print(f"❌ [Prediction] Stats fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/feedback", response_model=FeedbackResponse)
+async def record_prediction_feedback(
+    request: FeedbackRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Record accuracy feedback for a past prediction.
+
+    Call this after you know the actual outcome of a change to close
+    the feedback loop. accuracy_score: 0.0 = prediction was wrong,
+    1.0 = prediction was fully correct.
+
+    Requires the history_id returned by POST /prediction/impact.
+    """
+    try:
+        service = PredictionService(db)
+        recorded = service.record_feedback(
+            history_id=request.history_id,
+            project_id=request.project_id,
+            accuracy_score=request.accuracy_score,
+        )
+        return FeedbackResponse(success=True, recorded=recorded)
+    except Exception as e:
+        print(f"❌ [Prediction] Feedback recording failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
