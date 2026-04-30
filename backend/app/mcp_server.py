@@ -159,7 +159,7 @@ async def _tool_get_file_dependencies(args: Dict[str, Any]) -> Any:
                 "source_file": r.source_file,
                 "target_file": r.target_file,
                 "dependency_type": r.dependency_type,
-                "imports_what": json.loads(r.imports_what) if r.imports_what else [],
+                "imports_what": r.imports_what or [],
             }
             for r in rows
         ]

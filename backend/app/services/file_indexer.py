@@ -1047,13 +1047,13 @@ Imports: {', '.join(metadata.get('imports', []))}
             {
                 "file_path": row[0],
                 "dependency_type": row[1],
-                "imports_what": json.loads(row[2]) if row[2] else [],
+                "imports_what": row[2] or [],
                 "language": row[3],
                 "line_count": row[4],
             }
             for row in result
         ]
-    
+
     async def get_file_dependents(
         self,
         project_id: int,
@@ -1083,13 +1083,13 @@ Imports: {', '.join(metadata.get('imports', []))}
             {
                 "file_path": row[0],
                 "dependency_type": row[1],
-                "imports_what": json.loads(row[2]) if row[2] else [],
+                "imports_what": row[2] or [],
                 "language": row[3],
                 "line_count": row[4],
             }
             for row in result
         ]
-    
+
     async def get_dependency_stats(self, project_id: int) -> Dict[str, Any]:
         """Get dependency statistics for project"""
         stats = self.db.execute(text("""
