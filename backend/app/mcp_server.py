@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -927,6 +929,274 @@ async def search_session_memory(
         return result
     except Exception as exc:
         logger.error("search_session_memory error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Local-indexing helpers
+# ─────────────────────────────────────────────────────────────────
+_INDEXABLE_EXTENSIONS = {".ts", ".tsx", ".js", ".py", ".json", ".css", ".md"}
+_SKIP_DIR_NAMES = {"node_modules", ".git", "dist", "build"}
+# Hardcoded JWT for user_id=1 (matches hybrid_search_files pattern).
+_INTERNAL_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxODA2NDkxNTc2fQ.oBu_Vg9wW34TE1LUlYpwB3v9uPNjKuIMXcQu_S6k-8o"
+_MAX_FILE_BYTES = 1_000_000  # 1 MB per file — skip larger blobs
+
+
+def _backend_url() -> str:
+    return os.getenv("BACKEND_URL", "http://localhost:8080").rstrip("/")
+
+
+def _webhook_url() -> str:
+    return f"{_backend_url()}/api/webhooks/github"
+
+
+def _collect_local_files(directory_path: str) -> List[Dict[str, str]]:
+    """Walk directory_path and collect indexable files as [{path, content}]."""
+    root = Path(directory_path).resolve()
+    if not root.is_dir():
+        raise ValueError(f"directory_path is not a directory: {directory_path}")
+
+    collected: List[Dict[str, str]] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        # Skip if any parent directory is in the skip list.
+        if any(part in _SKIP_DIR_NAMES for part in path.relative_to(root).parts):
+            continue
+        if path.suffix.lower() not in _INDEXABLE_EXTENSIONS:
+            continue
+        try:
+            if path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        rel = path.relative_to(root).as_posix()
+        collected.append({"path": rel, "content": content})
+    return collected
+
+
+async def _post_index_local(project_id: int, files: List[Dict[str, str]]) -> Dict[str, Any]:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            f"{_backend_url()}/api/file-indexer/index-local",
+            json={"project_id": project_id, "files": files},
+            headers={"Authorization": f"Bearer {_INTERNAL_TOKEN}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 16 — index_local_project
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def index_local_project(project_id: int, directory_path: str) -> str:
+    """
+    Index files from a local directory into an existing project.
+
+    Walks `directory_path` recursively, picks up files with extensions
+    .ts, .tsx, .js, .py, .json, .css, .md, skipping node_modules, .git,
+    dist, build, and POSTs them to /api/file-indexer/index-local.
+
+    Args:
+        project_id: ID of the target project.
+        directory_path: Absolute path to the directory to scan.
+    """
+    try:
+        files = _collect_local_files(directory_path)
+    except Exception as exc:
+        logger.error("index_local_project: collect failed: %s", exc)
+        return json.dumps({"error": str(exc), "indexed_files_count": 0}, ensure_ascii=False)
+
+    if not files:
+        return json.dumps(
+            {"indexed_files_count": 0, "message": "No indexable files found"},
+            ensure_ascii=False,
+        )
+
+    try:
+        result = await _post_index_local(project_id, files)
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "directory_path": directory_path,
+                "files_sent": len(files),
+                "indexed_files_count": result.get("indexed", 0),
+                "skipped": result.get("skipped", 0),
+                "errors": result.get("errors", 0),
+                "message": result.get("message"),
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("index_local_project: HTTP failed: %s", exc)
+        return json.dumps(
+            {"error": str(exc), "files_sent": len(files), "indexed_files_count": 0},
+            ensure_ascii=False,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 17 — create_project_with_index
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def create_project_with_index(
+    name: str,
+    directory_path: str,
+    git_url: Optional[str] = None,
+) -> str:
+    """
+    Create a new project and immediately index files from a local directory.
+
+    Steps:
+    1. Insert a project row (user_id=1) with optional git_url.
+    2. Walk directory_path and POST files to /api/file-indexer/index-local.
+    3. Write .smartcontext.json into directory_path with project_id and webhook_url.
+
+    Args:
+        name: Human-readable project name.
+        directory_path: Absolute path to the directory to scan and tag.
+        git_url: Optional GitHub repository URL.
+    """
+    db = _open_db()
+    try:
+        if git_url:
+            row = db.execute(
+                text("""
+                    INSERT INTO projects (name, git_url, user_id)
+                    VALUES (:name, :git_url, 1)
+                    RETURNING id
+                """),
+                {"name": name, "git_url": git_url.strip()},
+            ).fetchone()
+        else:
+            row = db.execute(
+                text("""
+                    INSERT INTO projects (name, user_id)
+                    VALUES (:name, 1)
+                    RETURNING id
+                """),
+                {"name": name},
+            ).fetchone()
+        db.commit()
+        project_id = int(row[0])
+    except Exception as exc:
+        db.rollback()
+        logger.error("create_project_with_index: insert failed: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+    # Index files
+    indexed_files_count = 0
+    indexing_error: Optional[str] = None
+    try:
+        files = _collect_local_files(directory_path)
+        if files:
+            result = await _post_index_local(project_id, files)
+            indexed_files_count = int(result.get("indexed", 0))
+    except Exception as exc:
+        logger.error("create_project_with_index: indexing failed: %s", exc)
+        indexing_error = str(exc)
+
+    webhook_url = _webhook_url()
+
+    # Write .smartcontext.json
+    smartcontext_error: Optional[str] = None
+    try:
+        marker_path = Path(directory_path) / ".smartcontext.json"
+        marker_path.write_text(
+            json.dumps(
+                {
+                    "project_id": project_id,
+                    "name": name,
+                    "git_url": git_url,
+                    "webhook_url": webhook_url,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.error("create_project_with_index: marker write failed: %s", exc)
+        smartcontext_error = str(exc)
+
+    return json.dumps(
+        {
+            "project_id": project_id,
+            "webhook_url": webhook_url,
+            "indexed_files_count": indexed_files_count,
+            "indexing_error": indexing_error,
+            "smartcontext_error": smartcontext_error,
+        },
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 18 — get_index_status
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_index_status(project_id: int) -> str:
+    """
+    Return indexing status for a project: total_files, languages,
+    last_indexed timestamp, and the GitHub webhook URL to configure.
+
+    Args:
+        project_id: ID of the project.
+    """
+    db = _open_db()
+    try:
+        proj = db.execute(
+            text("""
+                SELECT files_count, indexed_at
+                FROM projects
+                WHERE id = :project_id
+                LIMIT 1
+            """),
+            {"project_id": project_id},
+        ).fetchone()
+
+        if proj is None:
+            return json.dumps(
+                {"error": f"Project not found: {project_id}"},
+                ensure_ascii=False,
+            )
+
+        lang_rows = db.execute(
+            text("""
+                SELECT language, COUNT(*) AS cnt
+                FROM file_embeddings
+                WHERE project_id = :project_id
+                GROUP BY language
+                ORDER BY cnt DESC
+            """),
+            {"project_id": project_id},
+        ).fetchall()
+
+        languages = {r.language or "unknown": int(r.cnt) for r in lang_rows}
+        total_files = int(proj.files_count or sum(languages.values()))
+
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "total_files": total_files,
+                "languages": languages,
+                "last_indexed": proj.indexed_at.isoformat() if proj.indexed_at else None,
+                "webhook_url": _webhook_url(),
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_index_status error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     finally:
         db.close()
