@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import urllib.parse
 from typing import Any, Dict
 
 import httpx
@@ -84,7 +85,7 @@ async def github_webhook(
     payload: Dict[str, Any] = await request.json()
 
     full_name: str = payload.get("repository", {}).get("full_name", "")
-    ref: str = payload.get("ref", "refs/heads/main").split("/")[-1]  # e.g. "main"
+    sha: str = payload.get("after") or payload.get("ref", "").removeprefix("refs/heads/") or "main"
 
     if not full_name:
         return {"status": "ignored", "reason": "no repository.full_name"}
@@ -102,7 +103,7 @@ async def github_webhook(
             return {"status": "ignored", "reason": "project not found"}
 
         project_id: int = row[0]
-        logger.info(f"[webhook] Push to {full_name} → project {project_id} (ref={ref})")
+        logger.info(f"[webhook] Push to {full_name} → project {project_id} (sha={sha})")
 
         upsert_paths, deleted_paths = _collect_changed_files(payload)
         indexer = FileIndexer(db)
@@ -114,9 +115,15 @@ async def github_webhook(
             for file_path in upsert_paths:
                 try:
                     url = RAW_CONTENT_URL.format(
-                        full_name=full_name, ref=ref, file_path=file_path
+                        full_name=full_name,
+                        ref=sha,
+                        file_path=urllib.parse.quote(file_path, safe="/"),
                     )
-                    resp = await client.get(url)
+                    headers = {}
+                    token = getattr(settings, "GITHUB_TOKEN", None)
+                    if token:
+                        headers["Authorization"] = f"token {token}"
+                    resp = await client.get(url, headers=headers)
                     if resp.status_code == 404:
                         logger.info(f"[webhook] 404 for {file_path} — skipping")
                         continue
