@@ -22,6 +22,7 @@ COPY backend/app /app/app
 
 # Copy migration scripts
 COPY backend/scripts /app/backend/scripts
+COPY backend/scripts /app/scripts
 COPY backend/migrations /app/backend/migrations
 
 # Create uploads directory
