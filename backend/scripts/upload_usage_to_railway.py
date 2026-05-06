@@ -34,7 +34,7 @@ DEFAULT_TOKEN = (
     "eyJzdWIiOiIxIiwiZXhwIjoxODA5MDYwMTA2fQ."
     "088PkzLccpsp4adsYxmqFyvbliqDGFAZRF_A1U0KF5s"
 )
-DEFAULT_BATCH_SIZE = 500
+DEFAULT_BATCH_SIZE = 50
 
 
 # Pricing matches backend/scripts/claude_usage_parser.py.
@@ -232,7 +232,7 @@ def post_batch(url: str, token: str, records: List[Dict[str, Any]]) -> Dict[str,
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             payload = resp.read().decode("utf-8", errors="replace")
             try:
                 return json.loads(payload) if payload else {}
