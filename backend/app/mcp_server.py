@@ -1425,4 +1425,96 @@ async def get_cache_efficiency(days: int = 30) -> str:
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool 22 — brain_help
+# ─────────────────────────────────────────────────────────────────
+_BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
+    "files": [
+        ("Index this project",       "ensure_project_indexed",   "index files from git"),
+        ("Index status",             "get_index_status",         "check indexing status"),
+        ("Search files about X",     "search_project_files",     "semantic search"),
+        ("Show dependencies for X",  "get_file_dependencies",    "import graph"),
+        ("Get file content X",       "get_file_content",         "read file from brain"),
+    ],
+    "search": [
+        ("Find code related to X",   "hybrid_search_files",      "semantic + FTS + graph"),
+        ("Build context for X",      "build_context_for_query",  "smart context builder"),
+        ("Search conversations",     "search_conversation_memory", "search chat history"),
+    ],
+    "analytics": [
+        ("Sync usage logs",          "sync_usage_logs",          "parse JSONL and sync to brain"),
+        ("Show usage report",        "get_usage_stats",          "cost, tokens, brain usage %"),
+        ("Total cost",               "get_total_cost",           "spending summary"),
+        ("Cache efficiency",         "get_cache_efficiency",     "cache hit rate and savings"),
+    ],
+    "memory": [
+        ("Save session summary",     "save_session_summary",     "save current session"),
+        ("Show summaries",           "get_session_summaries",    "list saved summaries"),
+        ("List canon items",         "list_canon_items",         "important project elements"),
+        ("Developer patterns",       "get_developer_patterns",   "coding patterns"),
+    ],
+    "setup": [
+        ("Project stats",            "get_project_stats",        "files, languages, size"),
+        ("Active project",           "get_active_project",       "current project info"),
+    ],
+    "help": [
+        ("help",                     "brain_help",               "show this help"),
+    ],
+}
+
+_BRAIN_HELP_HEADERS: Dict[str, str] = {
+    "files":     "📁 FILES & INDEXING",
+    "search":    "🔍 SEARCH & CONTEXT",
+    "analytics": "📊 ANALYTICS",
+    "memory":    "💾 MEMORY",
+    "setup":     "⚙️ PROJECT",
+    "help":      "❓ HELP",
+}
+
+
+def _format_brain_help(category: str) -> str:
+    cat = (category or "all").strip().lower()
+    if cat not in _BRAIN_HELP_SECTIONS and cat != "all":
+        valid = ", ".join(["all", *_BRAIN_HELP_SECTIONS.keys()])
+        return f"Unknown category '{category}'. Valid: {valid}"
+
+    sections = list(_BRAIN_HELP_SECTIONS.keys()) if cat == "all" else [cat]
+
+    # Compute column widths once across all rows so columns align.
+    rows = [r for s in sections for r in _BRAIN_HELP_SECTIONS[s]]
+    phrase_w = max((len(r[0]) for r in rows), default=0)
+    tool_w = max((len(r[1]) for r in rows), default=0)
+
+    lines: List[str] = []
+    if cat == "all":
+        lines.append("Brain MCP — available commands")
+        lines.append("=" * 60)
+        lines.append("")
+
+    for i, sec in enumerate(sections):
+        if i > 0:
+            lines.append("")
+        lines.append(_BRAIN_HELP_HEADERS[sec] + ":")
+        for phrase, tool, desc in _BRAIN_HELP_SECTIONS[sec]:
+            lines.append(f"  • {phrase.ljust(phrase_w)}  →  {tool.ljust(tool_w)}  — {desc}")
+
+    if cat == "all":
+        lines.append("")
+        lines.append("Tip: call brain_help(category='analytics') for one section only.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def brain_help(category: str = "all") -> str:
+    """
+    Show available Brain MCP commands grouped by category.
+
+    Args:
+        category: One of "all" (default), "files", "search", "analytics",
+            "memory", "setup", or "help". Filters which section is shown.
+    """
+    return _format_brain_help(category)
+
+
 __all__ = ["mcp"]
