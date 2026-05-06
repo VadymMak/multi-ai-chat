@@ -259,10 +259,10 @@ def _project_id_for_path(db: Session, project_path: Optional[str]) -> Optional[i
         row = db.execute(
             text("""
                 SELECT id FROM projects
-                WHERE local_path = :p OR name = :n
+                WHERE name = :n
                 LIMIT 1
             """),
-            {"p": project_path, "n": project_path.rstrip("/").split("/")[-1]},
+            {"n": project_path.rstrip("/").split("/")[-1]},
         ).fetchone()
         return int(row[0]) if row else None
     except Exception:
