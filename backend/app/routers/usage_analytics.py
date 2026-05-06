@@ -438,8 +438,7 @@ def sync_usage_logs(
                 ) VALUES (
                     %(session_id)s, %(message_id)s, %(request_id)s, %(timestamp)s, %(model)s,
                     (SELECT id FROM projects
-                       WHERE local_path = %(project_path)s
-                          OR name = %(project_name_lookup)s
+                       WHERE name = %(project_name_lookup)s
                        LIMIT 1),
                     %(project_path)s, %(project_name)s,
                     %(input_tokens)s, %(output_tokens)s, %(cache_creation_tokens)s,
