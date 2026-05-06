@@ -392,7 +392,24 @@ def sync_usage_logs(
                 raw_jsonl_path=r.raw_jsonl_path or "",
             ))
 
-        insert_result = mod.insert_records(db, records)
+        logger.info(
+            "POST /usage/sync received %d records (first model=%s, ts=%s)",
+            len(records),
+            records[0].model if records else None,
+            records[0].timestamp.isoformat() if records else None,
+        )
+        if payload.records:
+            logger.info(
+                "first record payload: %s",
+                payload.records[0].model_dump_json(),
+            )
+
+        try:
+            insert_result = mod.insert_records(db, records)
+        except Exception:
+            logger.exception("insert_records failed during /usage/sync upload")
+            raise HTTPException(500, "insert_records failed; see server logs")
+
         daily_rows = mod.aggregate_daily(db)
         total_cost = sum(float(r.cost_usd or 0.0) for r in payload.records)
 
