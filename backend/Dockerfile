@@ -48,4 +48,5 @@ CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
      python backend/migrations/add_knowledge_graph.py && \
      python backend/migrations/add_prediction_tables.py && \
      python backend/migrations/add_pattern_analysis_tables.py && \
+     python backend/migrations/add_usage_analytics.py && \
      uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
