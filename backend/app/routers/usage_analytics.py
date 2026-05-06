@@ -404,6 +404,7 @@ def sync_usage_logs(
                 payload.records[0].model_dump_json(),
             )
 
+        db.rollback()  # ensure clean state before starting the per-record loop
         try:
             insert_result = mod.insert_records(db, records)
         except Exception:

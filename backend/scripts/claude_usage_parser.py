@@ -366,6 +366,7 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                         )
                         inserted += 1
         except Exception as e:
+            db.rollback()  # reset aborted outer-transaction state so the next iteration starts clean
             logger.warning("insert failed for %s: %s", rec.message_id, e)
             skipped += 1
     db.commit()
