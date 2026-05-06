@@ -1431,6 +1431,7 @@ async def get_cache_efficiency(days: int = 30) -> str:
 def _load_usage_parser():
     """Load backend/scripts/claude_usage_parser.py as a module."""
     import importlib.util
+    import sys
     parser_path = (
         Path(__file__).resolve().parent.parent / "scripts" / "claude_usage_parser.py"
     )
@@ -1438,6 +1439,7 @@ def _load_usage_parser():
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load parser at {parser_path}")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod.__name__] = mod
     spec.loader.exec_module(mod)
     return mod
 
