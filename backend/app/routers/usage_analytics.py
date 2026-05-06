@@ -11,8 +11,8 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -74,12 +74,40 @@ class CostSummary(BaseModel):
 
 
 class SyncResponse(BaseModel):
-    files_scanned: int
-    records_parsed: int
-    inserted: int
-    skipped: int
-    daily_stat_rows: int
-    root: str
+    files_scanned: int = 0
+    records_parsed: int = 0
+    inserted: int = 0
+    skipped: int = 0
+    daily_stat_rows: int = 0
+    root: Optional[str] = None
+    total_cost_usd: float = 0.0
+
+
+class UsageRecordIn(BaseModel):
+    session_id: Optional[str] = None
+    message_id: Optional[str] = None
+    request_id: Optional[str] = None
+    timestamp: str
+    model: str
+    project_path: Optional[str] = None
+    project_name: Optional[str] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    total_tokens: Optional[int] = None
+    cost_usd: float = 0.0
+    cost_without_cache_usd: float = 0.0
+    cache_savings_usd: float = 0.0
+    used_brain_context: bool = False
+    brain_tools_called: List[str] = Field(default_factory=list)
+    had_retry: bool = False
+    raw_jsonl_path: Optional[str] = None
+
+
+class SyncRequest(BaseModel):
+    records: Optional[List[UsageRecordIn]] = None
+    daily_stats: Optional[List[Dict[str, Any]]] = None
 
 
 # ─── helpers ─────────────────────────────────────────────────────
@@ -296,22 +324,12 @@ def get_brain_effectiveness(
     return compute_summary(db, project_id=project_id)
 
 
-@router.post("/sync", response_model=SyncResponse)
-def sync_usage_logs(
-    since: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """Trigger JSONL parsing of ~/.claude/projects/*."""
-    since_d: Optional[date] = None
-    if since:
-        try:
-            since_d = date.fromisoformat(since)
-        except ValueError:
-            raise HTTPException(400, "since must be YYYY-MM-DD")
-
+def _load_usage_parser():
+    """Load backend/scripts/claude_usage_parser.py. Registers in sys.modules
+    before exec so module-level @dataclass resolves correctly."""
     import importlib.util
     import os
+    import sys
     path = os.path.abspath(os.path.join(
         os.path.dirname(__file__), "..", "..", "scripts", "claude_usage_parser.py"
     ))
@@ -319,7 +337,82 @@ def sync_usage_logs(
     if spec is None or spec.loader is None:
         raise HTTPException(500, "parser module not found")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod.__name__] = mod
     spec.loader.exec_module(mod)
+    return mod
+
+
+@router.post("/sync", response_model=SyncResponse)
+def sync_usage_logs(
+    payload: Optional[SyncRequest] = Body(None),
+    since: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Sync Claude Code usage logs.
+
+    With a JSON body containing `records`, insert those records directly
+    (deduped by message_id via the parser's insert path).
+    Without a body, parse `~/.claude/projects/*` on the server filesystem.
+    """
+    since_d: Optional[date] = None
+    if since:
+        try:
+            since_d = date.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(400, "since must be YYYY-MM-DD")
+
+    mod = _load_usage_parser()
+
+    if payload and payload.records:
+        records = []
+        for r in payload.records:
+            try:
+                ts = datetime.fromisoformat(r.timestamp.replace("Z", "+00:00"))
+            except Exception:
+                ts = datetime.utcnow()
+            records.append(mod.UsageRecord(
+                session_id=r.session_id,
+                message_id=r.message_id,
+                request_id=r.request_id,
+                timestamp=ts,
+                model=r.model,
+                project_path=r.project_path,
+                project_name=r.project_name,
+                input_tokens=r.input_tokens,
+                output_tokens=r.output_tokens,
+                cache_creation_tokens=r.cache_creation_tokens,
+                cache_read_tokens=r.cache_read_tokens,
+                cost_usd=r.cost_usd,
+                cost_without_cache_usd=r.cost_without_cache_usd,
+                cache_savings_usd=r.cache_savings_usd,
+                used_brain_context=r.used_brain_context,
+                brain_tools_called=r.brain_tools_called or [],
+                had_retry=r.had_retry,
+                raw_jsonl_path=r.raw_jsonl_path or "",
+            ))
+
+        insert_result = mod.insert_records(db, records)
+        daily_rows = mod.aggregate_daily(db)
+        total_cost = sum(float(r.cost_usd or 0.0) for r in payload.records)
+
+        return SyncResponse(
+            files_scanned=0,
+            records_parsed=len(records),
+            inserted=insert_result["inserted"],
+            skipped=insert_result["skipped"],
+            daily_stat_rows=daily_rows,
+            root="uploaded",
+            total_cost_usd=total_cost,
+        )
+
     result = mod.sync_usage(db, since=since_d)
 
-    return SyncResponse(**result)
+    cost_sql = "SELECT COALESCE(SUM(cost_usd), 0) FROM claude_usage_logs"
+    cost_params: Dict[str, Any] = {}
+    if since_d:
+        cost_sql += " WHERE timestamp >= :s"
+        cost_params["s"] = since_d
+    total_cost = float(db.execute(text(cost_sql), cost_params).scalar() or 0.0)
+
+    return SyncResponse(**result, total_cost_usd=total_cost)
