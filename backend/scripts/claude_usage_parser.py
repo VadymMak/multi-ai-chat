@@ -298,65 +298,73 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                 "raw_jsonl_path": rec.raw_jsonl_path,
             }
             dialect = db.bind.dialect.name if db.bind else "postgresql"
-            if dialect == "postgresql":
-                db.execute(
-                    text("""
-                        INSERT INTO claude_usage_logs (
-                            session_id, message_id, request_id, timestamp, model,
-                            project_id, project_path, project_name,
-                            input_tokens, output_tokens, cache_creation_tokens,
-                            cache_read_tokens, total_tokens,
-                            cost_usd, cost_without_cache_usd, cache_savings_usd,
-                            used_brain_context, brain_tools_called,
-                            had_retry, raw_jsonl_path
-                        ) VALUES (
-                            :session_id, :message_id, :request_id, :timestamp, :model,
-                            :project_id, :project_path, :project_name,
-                            :input_tokens, :output_tokens, :cache_creation_tokens,
-                            :cache_read_tokens, :total_tokens,
-                            :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
-                            :used_brain_context, :brain_tools_called,
-                            :had_retry, :raw_jsonl_path
+            # SAVEPOINT per record so a single bad row doesn't poison the
+            # outer transaction (Postgres aborts on any error otherwise).
+            with db.begin_nested():
+                if dialect == "postgresql":
+                    result = db.execute(
+                        text("""
+                            INSERT INTO claude_usage_logs (
+                                session_id, message_id, request_id, timestamp, model,
+                                project_id, project_path, project_name,
+                                input_tokens, output_tokens, cache_creation_tokens,
+                                cache_read_tokens, total_tokens,
+                                cost_usd, cost_without_cache_usd, cache_savings_usd,
+                                used_brain_context, brain_tools_called,
+                                had_retry, raw_jsonl_path
+                            ) VALUES (
+                                :session_id, :message_id, :request_id, :timestamp, :model,
+                                :project_id, :project_path, :project_name,
+                                :input_tokens, :output_tokens, :cache_creation_tokens,
+                                :cache_read_tokens, :total_tokens,
+                                :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
+                                :used_brain_context, :brain_tools_called,
+                                :had_retry, :raw_jsonl_path
+                            )
+                            ON CONFLICT (message_id) DO NOTHING
+                            RETURNING id
+                        """),
+                        params,
+                    )
+                    if result.fetchone():
+                        inserted += 1
+                    else:
+                        skipped += 1
+                else:
+                    # SQLite: serialize array, dedupe via existence check
+                    params["brain_tools_called"] = json.dumps(rec.brain_tools_called)
+                    params["used_brain_context"] = 1 if rec.used_brain_context else 0
+                    params["had_retry"] = 1 if rec.had_retry else 0
+                    exists = db.execute(
+                        text("SELECT 1 FROM claude_usage_logs WHERE message_id = :mid"),
+                        {"mid": rec.message_id},
+                    ).fetchone()
+                    if exists:
+                        skipped += 1
+                    else:
+                        db.execute(
+                            text("""
+                                INSERT INTO claude_usage_logs (
+                                    session_id, message_id, request_id, timestamp, model,
+                                    project_id, project_path, project_name,
+                                    input_tokens, output_tokens, cache_creation_tokens,
+                                    cache_read_tokens, total_tokens,
+                                    cost_usd, cost_without_cache_usd, cache_savings_usd,
+                                    used_brain_context, brain_tools_called,
+                                    had_retry, raw_jsonl_path
+                                ) VALUES (
+                                    :session_id, :message_id, :request_id, :timestamp, :model,
+                                    :project_id, :project_path, :project_name,
+                                    :input_tokens, :output_tokens, :cache_creation_tokens,
+                                    :cache_read_tokens, :total_tokens,
+                                    :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
+                                    :used_brain_context, :brain_tools_called,
+                                    :had_retry, :raw_jsonl_path
+                                )
+                            """),
+                            params,
                         )
-                        ON CONFLICT (message_id) DO NOTHING
-                    """),
-                    params,
-                )
-            else:
-                # SQLite: serialize array, dedupe via existence check
-                params["brain_tools_called"] = json.dumps(rec.brain_tools_called)
-                params["used_brain_context"] = 1 if rec.used_brain_context else 0
-                params["had_retry"] = 1 if rec.had_retry else 0
-                exists = db.execute(
-                    text("SELECT 1 FROM claude_usage_logs WHERE message_id = :mid"),
-                    {"mid": rec.message_id},
-                ).fetchone()
-                if exists:
-                    skipped += 1
-                    continue
-                db.execute(
-                    text("""
-                        INSERT INTO claude_usage_logs (
-                            session_id, message_id, request_id, timestamp, model,
-                            project_id, project_path, project_name,
-                            input_tokens, output_tokens, cache_creation_tokens,
-                            cache_read_tokens, total_tokens,
-                            cost_usd, cost_without_cache_usd, cache_savings_usd,
-                            used_brain_context, brain_tools_called,
-                            had_retry, raw_jsonl_path
-                        ) VALUES (
-                            :session_id, :message_id, :request_id, :timestamp, :model,
-                            :project_id, :project_path, :project_name,
-                            :input_tokens, :output_tokens, :cache_creation_tokens,
-                            :cache_read_tokens, :total_tokens,
-                            :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
-                            :used_brain_context, :brain_tools_called,
-                            :had_retry, :raw_jsonl_path
-                        )
-                    """),
-                    params,
-                )
-            inserted += 1
+                        inserted += 1
         except Exception as e:
             logger.warning("insert failed for %s: %s", rec.message_id, e)
             skipped += 1
