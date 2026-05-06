@@ -1426,7 +1426,106 @@ async def get_cache_efficiency(days: int = 30) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool 22 — brain_help
+# Tool 22 — sync_usage_logs
+# ─────────────────────────────────────────────────────────────────
+def _load_usage_parser():
+    """Load backend/scripts/claude_usage_parser.py as a module."""
+    import importlib.util
+    parser_path = (
+        Path(__file__).resolve().parent.parent / "scripts" / "claude_usage_parser.py"
+    )
+    spec = importlib.util.spec_from_file_location("claude_usage_parser", parser_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load parser at {parser_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@mcp.tool()
+async def sync_usage_logs(
+    logs_path: Optional[str] = None,
+    since_days: int = 7,
+) -> str:
+    """
+    Parse Claude Code JSONL usage logs and insert them into claude_usage_logs.
+
+    Reads ~/.claude/projects/*/*.jsonl (or `logs_path` if provided), extracts
+    assistant `usage` blocks, applies Opus/Sonnet/Haiku 4 pricing (with cache
+    discount/premium), and upserts rows into the analytics tables.
+
+    Args:
+        logs_path: Optional path to the Claude projects directory.
+            Defaults to ~/.claude/projects/. The path is expanded for ~ and env
+            vars and may be relative.
+        since_days: Only ingest records from the last N days (default 7,
+            max 365). Use a large value (e.g. 365) for a full backfill.
+
+    Returns a JSON summary: files_scanned, records_parsed, inserted, skipped,
+    total_cost_usd over the synced window, and brain_usage_pct.
+    """
+    from datetime import date, datetime, timedelta
+
+    since_days = max(1, min(int(since_days), 365))
+    since = (datetime.utcnow().date() - timedelta(days=since_days))
+
+    root: Optional[Path] = None
+    if logs_path:
+        expanded = os.path.expanduser(os.path.expandvars(str(logs_path)))
+        root = Path(expanded).resolve()
+
+    db = _open_db()
+    try:
+        parser = _load_usage_parser()
+        result = parser.sync_usage(db, root=root, since=since)
+
+        # Compute summary stats over the window we just synced.
+        since_ts = datetime.combine(since, datetime.min.time())
+        window = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS req,
+                    COALESCE(SUM(cost_usd), 0) AS cost,
+                    COALESCE(SUM(CASE WHEN used_brain_context THEN 1 ELSE 0 END), 0) AS brain_req
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since_ts},
+        ).fetchone()
+
+        total_req = int(window.req or 0)
+        total_cost = float(window.cost or 0.0)
+        brain_req = int(window.brain_req or 0)
+        brain_pct = round((brain_req / total_req * 100.0), 2) if total_req else 0.0
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "root": result.get("root"),
+                "since": since.isoformat(),
+                "since_days": since_days,
+                "files_scanned": result.get("files_scanned", 0),
+                "records_parsed": result.get("records_parsed", 0),
+                "inserted": result.get("inserted", 0),
+                "skipped": result.get("skipped", 0),
+                "daily_stat_rows": result.get("daily_stat_rows", 0),
+                "window_request_count": total_req,
+                "window_total_cost_usd": round(total_cost, 4),
+                "window_brain_assisted_count": brain_req,
+                "window_brain_usage_pct": brain_pct,
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("sync_usage_logs error: %s", exc)
+        return json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 23 — brain_help
 # ─────────────────────────────────────────────────────────────────
 _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     "files": [
