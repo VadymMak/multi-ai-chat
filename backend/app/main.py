@@ -50,14 +50,6 @@ async def lifespan(app: FastAPI):
         # Create superuser on startup if configured
         await create_superuser()
 
-        # 📊 Usage analytics tables migration
-        try:
-            from migrations.add_usage_analytics import run_migration as run_usage_analytics_migration
-            run_usage_analytics_migration()
-            logger.info("✅ Migration: usage analytics tables")
-        except Exception as e:
-            logger.info(f"ℹ️ Usage analytics migration skipped: {e}")
-
         # 🌱 Seed database with default data
         try:
             from app.seed import run_seed
