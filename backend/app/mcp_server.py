@@ -1202,4 +1202,319 @@ async def get_index_status(project_id: int) -> str:
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool 19 — get_usage_stats
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_usage_stats(project_id: int, days: int = 30) -> str:
+    """
+    Get Claude Code usage stats for a project.
+
+    Returns total requests, token counts, cost in USD, cache savings,
+    and how many requests used Brain context, over the last `days`.
+
+    Args:
+        project_id: ID of the project.
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        totals = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS req,
+                    COALESCE(SUM(input_tokens), 0)         AS in_t,
+                    COALESCE(SUM(output_tokens), 0)        AS out_t,
+                    COALESCE(SUM(cache_creation_tokens),0) AS cc_t,
+                    COALESCE(SUM(cache_read_tokens), 0)    AS cr_t,
+                    COALESCE(SUM(total_tokens), 0)         AS tot_t,
+                    COALESCE(SUM(cost_usd), 0)             AS cost,
+                    COALESCE(SUM(cache_savings_usd), 0)    AS savings,
+                    COALESCE(SUM(CASE WHEN used_brain_context THEN 1 ELSE 0 END), 0) AS brain_req
+                FROM claude_usage_logs
+                WHERE project_id = :project_id AND timestamp >= :since
+            """),
+            {"project_id": project_id, "since": since},
+        ).fetchone()
+
+        rows = db.execute(
+            text("""
+                SELECT model,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost
+                FROM claude_usage_logs
+                WHERE project_id = :project_id AND timestamp >= :since
+                GROUP BY model
+                ORDER BY cost DESC
+            """),
+            {"project_id": project_id, "since": since},
+        ).fetchall()
+
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "days": days,
+                "request_count": int(totals.req or 0),
+                "input_tokens": int(totals.in_t or 0),
+                "output_tokens": int(totals.out_t or 0),
+                "cache_creation_tokens": int(totals.cc_t or 0),
+                "cache_read_tokens": int(totals.cr_t or 0),
+                "total_tokens": int(totals.tot_t or 0),
+                "cost_usd": round(float(totals.cost or 0.0), 4),
+                "cache_savings_usd": round(float(totals.savings or 0.0), 4),
+                "brain_assisted_requests": int(totals.brain_req or 0),
+                "by_model": [
+                    {
+                        "model": r.model,
+                        "requests": int(r.req or 0),
+                        "cost_usd": round(float(r.cost or 0.0), 4),
+                    }
+                    for r in rows
+                ],
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_usage_stats error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 20 — get_total_cost
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_total_cost(days: int = 30) -> str:
+    """
+    Total Claude Code cost across all projects over the last `days`.
+
+    Args:
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        totals = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS req,
+                    COALESCE(SUM(total_tokens), 0) AS tot_t,
+                    COALESCE(SUM(cost_usd), 0)     AS cost,
+                    COALESCE(SUM(cache_savings_usd), 0) AS savings
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since},
+        ).fetchone()
+
+        per_project = db.execute(
+            text("""
+                SELECT project_id, project_name,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+                GROUP BY project_id, project_name
+                ORDER BY cost DESC
+                LIMIT 20
+            """),
+            {"since": since},
+        ).fetchall()
+
+        return json.dumps(
+            {
+                "days": days,
+                "total_requests": int(totals.req or 0),
+                "total_tokens": int(totals.tot_t or 0),
+                "total_cost_usd": round(float(totals.cost or 0.0), 4),
+                "total_cache_savings_usd": round(float(totals.savings or 0.0), 4),
+                "top_projects": [
+                    {
+                        "project_id": r.project_id,
+                        "project_name": r.project_name,
+                        "requests": int(r.req or 0),
+                        "cost_usd": round(float(r.cost or 0.0), 4),
+                    }
+                    for r in per_project
+                ],
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_total_cost error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 21 — get_cache_efficiency
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_cache_efficiency(days: int = 30) -> str:
+    """
+    How much prompt caching has saved over the last `days`.
+
+    Returns the cache hit ratio (cache_read_tokens / all input-side tokens),
+    total cache savings in USD, and what total cost would have been without
+    caching.
+
+    Args:
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        row = db.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM(input_tokens), 0)         AS in_t,
+                    COALESCE(SUM(cache_creation_tokens),0) AS cc_t,
+                    COALESCE(SUM(cache_read_tokens), 0)    AS cr_t,
+                    COALESCE(SUM(cost_usd), 0)             AS cost,
+                    COALESCE(SUM(cost_without_cache_usd),0) AS cost_no_cache,
+                    COALESCE(SUM(cache_savings_usd), 0)    AS savings
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since},
+        ).fetchone()
+
+        in_t = int(row.in_t or 0)
+        cc_t = int(row.cc_t or 0)
+        cr_t = int(row.cr_t or 0)
+        denom = in_t + cc_t + cr_t
+        hit_ratio = (cr_t / denom) if denom else 0.0
+        cost = float(row.cost or 0.0)
+        cost_no_cache = float(row.cost_no_cache or 0.0)
+        savings = float(row.savings or 0.0)
+        savings_pct = (savings / cost_no_cache * 100.0) if cost_no_cache else 0.0
+
+        return json.dumps(
+            {
+                "days": days,
+                "input_tokens": in_t,
+                "cache_creation_tokens": cc_t,
+                "cache_read_tokens": cr_t,
+                "cache_hit_ratio": round(hit_ratio, 4),
+                "actual_cost_usd": round(cost, 4),
+                "cost_without_cache_usd": round(cost_no_cache, 4),
+                "savings_usd": round(savings, 4),
+                "savings_pct": round(savings_pct, 2),
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_cache_efficiency error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 22 — brain_help
+# ─────────────────────────────────────────────────────────────────
+_BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
+    "files": [
+        ("Index this project",       "ensure_project_indexed",   "index files from git"),
+        ("Index status",             "get_index_status",         "check indexing status"),
+        ("Search files about X",     "search_project_files",     "semantic search"),
+        ("Show dependencies for X",  "get_file_dependencies",    "import graph"),
+        ("Get file content X",       "get_file_content",         "read file from brain"),
+    ],
+    "search": [
+        ("Find code related to X",   "hybrid_search_files",      "semantic + FTS + graph"),
+        ("Build context for X",      "build_context_for_query",  "smart context builder"),
+        ("Search conversations",     "search_conversation_memory", "search chat history"),
+    ],
+    "analytics": [
+        ("Sync usage logs",          "sync_usage_logs",          "parse JSONL and sync to brain"),
+        ("Show usage report",        "get_usage_stats",          "cost, tokens, brain usage %"),
+        ("Total cost",               "get_total_cost",           "spending summary"),
+        ("Cache efficiency",         "get_cache_efficiency",     "cache hit rate and savings"),
+    ],
+    "memory": [
+        ("Save session summary",     "save_session_summary",     "save current session"),
+        ("Show summaries",           "get_session_summaries",    "list saved summaries"),
+        ("List canon items",         "list_canon_items",         "important project elements"),
+        ("Developer patterns",       "get_developer_patterns",   "coding patterns"),
+    ],
+    "setup": [
+        ("Project stats",            "get_project_stats",        "files, languages, size"),
+        ("Active project",           "get_active_project",       "current project info"),
+    ],
+    "help": [
+        ("help",                     "brain_help",               "show this help"),
+    ],
+}
+
+_BRAIN_HELP_HEADERS: Dict[str, str] = {
+    "files":     "📁 FILES & INDEXING",
+    "search":    "🔍 SEARCH & CONTEXT",
+    "analytics": "📊 ANALYTICS",
+    "memory":    "💾 MEMORY",
+    "setup":     "⚙️ PROJECT",
+    "help":      "❓ HELP",
+}
+
+
+def _format_brain_help(category: str) -> str:
+    cat = (category or "all").strip().lower()
+    if cat not in _BRAIN_HELP_SECTIONS and cat != "all":
+        valid = ", ".join(["all", *_BRAIN_HELP_SECTIONS.keys()])
+        return f"Unknown category '{category}'. Valid: {valid}"
+
+    sections = list(_BRAIN_HELP_SECTIONS.keys()) if cat == "all" else [cat]
+
+    # Compute column widths once across all rows so columns align.
+    rows = [r for s in sections for r in _BRAIN_HELP_SECTIONS[s]]
+    phrase_w = max((len(r[0]) for r in rows), default=0)
+    tool_w = max((len(r[1]) for r in rows), default=0)
+
+    lines: List[str] = []
+    if cat == "all":
+        lines.append("Brain MCP — available commands")
+        lines.append("=" * 60)
+        lines.append("")
+
+    for i, sec in enumerate(sections):
+        if i > 0:
+            lines.append("")
+        lines.append(_BRAIN_HELP_HEADERS[sec] + ":")
+        for phrase, tool, desc in _BRAIN_HELP_SECTIONS[sec]:
+            lines.append(f"  • {phrase.ljust(phrase_w)}  →  {tool.ljust(tool_w)}  — {desc}")
+
+    if cat == "all":
+        lines.append("")
+        lines.append("Tip: call brain_help(category='analytics') for one section only.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def brain_help(category: str = "all") -> str:
+    """
+    Show available Brain MCP commands grouped by category.
+
+    Args:
+        category: One of "all" (default), "files", "search", "analytics",
+            "memory", "setup", or "help". Filters which section is shown.
+    """
+    return _format_brain_help(category)
+
+
 __all__ = ["mcp"]

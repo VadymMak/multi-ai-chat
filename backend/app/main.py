@@ -50,6 +50,14 @@ async def lifespan(app: FastAPI):
         # Create superuser on startup if configured
         await create_superuser()
 
+        # 📊 Usage analytics tables migration
+        try:
+            from migrations.add_usage_analytics import run_migration as run_usage_analytics_migration
+            run_usage_analytics_migration()
+            logger.info("✅ Migration: usage analytics tables")
+        except Exception as e:
+            logger.info(f"ℹ️ Usage analytics migration skipped: {e}")
+
         # 🌱 Seed database with default data
         try:
             from app.seed import run_seed
@@ -204,6 +212,7 @@ from app.routers import (  # noqa: E402
     prediction,
     pattern_analyzer,
     memory,
+    usage_analytics,
 )
 
 # Optional routers
@@ -250,6 +259,7 @@ app.include_router(webhooks.router, prefix="/api")
 app.include_router(prediction.router, prefix="/api")
 app.include_router(pattern_analyzer.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
+app.include_router(usage_analytics.router, prefix="/api")
 
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
