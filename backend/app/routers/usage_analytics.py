@@ -8,9 +8,11 @@ Endpoints surface the data populated by `claude_usage_parser.py` into
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import psycopg2
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -404,13 +406,107 @@ def sync_usage_logs(
                 payload.records[0].model_dump_json(),
             )
 
-        db.rollback()  # ensure clean state before starting the per-record loop
-        try:
-            insert_result = mod.insert_records(db, records)
-        except Exception:
-            logger.exception("insert_records failed during /usage/sync upload")
-            raise HTTPException(500, "insert_records failed; see server logs")
+        # Bypass the SQLAlchemy session entirely — open a raw psycopg2
+        # connection so a poisoned outer transaction on `db` can't break the
+        # per-record loop. We commit once at the end; per-record failures
+        # rollback the connection (losing any uncommitted work in the same
+        # batch, which is fine since message_id dedup makes retry idempotent).
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            raise HTTPException(500, "DATABASE_URL not configured")
+        # psycopg2 doesn't accept SQLAlchemy dialect prefixes like postgresql+psycopg2://
+        if db_url.startswith("postgresql+"):
+            db_url = "postgresql://" + db_url.split("://", 1)[1]
 
+        inserted = 0
+        skipped = 0
+        first_error_logged = False
+        conn = None
+        try:
+            conn = psycopg2.connect(db_url)
+            conn.autocommit = False
+            cur = conn.cursor()
+            insert_sql = """
+                INSERT INTO claude_usage_logs (
+                    session_id, message_id, request_id, timestamp, model,
+                    project_id, project_path, project_name,
+                    input_tokens, output_tokens, cache_creation_tokens,
+                    cache_read_tokens, total_tokens,
+                    cost_usd, cost_without_cache_usd, cache_savings_usd,
+                    used_brain_context, brain_tools_called,
+                    had_retry, raw_jsonl_path
+                ) VALUES (
+                    %(session_id)s, %(message_id)s, %(request_id)s, %(timestamp)s, %(model)s,
+                    (SELECT id FROM projects
+                       WHERE local_path = %(project_path)s
+                          OR name = %(project_name_lookup)s
+                       LIMIT 1),
+                    %(project_path)s, %(project_name)s,
+                    %(input_tokens)s, %(output_tokens)s, %(cache_creation_tokens)s,
+                    %(cache_read_tokens)s, %(total_tokens)s,
+                    %(cost_usd)s, %(cost_without_cache_usd)s, %(cache_savings_usd)s,
+                    %(used_brain_context)s, %(brain_tools_called)s,
+                    %(had_retry)s, %(raw_jsonl_path)s
+                )
+                ON CONFLICT (message_id) DO NOTHING
+                RETURNING id
+            """
+            for rec in records:
+                params = {
+                    "session_id": rec.session_id,
+                    "message_id": rec.message_id,
+                    "request_id": rec.request_id,
+                    "timestamp": rec.timestamp,
+                    "model": rec.model,
+                    "project_path": rec.project_path,
+                    "project_name": rec.project_name,
+                    "project_name_lookup": (
+                        rec.project_path.rstrip("/").split("/")[-1]
+                        if rec.project_path else None
+                    ),
+                    "input_tokens": rec.input_tokens,
+                    "output_tokens": rec.output_tokens,
+                    "cache_creation_tokens": rec.cache_creation_tokens,
+                    "cache_read_tokens": rec.cache_read_tokens,
+                    "total_tokens": rec.total_tokens,
+                    "cost_usd": rec.cost_usd,
+                    "cost_without_cache_usd": rec.cost_without_cache_usd,
+                    "cache_savings_usd": rec.cache_savings_usd,
+                    "used_brain_context": rec.used_brain_context,
+                    "brain_tools_called": list(rec.brain_tools_called or []),
+                    "had_retry": rec.had_retry,
+                    "raw_jsonl_path": rec.raw_jsonl_path,
+                }
+                try:
+                    cur.execute(insert_sql, params)
+                    if cur.fetchone():
+                        inserted += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    conn.rollback()
+                    skipped += 1
+                    if not first_error_logged:
+                        logger.exception(
+                            "psycopg2 insert failed for message_id=%s",
+                            rec.message_id,
+                        )
+                        first_error_logged = True
+            conn.commit()
+            cur.close()
+        except Exception:
+            logger.exception("psycopg2 upload path failed")
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise HTTPException(500, "upload failed; see server logs")
+        finally:
+            if conn is not None:
+                conn.close()
+
+        insert_result = {"inserted": inserted, "skipped": skipped}
         daily_rows = mod.aggregate_daily(db)
         total_cost = sum(float(r.cost_usd or 0.0) for r in payload.records)
 
