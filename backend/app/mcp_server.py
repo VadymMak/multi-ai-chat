@@ -1518,7 +1518,7 @@ async def sync_usage_logs(
             ensure_ascii=False,
         )
     except Exception as exc:
-        logger.error("sync_usage_logs error: %s", exc)
+        logger.exception("sync_usage_logs error:")
         return json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
     finally:
         db.close()
