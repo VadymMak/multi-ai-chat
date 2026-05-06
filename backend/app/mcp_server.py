@@ -1202,4 +1202,227 @@ async def get_index_status(project_id: int) -> str:
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool 19 — get_usage_stats
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_usage_stats(project_id: int, days: int = 30) -> str:
+    """
+    Get Claude Code usage stats for a project.
+
+    Returns total requests, token counts, cost in USD, cache savings,
+    and how many requests used Brain context, over the last `days`.
+
+    Args:
+        project_id: ID of the project.
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        totals = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS req,
+                    COALESCE(SUM(input_tokens), 0)         AS in_t,
+                    COALESCE(SUM(output_tokens), 0)        AS out_t,
+                    COALESCE(SUM(cache_creation_tokens),0) AS cc_t,
+                    COALESCE(SUM(cache_read_tokens), 0)    AS cr_t,
+                    COALESCE(SUM(total_tokens), 0)         AS tot_t,
+                    COALESCE(SUM(cost_usd), 0)             AS cost,
+                    COALESCE(SUM(cache_savings_usd), 0)    AS savings,
+                    COALESCE(SUM(CASE WHEN used_brain_context THEN 1 ELSE 0 END), 0) AS brain_req
+                FROM claude_usage_logs
+                WHERE project_id = :project_id AND timestamp >= :since
+            """),
+            {"project_id": project_id, "since": since},
+        ).fetchone()
+
+        rows = db.execute(
+            text("""
+                SELECT model,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost
+                FROM claude_usage_logs
+                WHERE project_id = :project_id AND timestamp >= :since
+                GROUP BY model
+                ORDER BY cost DESC
+            """),
+            {"project_id": project_id, "since": since},
+        ).fetchall()
+
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "days": days,
+                "request_count": int(totals.req or 0),
+                "input_tokens": int(totals.in_t or 0),
+                "output_tokens": int(totals.out_t or 0),
+                "cache_creation_tokens": int(totals.cc_t or 0),
+                "cache_read_tokens": int(totals.cr_t or 0),
+                "total_tokens": int(totals.tot_t or 0),
+                "cost_usd": round(float(totals.cost or 0.0), 4),
+                "cache_savings_usd": round(float(totals.savings or 0.0), 4),
+                "brain_assisted_requests": int(totals.brain_req or 0),
+                "by_model": [
+                    {
+                        "model": r.model,
+                        "requests": int(r.req or 0),
+                        "cost_usd": round(float(r.cost or 0.0), 4),
+                    }
+                    for r in rows
+                ],
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_usage_stats error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 20 — get_total_cost
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_total_cost(days: int = 30) -> str:
+    """
+    Total Claude Code cost across all projects over the last `days`.
+
+    Args:
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        totals = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS req,
+                    COALESCE(SUM(total_tokens), 0) AS tot_t,
+                    COALESCE(SUM(cost_usd), 0)     AS cost,
+                    COALESCE(SUM(cache_savings_usd), 0) AS savings
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since},
+        ).fetchone()
+
+        per_project = db.execute(
+            text("""
+                SELECT project_id, project_name,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+                GROUP BY project_id, project_name
+                ORDER BY cost DESC
+                LIMIT 20
+            """),
+            {"since": since},
+        ).fetchall()
+
+        return json.dumps(
+            {
+                "days": days,
+                "total_requests": int(totals.req or 0),
+                "total_tokens": int(totals.tot_t or 0),
+                "total_cost_usd": round(float(totals.cost or 0.0), 4),
+                "total_cache_savings_usd": round(float(totals.savings or 0.0), 4),
+                "top_projects": [
+                    {
+                        "project_id": r.project_id,
+                        "project_name": r.project_name,
+                        "requests": int(r.req or 0),
+                        "cost_usd": round(float(r.cost or 0.0), 4),
+                    }
+                    for r in per_project
+                ],
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_total_cost error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 21 — get_cache_efficiency
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_cache_efficiency(days: int = 30) -> str:
+    """
+    How much prompt caching has saved over the last `days`.
+
+    Returns the cache hit ratio (cache_read_tokens / all input-side tokens),
+    total cache savings in USD, and what total cost would have been without
+    caching.
+
+    Args:
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        row = db.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM(input_tokens), 0)         AS in_t,
+                    COALESCE(SUM(cache_creation_tokens),0) AS cc_t,
+                    COALESCE(SUM(cache_read_tokens), 0)    AS cr_t,
+                    COALESCE(SUM(cost_usd), 0)             AS cost,
+                    COALESCE(SUM(cost_without_cache_usd),0) AS cost_no_cache,
+                    COALESCE(SUM(cache_savings_usd), 0)    AS savings
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since},
+        ).fetchone()
+
+        in_t = int(row.in_t or 0)
+        cc_t = int(row.cc_t or 0)
+        cr_t = int(row.cr_t or 0)
+        denom = in_t + cc_t + cr_t
+        hit_ratio = (cr_t / denom) if denom else 0.0
+        cost = float(row.cost or 0.0)
+        cost_no_cache = float(row.cost_no_cache or 0.0)
+        savings = float(row.savings or 0.0)
+        savings_pct = (savings / cost_no_cache * 100.0) if cost_no_cache else 0.0
+
+        return json.dumps(
+            {
+                "days": days,
+                "input_tokens": in_t,
+                "cache_creation_tokens": cc_t,
+                "cache_read_tokens": cr_t,
+                "cache_hit_ratio": round(hit_ratio, 4),
+                "actual_cost_usd": round(cost, 4),
+                "cost_without_cache_usd": round(cost_no_cache, 4),
+                "savings_usd": round(savings, 4),
+                "savings_pct": round(savings_pct, 2),
+            },
+            default=str,
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("get_cache_efficiency error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
 __all__ = ["mcp"]
