@@ -1838,7 +1838,149 @@ async def sync_projects_to_claude_md() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool 25 — brain_help
+# Tool 25 — setup_local_sync
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def setup_local_sync(
+    scripts_dir: Optional[str] = None,
+    python_path: Optional[str] = None,
+) -> str:
+    """
+    Set up hourly automated sync tasks on the local machine.
+
+    Creates two recurring tasks:
+      • BrainSync     — uploads Claude Code usage logs to Railway
+      • BrainUpdateMD — refreshes the projects table in ~/.claude/CLAUDE.md
+
+    On macOS: adds crontab entries (runs every hour at :00).
+    On Windows: registers Task Scheduler tasks via PowerShell.
+    On Linux/server: returns ready-to-paste commands for the user to run locally.
+
+    Args:
+        scripts_dir: Absolute path to backend/scripts/. Auto-detected from
+            this file's location if omitted.
+        python_path: Python executable to use in the tasks. Defaults to the
+            interpreter that is currently running this code.
+    """
+    import platform
+    import subprocess
+    import sys
+
+    system = platform.system()  # "Darwin", "Windows", "Linux"
+
+    # ── Resolve paths ────────────────────────────────────────────
+    py = python_path or sys.executable
+    scripts_root = Path(scripts_dir).resolve() if scripts_dir else (
+        Path(__file__).resolve().parent.parent / "scripts"
+    )
+    upload_script = str(scripts_root / "upload_usage_to_railway.py")
+    update_md_script = str(scripts_root / "update_claude_md.py")
+
+    # ── macOS — crontab ──────────────────────────────────────────
+    if system == "Darwin":
+        brain_sync_entry = f"0 * * * * {py} {upload_script}"
+        update_md_entry  = f"0 * * * * {py} {update_md_script}"
+
+        try:
+            result = subprocess.run(
+                ["crontab", "-l"], capture_output=True, text=True
+            )
+            existing = result.stdout if result.returncode == 0 else ""
+        except Exception as exc:
+            return f"ERROR reading crontab: {exc}"
+
+        added: list[str] = []
+        new_crontab = existing.rstrip("\n")
+        for entry, label in [
+            (brain_sync_entry, "BrainSync"),
+            (update_md_entry,  "BrainUpdateMD"),
+        ]:
+            if entry not in existing:
+                new_crontab += f"\n{entry}"
+                added.append(label)
+
+        if not added:
+            return (
+                "✅ Both cron jobs already exist:\n"
+                f"  {brain_sync_entry}\n"
+                f"  {update_md_entry}"
+            )
+
+        try:
+            subprocess.run(
+                ["crontab", "-"],
+                input=new_crontab + "\n",
+                text=True,
+                check=True,
+            )
+        except Exception as exc:
+            return f"ERROR writing crontab: {exc}"
+
+        return (
+            f"✅ Added {len(added)} cron job(s) on macOS:\n"
+            + "\n".join(
+                f"  {'BrainSync' if 'upload' in e else 'BrainUpdateMD'}: {e}"
+                for e in [brain_sync_entry, update_md_entry]
+                if any(label in added for label in ["BrainSync", "BrainUpdateMD"])
+            )
+            + "\n\nRuns every hour. Verify with: crontab -l"
+        )
+
+    # ── Windows — Task Scheduler via PowerShell ──────────────────
+    if system == "Windows":
+        results: list[str] = []
+        tasks = [
+            ("BrainSync",     upload_script),
+            ("BrainUpdateMD", update_md_script),
+        ]
+        for task_name, script_path in tasks:
+            ps_cmd = (
+                f'$a = New-ScheduledTaskAction -Execute "{py}" -Argument "{script_path}"; '
+                f'$t = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Hours 1) '
+                f'-Once -At "00:00"; '
+                f'Register-ScheduledTask -TaskName "{task_name}" -Action $a -Trigger $t '
+                f'-RunLevel Highest -Force'
+            )
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True,
+                )
+                if proc.returncode == 0:
+                    results.append(f"✅ {task_name}: registered")
+                else:
+                    results.append(f"❌ {task_name}: {proc.stderr.strip()}")
+            except Exception as exc:
+                results.append(f"❌ {task_name}: {exc}")
+
+        return "Task Scheduler setup (Windows):\n" + "\n".join(results)
+
+    # ── Linux / Railway server — return instructions ──────────────
+    cron_lines = [
+        f"0 * * * * {py} {upload_script}",
+        f"0 * * * * {py} {update_md_script}",
+    ]
+    return (
+        "ℹ️  Running on Linux/server — cannot modify local machine crontab.\n\n"
+        "Run these commands on YOUR local machine:\n\n"
+        "# 1. Open your crontab:\n"
+        "crontab -e\n\n"
+        "# 2. Add these two lines:\n"
+        + "\n".join(cron_lines)
+        + "\n\n"
+        "# Or on Windows, open PowerShell as Admin and run:\n"
+        + "\n".join(
+            f'Register-ScheduledTask -TaskName "{name}" '
+            f'-Action (New-ScheduledTaskAction -Execute "python" -Argument "{script}") '
+            f'-Trigger (New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Hours 1) -Once -At "00:00") '
+            f'-Force'
+            for name, script in [("BrainSync", upload_script), ("BrainUpdateMD", update_md_script)]
+        )
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 26 — brain_help
 # ─────────────────────────────────────────────────────────────────
 _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     "files": [
@@ -1859,6 +2001,7 @@ _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
         ("Show usage report",        "get_usage_stats",          "cost, tokens, brain usage %"),
         ("Total cost",               "get_total_cost",           "spending summary"),
         ("Cache efficiency",         "get_cache_efficiency",     "cache hit rate and savings"),
+        ("Setup local auto-sync",    "setup_local_sync",         "add hourly cron/Task Scheduler jobs for BrainSync + BrainUpdateMD"),
     ],
     "memory": [
         ("Save session summary",     "save_session_summary",     "save current session"),
