@@ -113,6 +113,23 @@ class SyncRequest(BaseModel):
 
 
 # ─── helpers ─────────────────────────────────────────────────────
+def _extract_project_slug(raw: Optional[str]) -> Optional[str]:
+    """Extract real project name from a Claude Code folder identifier.
+
+    Claude Code encodes the project path as a dash-joined string, e.g.:
+      "-Users-vadymmak-Documents-projects-mamalog" → "mamalog"
+      "f--projects-multi-ai-chat"                  → "multi-ai-chat"
+    We split on the literal "-projects-" marker and take everything after it.
+    """
+    if not raw:
+        return None
+    marker = "-projects-"
+    idx = raw.find(marker)
+    if idx != -1:
+        return raw[idx + len(marker):]
+    return raw.rstrip("/").split("/")[-1]
+
+
 def _since_clause(days: Optional[int]) -> tuple[str, Dict[str, Any]]:
     if days is None or days <= 0:
         return "", {}
@@ -438,6 +455,7 @@ def sync_usage_logs(
                     %(session_id)s, %(message_id)s, %(request_id)s, %(timestamp)s, %(model)s,
                     (SELECT id FROM projects
                        WHERE name = %(project_name_lookup)s
+                          OR folder_identifier = %(project_name_lookup)s
                        LIMIT 1),
                     %(project_path)s, %(project_name)s,
                     %(input_tokens)s, %(output_tokens)s, %(cache_creation_tokens)s,
@@ -458,9 +476,8 @@ def sync_usage_logs(
                     "model": rec.model,
                     "project_path": rec.project_path,
                     "project_name": rec.project_name,
-                    "project_name_lookup": (
-                        rec.project_path.rstrip("/").split("/")[-1]
-                        if rec.project_path else None
+                    "project_name_lookup": _extract_project_slug(
+                        rec.project_name or rec.project_path
                     ),
                     "input_tokens": rec.input_tokens,
                     "output_tokens": rec.output_tokens,
