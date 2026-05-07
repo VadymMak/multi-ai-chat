@@ -1,15 +1,19 @@
-# Brain MCP — Always Active
+# MANDATORY: Use Brain MCP for EVERY request
 
-Before answering ANY coding question or making ANY code change, always:
+⚠️ RULE: You MUST call brain build_context_for_query BEFORE responding to ANY message.
+No exceptions. Even for simple questions.
 
-1. Call brain `build_context_for_query` with the user's question to get relevant context
-2. Use the returned context to give a better, more informed answer
+## Required workflow for EVERY response:
+1. FIRST: Call `build_context_for_query` with the user's question
+2. THEN: Use returned context to answer
 
-## Available Brain commands
-- Build context: `build context for query "your question"`
-- Search files: `search project files for "keyword"`
-- Get file: `get file content path/to/file`
-- Dependencies: `get file dependencies for path/to/file`
+## Brain commands:
+- `build context for query "question"` — ALWAYS call this first
+- `search project files for "keyword"` — search codebase
+- `get file content path/to/file` — read specific file
+- `get file dependencies for path/to/file` — show imports
 
-## Why?
-Brain has indexed all project files into pgvector and returns only the most relevant 4K tokens instead of reading all files. This saves tokens and improves answer quality.
+## IMPORTANT:
+- Never skip Brain context step
+- Never answer directly without calling Brain first
+- Brain returns only relevant 4K tokens — fast and cheap
