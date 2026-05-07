@@ -1528,10 +1528,151 @@ async def sync_usage_logs(
 
 # ─────────────────────────────────────────────────────────────────
 # Tool 23 — upload_local_usage
+#
+# Self-contained: reads ~/.claude/projects/*.jsonl on the local machine,
+# parses assistant turns inline (no dependency on backend/scripts/), and
+# POSTs records to /api/usage/sync on Railway. Designed to run in a Claude
+# Code MCP context where this file is loaded but the broader backend is not.
 # ─────────────────────────────────────────────────────────────────
 DEFAULT_USAGE_SYNC_URL = (
     "https://multi-ai-chat-production.up.railway.app/api/usage/sync"
 )
+
+# Pricing in USD per token, mirroring backend/scripts/claude_usage_parser.py.
+_USAGE_PRICING = {
+    "opus":   {"input": 15.00 / 1_000_000, "output": 75.00 / 1_000_000},
+    "sonnet": {"input":  3.00 / 1_000_000, "output": 15.00 / 1_000_000},
+    "haiku":  {"input":  0.25 / 1_000_000, "output":  1.25 / 1_000_000},
+}
+_CACHE_READ_DISCOUNT = 0.10
+_CACHE_WRITE_PREMIUM = 1.25
+
+_BRAIN_TOOL_NAMES = {
+    "search_project_files", "get_file_content", "hybrid_search_files",
+    "build_context_for_query", "get_active_project", "get_project_stats",
+    "get_index_status", "get_developer_patterns", "get_file_dependencies",
+    "get_file_versions", "list_canon_items", "save_session_summary",
+    "get_session_summaries", "search_session_memory",
+    "search_conversation_memory", "ensure_project_indexed",
+    "create_project_with_index", "index_local_project",
+    "upload_local_usage",
+}
+
+
+def _detect_model_family(model: str) -> str:
+    m = (model or "").lower()
+    if "opus" in m:
+        return "opus"
+    if "sonnet" in m:
+        return "sonnet"
+    if "haiku" in m:
+        return "haiku"
+    return "sonnet"
+
+
+def _calc_usage_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation: int,
+    cache_read: int,
+) -> tuple:
+    p = _USAGE_PRICING[_detect_model_family(model)]
+    in_price, out_price = p["input"], p["output"]
+    actual = (
+        input_tokens * in_price
+        + output_tokens * out_price
+        + cache_creation * in_price * _CACHE_WRITE_PREMIUM
+        + cache_read * in_price * _CACHE_READ_DISCOUNT
+    )
+    no_cache = (
+        (input_tokens + cache_creation + cache_read) * in_price
+        + output_tokens * out_price
+    )
+    return actual, no_cache, max(0.0, no_cache - actual)
+
+
+def _parse_jsonl_for_usage(
+    path: Path,
+    since_date,
+) -> List[Dict[str, Any]]:
+    """Parse one JSONL file, returning records as POST-ready dicts."""
+    encoded = path.parent.name
+    decoded = encoded.replace("--", "/").replace("-", "/")
+    out: List[Dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                msg = obj.get("message") or {}
+                usage = msg.get("usage") or {}
+                if not usage:
+                    continue
+
+                model = msg.get("model") or obj.get("model") or "unknown"
+                input_tokens = int(usage.get("input_tokens") or 0)
+                output_tokens = int(usage.get("output_tokens") or 0)
+                cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+                cache_read = int(usage.get("cache_read_input_tokens") or 0)
+                if input_tokens + output_tokens + cache_creation + cache_read == 0:
+                    continue
+
+                ts_raw = obj.get("timestamp") or msg.get("created_at")
+                try:
+                    ts = (datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                          if ts_raw else datetime.now(timezone.utc))
+                except Exception:
+                    ts = datetime.now(timezone.utc)
+
+                if since_date and ts.date() < since_date:
+                    continue
+
+                brain_tools: List[str] = []
+                content = msg.get("content") or []
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = (block.get("name") or "").split("__")[-1]
+                            if name in _BRAIN_TOOL_NAMES:
+                                brain_tools.append(name)
+
+                actual, no_cache, savings = _calc_usage_cost(
+                    model, input_tokens, output_tokens, cache_creation, cache_read,
+                )
+
+                out.append({
+                    "session_id": obj.get("sessionId") or obj.get("session_id"),
+                    "message_id": msg.get("id"),
+                    "request_id": obj.get("requestId") or obj.get("request_id"),
+                    "timestamp": ts.isoformat(),
+                    "model": model,
+                    "project_path": decoded,
+                    "project_name": encoded,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_creation_tokens": cache_creation,
+                    "cache_read_tokens": cache_read,
+                    "total_tokens": (input_tokens + output_tokens
+                                     + cache_creation + cache_read),
+                    "cost_usd": actual,
+                    "cost_without_cache_usd": no_cache,
+                    "cache_savings_usd": savings,
+                    "used_brain_context": bool(brain_tools),
+                    "brain_tools_called": brain_tools,
+                    "had_retry": bool(obj.get("isApiErrorMessage")),
+                    "raw_jsonl_path": str(path),
+                })
+    except Exception as exc:
+        logger.warning("upload_local_usage: failed to parse %s: %s", path, exc)
+    return out
 
 
 @mcp.tool()
@@ -1541,13 +1682,13 @@ async def upload_local_usage(since_days: int = 30) -> str:
 
     Reads JSONL files from ~/.claude/projects/ on the local filesystem (where
     Claude Code stores its conversation logs), parses assistant turns that
-    carry a `usage` block, applies Claude 4.x pricing, and POSTs the parsed
-    records to /api/usage/sync.
+    carry a `usage` block inline, applies Claude 4.x pricing, and POSTs the
+    records to /api/usage/sync on Railway in batches of 50.
 
-    Use this when the MCP server runs in the cloud and can't see the local
-    JSONL files — this tool runs the parser in the calling process and ships
-    records over HTTP. The sync URL and bearer token can be overridden via
-    USAGE_SYNC_URL / USAGE_SYNC_TOKEN env vars.
+    Self-contained: does not import claude_usage_parser, so it works when the
+    MCP tool runs in a Claude Code context that doesn't have the backend repo
+    on disk. Override the destination with USAGE_SYNC_URL / USAGE_SYNC_TOKEN
+    env vars.
 
     Args:
         since_days: Only upload records from the last N days (default 30,
@@ -1556,7 +1697,7 @@ async def upload_local_usage(since_days: int = 30) -> str:
     Returns a JSON summary: files_scanned, records_found, inserted, skipped,
     total_cost_usd.
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     since_days = max(1, min(int(since_days), 365))
     since_date = datetime.utcnow().date() - timedelta(days=since_days)
@@ -1564,25 +1705,32 @@ async def upload_local_usage(since_days: int = 30) -> str:
     sync_url = os.getenv("USAGE_SYNC_URL", DEFAULT_USAGE_SYNC_URL)
     token = os.getenv("USAGE_SYNC_TOKEN", _INTERNAL_TOKEN)
 
-    try:
-        parser = _load_usage_parser()
-    except Exception as exc:
-        logger.error("upload_local_usage: parser load failed: %s", exc)
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
-
-    root = parser.default_claude_root()
+    root = Path.home() / ".claude" / "projects"
+    if not root.exists():
+        return json.dumps(
+            {
+                "error": f"Claude Code logs directory not found: {root}",
+                "files_scanned": 0,
+                "records_found": 0,
+                "inserted": 0,
+                "skipped": 0,
+                "total_cost_usd": 0.0,
+            },
+            ensure_ascii=False,
+        )
 
     files_scanned = 0
-    all_records: List[Any] = []
-    for jsonl in parser.iter_jsonl_files(root):
-        files_scanned += 1
-        recs = parser.parse_jsonl_file(jsonl)
-        recs = [r for r in recs if r.timestamp.date() >= since_date]
-        all_records.extend(recs)
+    payloads: List[Dict[str, Any]] = []
+    for project_dir in sorted(root.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        for jsonl in sorted(project_dir.glob("*.jsonl")):
+            files_scanned += 1
+            payloads.extend(_parse_jsonl_for_usage(jsonl, since_date))
 
-    total_cost = sum(float(r.cost_usd or 0.0) for r in all_records)
+    total_cost = sum(float(p.get("cost_usd") or 0.0) for p in payloads)
 
-    if not all_records:
+    if not payloads:
         return json.dumps(
             {
                 "files_scanned": files_scanned,
@@ -1595,30 +1743,6 @@ async def upload_local_usage(since_days: int = 30) -> str:
             },
             ensure_ascii=False,
         )
-
-    payloads: List[Dict[str, Any]] = []
-    for r in all_records:
-        payloads.append({
-            "session_id": r.session_id,
-            "message_id": r.message_id,
-            "request_id": r.request_id,
-            "timestamp": r.timestamp.isoformat(),
-            "model": r.model,
-            "project_path": r.project_path,
-            "project_name": r.project_name,
-            "input_tokens": r.input_tokens,
-            "output_tokens": r.output_tokens,
-            "cache_creation_tokens": r.cache_creation_tokens,
-            "cache_read_tokens": r.cache_read_tokens,
-            "total_tokens": r.total_tokens,
-            "cost_usd": r.cost_usd,
-            "cost_without_cache_usd": r.cost_without_cache_usd,
-            "cache_savings_usd": r.cache_savings_usd,
-            "used_brain_context": r.used_brain_context,
-            "brain_tools_called": list(r.brain_tools_called or []),
-            "had_retry": r.had_retry,
-            "raw_jsonl_path": r.raw_jsonl_path,
-        })
 
     inserted = 0
     skipped = 0
@@ -1645,7 +1769,7 @@ async def upload_local_usage(since_days: int = 30) -> str:
             {
                 "error": str(exc),
                 "files_scanned": files_scanned,
-                "records_found": len(all_records),
+                "records_found": len(payloads),
                 "inserted": inserted,
                 "skipped": skipped,
                 "total_cost_usd": round(total_cost, 4),
@@ -1657,7 +1781,7 @@ async def upload_local_usage(since_days: int = 30) -> str:
     return json.dumps(
         {
             "files_scanned": files_scanned,
-            "records_found": len(all_records),
+            "records_found": len(payloads),
             "inserted": inserted,
             "skipped": skipped,
             "total_cost_usd": round(total_cost, 4),
