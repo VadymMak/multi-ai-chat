@@ -1795,7 +1795,50 @@ async def upload_local_usage(since_days: int = 30) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool 24 — brain_help
+# Tool 24 — sync_projects_to_claude_md
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def sync_projects_to_claude_md() -> str:
+    """
+    Fetch all projects from DB and return a formatted markdown table
+    ready to paste into ~/.claude/CLAUDE.md.
+
+    Use this to keep the projects table in your global CLAUDE.md up to date.
+    Copy the returned table and replace the ## 👤 Мои проекты section.
+    """
+    db = _open_db()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT id, name, description, files_count
+                FROM projects
+                ORDER BY id
+            """),
+        ).fetchall()
+
+        lines = [
+            "| id | Название | Описание | Файлов |",
+            "|----|----------|----------|--------|",
+        ]
+        for r in rows:
+            desc = (r.description or "").replace("|", "\\|").strip()
+            lines.append(f"| {r.id} | {r.name} | {desc} | {r.files_count or 0} |")
+
+        table = "\n".join(lines)
+        hint = (
+            "\n\nPaste this table under ## 👤 Мои проекты in ~/.claude/CLAUDE.md\n"
+            "Or run: python backend/scripts/update_claude_md.py"
+        )
+        return table + hint
+    except Exception as exc:
+        logger.error("sync_projects_to_claude_md error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 25 — brain_help
 # ─────────────────────────────────────────────────────────────────
 _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     "files": [
@@ -1824,8 +1867,9 @@ _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
         ("Developer patterns",       "get_developer_patterns",   "coding patterns"),
     ],
     "setup": [
-        ("Project stats",            "get_project_stats",        "files, languages, size"),
-        ("Active project",           "get_active_project",       "current project info"),
+        ("Project stats",            "get_project_stats",          "files, languages, size"),
+        ("Active project",           "get_active_project",         "current project info"),
+        ("Sync projects to CLAUDE.md", "sync_projects_to_claude_md", "get updated projects table for ~/.claude/CLAUDE.md"),
     ],
     "help": [
         ("help",                     "brain_help",               "show this help"),
