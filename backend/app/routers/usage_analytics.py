@@ -407,10 +407,9 @@ def sync_usage_logs(
             )
 
         # Bypass the SQLAlchemy session entirely — open a raw psycopg2
-        # connection so a poisoned outer transaction on `db` can't break the
-        # per-record loop. We commit once at the end; per-record failures
-        # rollback the connection (losing any uncommitted work in the same
-        # batch, which is fine since message_id dedup makes retry idempotent).
+        # connection in autocommit mode so each INSERT runs in its own
+        # transaction. A bad row fails on its own without poisoning the
+        # connection, so no manual rollback is needed inside the loop.
         db_url = os.environ.get("DATABASE_URL")
         if not db_url:
             raise HTTPException(500, "DATABASE_URL not configured")
@@ -424,7 +423,7 @@ def sync_usage_logs(
         conn = None
         try:
             conn = psycopg2.connect(db_url)
-            conn.autocommit = False
+            conn.autocommit = True  # each INSERT is independent
             cur = conn.cursor()
             insert_sql = """
                 INSERT INTO claude_usage_logs (
@@ -483,7 +482,8 @@ def sync_usage_logs(
                     else:
                         skipped += 1
                 except Exception:
-                    conn.rollback()
+                    # autocommit=True means the failed statement does NOT
+                    # poison the connection — just count and move on.
                     skipped += 1
                     if not first_error_logged:
                         logger.exception(
@@ -491,15 +491,9 @@ def sync_usage_logs(
                             rec.message_id,
                         )
                         first_error_logged = True
-            conn.commit()
             cur.close()
         except Exception:
             logger.exception("psycopg2 upload path failed")
-            if conn is not None:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
             raise HTTPException(500, "upload failed; see server logs")
         finally:
             if conn is not None:
