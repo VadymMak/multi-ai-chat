@@ -1527,7 +1527,151 @@ async def sync_usage_logs(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool 23 — brain_help
+# Tool 23 — upload_local_usage
+# ─────────────────────────────────────────────────────────────────
+DEFAULT_USAGE_SYNC_URL = (
+    "https://multi-ai-chat-production.up.railway.app/api/usage/sync"
+)
+
+
+@mcp.tool()
+async def upload_local_usage(since_days: int = 30) -> str:
+    """
+    Upload Claude Code usage logs from THIS machine to the Railway backend.
+
+    Reads JSONL files from ~/.claude/projects/ on the local filesystem (where
+    Claude Code stores its conversation logs), parses assistant turns that
+    carry a `usage` block, applies Claude 4.x pricing, and POSTs the parsed
+    records to /api/usage/sync.
+
+    Use this when the MCP server runs in the cloud and can't see the local
+    JSONL files — this tool runs the parser in the calling process and ships
+    records over HTTP. The sync URL and bearer token can be overridden via
+    USAGE_SYNC_URL / USAGE_SYNC_TOKEN env vars.
+
+    Args:
+        since_days: Only upload records from the last N days (default 30,
+            max 365).
+
+    Returns a JSON summary: files_scanned, records_found, inserted, skipped,
+    total_cost_usd.
+    """
+    from datetime import datetime, timedelta
+
+    since_days = max(1, min(int(since_days), 365))
+    since_date = datetime.utcnow().date() - timedelta(days=since_days)
+
+    sync_url = os.getenv("USAGE_SYNC_URL", DEFAULT_USAGE_SYNC_URL)
+    token = os.getenv("USAGE_SYNC_TOKEN", _INTERNAL_TOKEN)
+
+    try:
+        parser = _load_usage_parser()
+    except Exception as exc:
+        logger.error("upload_local_usage: parser load failed: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    root = parser.default_claude_root()
+
+    files_scanned = 0
+    all_records: List[Any] = []
+    for jsonl in parser.iter_jsonl_files(root):
+        files_scanned += 1
+        recs = parser.parse_jsonl_file(jsonl)
+        recs = [r for r in recs if r.timestamp.date() >= since_date]
+        all_records.extend(recs)
+
+    total_cost = sum(float(r.cost_usd or 0.0) for r in all_records)
+
+    if not all_records:
+        return json.dumps(
+            {
+                "files_scanned": files_scanned,
+                "records_found": 0,
+                "inserted": 0,
+                "skipped": 0,
+                "total_cost_usd": 0.0,
+                "root": str(root),
+                "since_days": since_days,
+            },
+            ensure_ascii=False,
+        )
+
+    payloads: List[Dict[str, Any]] = []
+    for r in all_records:
+        payloads.append({
+            "session_id": r.session_id,
+            "message_id": r.message_id,
+            "request_id": r.request_id,
+            "timestamp": r.timestamp.isoformat(),
+            "model": r.model,
+            "project_path": r.project_path,
+            "project_name": r.project_name,
+            "input_tokens": r.input_tokens,
+            "output_tokens": r.output_tokens,
+            "cache_creation_tokens": r.cache_creation_tokens,
+            "cache_read_tokens": r.cache_read_tokens,
+            "total_tokens": r.total_tokens,
+            "cost_usd": r.cost_usd,
+            "cost_without_cache_usd": r.cost_without_cache_usd,
+            "cache_savings_usd": r.cache_savings_usd,
+            "used_brain_context": r.used_brain_context,
+            "brain_tools_called": list(r.brain_tools_called or []),
+            "had_retry": r.had_retry,
+            "raw_jsonl_path": r.raw_jsonl_path,
+        })
+
+    inserted = 0
+    skipped = 0
+    batch_size = 50
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for i in range(0, len(payloads), batch_size):
+                batch = payloads[i:i + batch_size]
+                resp = await client.post(
+                    sync_url,
+                    json={"records": batch},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+                inserted += int(data.get("inserted", 0) or 0)
+                skipped += int(data.get("skipped", 0) or 0)
+    except Exception as exc:
+        logger.error("upload_local_usage: POST failed: %s", exc)
+        return json.dumps(
+            {
+                "error": str(exc),
+                "files_scanned": files_scanned,
+                "records_found": len(all_records),
+                "inserted": inserted,
+                "skipped": skipped,
+                "total_cost_usd": round(total_cost, 4),
+                "url": sync_url,
+            },
+            ensure_ascii=False,
+        )
+
+    return json.dumps(
+        {
+            "files_scanned": files_scanned,
+            "records_found": len(all_records),
+            "inserted": inserted,
+            "skipped": skipped,
+            "total_cost_usd": round(total_cost, 4),
+            "url": sync_url,
+            "root": str(root),
+            "since_days": since_days,
+        },
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 24 — brain_help
 # ─────────────────────────────────────────────────────────────────
 _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     "files": [
@@ -1544,6 +1688,7 @@ _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     ],
     "analytics": [
         ("Sync usage logs",          "sync_usage_logs",          "parse JSONL and sync to brain"),
+        ("Upload local usage",       "upload_local_usage",       "sync Claude Code logs from this machine to Brain"),
         ("Show usage report",        "get_usage_stats",          "cost, tokens, brain usage %"),
         ("Total cost",               "get_total_cost",           "spending summary"),
         ("Cache efficiency",         "get_cache_efficiency",     "cache hit rate and savings"),
