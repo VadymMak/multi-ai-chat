@@ -1318,12 +1318,13 @@ async def get_total_cost(days: int = 30) -> str:
 
         per_project = db.execute(
             text("""
-                SELECT project_id, project_name,
+                SELECT project_id,
+                       MAX(project_name) AS project_name,
                        COUNT(*) AS req,
                        COALESCE(SUM(cost_usd), 0) AS cost
                 FROM claude_usage_logs
                 WHERE timestamp >= :since
-                GROUP BY project_id, project_name
+                GROUP BY project_id
                 ORDER BY cost DESC
                 LIMIT 20
             """),
