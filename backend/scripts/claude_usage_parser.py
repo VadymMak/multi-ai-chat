@@ -387,7 +387,7 @@ def aggregate_daily(db: Session) -> int:
                 brain_assisted_count, retry_count
             )
             SELECT
-                DATE(timestamp), project_id, project_name, model,
+                DATE(timestamp), project_id, MAX(project_name), model,
                 COUNT(*),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
@@ -399,7 +399,7 @@ def aggregate_daily(db: Session) -> int:
                 COALESCE(SUM(CASE WHEN used_brain_context THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN had_retry THEN 1 ELSE 0 END), 0)
             FROM claude_usage_logs
-            GROUP BY DATE(timestamp), project_id, project_name, model
+            GROUP BY DATE(timestamp), project_id, model
         """))
     else:
         db.execute(text("""
@@ -411,7 +411,7 @@ def aggregate_daily(db: Session) -> int:
                 brain_assisted_count, retry_count
             )
             SELECT
-                DATE(timestamp), project_id, project_name, model,
+                DATE(timestamp), project_id, MAX(project_name), model,
                 COUNT(*),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
@@ -423,7 +423,7 @@ def aggregate_daily(db: Session) -> int:
                 COALESCE(SUM(used_brain_context), 0),
                 COALESCE(SUM(had_retry), 0)
             FROM claude_usage_logs
-            GROUP BY DATE(timestamp), project_id, project_name, model
+            GROUP BY DATE(timestamp), project_id, model
         """))
     row = db.execute(text("SELECT COUNT(*) FROM usage_daily_stats")).fetchone()
     db.commit()
