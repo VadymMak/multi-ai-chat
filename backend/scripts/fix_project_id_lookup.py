@@ -36,46 +36,70 @@ def main() -> None:
     conn.autocommit = False
     cur = conn.cursor()
 
-    cur.execute(
-        "SELECT id, project_name FROM claude_usage_logs WHERE project_id IS NULL"
-    )
-    rows = cur.fetchall()
-    print(f"Records with project_id IS NULL: {len(rows)}")
+    cur.execute("SELECT COUNT(*) FROM claude_usage_logs WHERE project_id IS NULL")
+    total = cur.fetchone()[0]
+    print(f"Records with project_id IS NULL: {total}")
 
+    BATCH = 100
     fixed = 0
     still_null = 0
+    processed = 0
 
-    for record_id, project_name in rows:
-        slug = _extract_project_slug(project_name)
-        if not slug:
-            still_null += 1
-            continue
-
+    while True:
         cur.execute(
             """
-            SELECT id FROM projects
-            WHERE name = %s OR folder_identifier = %s
-            LIMIT 1
+            SELECT id, project_name FROM claude_usage_logs
+            WHERE project_id IS NULL
+            LIMIT %s
             """,
-            (slug, slug),
+            (BATCH,),
         )
-        found = cur.fetchone()
-        if not found:
-            still_null += 1
-            continue
+        rows = cur.fetchall()
+        if not rows:
+            break
 
-        cur.execute(
-            "UPDATE claude_usage_logs SET project_id = %s WHERE id = %s",
-            (found[0], record_id),
-        )
-        fixed += 1
+        batch_fixed = 0
+        batch_null = 0
+        for record_id, project_name in rows:
+            slug = _extract_project_slug(project_name)
+            if not slug:
+                batch_null += 1
+                continue
 
+            cur.execute(
+                "SELECT id FROM projects WHERE name = %s OR folder_identifier = %s LIMIT 1",
+                (slug, slug),
+            )
+            found = cur.fetchone()
+            if not found:
+                # mark as unfixable so next batch doesn't re-fetch the same row
+                cur.execute(
+                    "UPDATE claude_usage_logs SET project_id = -1 WHERE id = %s",
+                    (record_id,),
+                )
+                batch_null += 1
+                continue
+
+            cur.execute(
+                "UPDATE claude_usage_logs SET project_id = %s WHERE id = %s",
+                (found[0], record_id),
+            )
+            batch_fixed += 1
+
+        conn.commit()
+        fixed += batch_fixed
+        still_null += batch_null
+        processed += len(rows)
+        print(f"  batch done — processed {processed}, fixed so far: {fixed}, still null: {still_null}")
+
+    # reset sentinel values back to NULL
+    cur.execute("UPDATE claude_usage_logs SET project_id = NULL WHERE project_id = -1")
     conn.commit()
+
     cur.close()
     conn.close()
 
-    total = len(rows)
-    print(f"Fixed:      {fixed} / {total}")
+    print(f"\nFixed:      {fixed} / {total}")
     print(f"Still NULL: {still_null} / {total}")
 
 
