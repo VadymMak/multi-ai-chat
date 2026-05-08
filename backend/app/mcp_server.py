@@ -1557,6 +1557,7 @@ _BRAIN_TOOL_NAMES = {
     "search_conversation_memory", "ensure_project_indexed",
     "create_project_with_index", "index_local_project",
     "upload_local_usage",
+    "get_skill", "list_skills", "save_skill",
 }
 
 
@@ -2010,6 +2011,11 @@ _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
         ("List canon items",         "list_canon_items",         "important project elements"),
         ("Developer patterns",       "get_developer_patterns",   "coding patterns"),
     ],
+    "skills": [
+        ("Get skill",                "get_skill",                "load skill content by name"),
+        ("List skills",              "list_skills",              "list available skills (optional category)"),
+        ("Save skill",               "save_skill",               "create or update a skill"),
+    ],
     "setup": [
         ("Project stats",            "get_project_stats",          "files, languages, size"),
         ("Active project",           "get_active_project",         "current project info"),
@@ -2025,6 +2031,7 @@ _BRAIN_HELP_HEADERS: Dict[str, str] = {
     "search":    "🔍 SEARCH & CONTEXT",
     "analytics": "📊 ANALYTICS",
     "memory":    "💾 MEMORY",
+    "skills":    "🎯 SKILLS",
     "setup":     "⚙️ PROJECT",
     "help":      "❓ HELP",
 }
@@ -2070,9 +2077,185 @@ async def brain_help(category: str = "all") -> str:
 
     Args:
         category: One of "all" (default), "files", "search", "analytics",
-            "memory", "setup", or "help". Filters which section is shown.
+            "memory", "skills", "setup", or "help". Filters which section is shown.
     """
     return _format_brain_help(category)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 27 — get_skill
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_skill(name: str) -> str:
+    """
+    Load a skill from the brain_skills library by name.
+
+    Skills are reusable instruction snippets — workflows, checklists, recipes.
+    Returns the skill's content as plain text, ready to follow.
+
+    Args:
+        name: Exact skill name (e.g. "startup", "commit-deploy", "session-end").
+    """
+    db = _open_db()
+    try:
+        row = db.execute(
+            text("""
+                SELECT name, description, content, category
+                FROM brain_skills
+                WHERE name = :name
+            """),
+            {"name": name},
+        ).fetchone()
+        if not row:
+            return json.dumps(
+                {"error": f"skill '{name}' not found", "found": False},
+                ensure_ascii=False,
+            )
+        return (
+            f"# Skill: {row.name}  ({row.category})\n"
+            f"{row.description or ''}\n"
+            f"\n"
+            f"{row.content}"
+        )
+    except Exception as exc:
+        logger.error("get_skill error: %s", exc)
+        return json.dumps({"error": str(exc), "found": False}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 28 — list_skills
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def list_skills(category: Optional[str] = None) -> str:
+    """
+    List available skills with their descriptions and categories.
+
+    Args:
+        category: Optional filter — one of 'workflow', 'coding', 'deploy',
+            'debug', 'review'. If omitted, returns all skills.
+    """
+    db = _open_db()
+    try:
+        if category:
+            rows = db.execute(
+                text("""
+                    SELECT name, description, category, updated_at
+                    FROM brain_skills
+                    WHERE category = :category
+                    ORDER BY name
+                """),
+                {"category": category},
+            ).fetchall()
+        else:
+            rows = db.execute(
+                text("""
+                    SELECT name, description, category, updated_at
+                    FROM brain_skills
+                    ORDER BY category, name
+                """),
+            ).fetchall()
+
+        skills = [
+            {
+                "name": r.name,
+                "description": r.description,
+                "category": r.category,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ]
+        return json.dumps(
+            {"count": len(skills), "category_filter": category, "skills": skills},
+            ensure_ascii=False,
+            default=str,
+        )
+    except Exception as exc:
+        logger.error("list_skills error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 29 — save_skill
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def save_skill(
+    name: str,
+    description: str,
+    content: str,
+    category: str,
+) -> str:
+    """
+    Create or update a skill in the brain_skills library.
+
+    On name conflict, the existing row is updated (content / description /
+    category overwritten, updated_at refreshed).
+
+    Args:
+        name: Unique skill name (slug-style, e.g. "commit-deploy").
+        description: One-line summary shown by list_skills.
+        content: Full skill body — markdown / numbered steps / checklist.
+        category: One of 'workflow', 'coding', 'deploy', 'debug', 'review'.
+    """
+    valid_categories = {"workflow", "coding", "deploy", "debug", "review"}
+    if category not in valid_categories:
+        return json.dumps(
+            {
+                "error": f"invalid category '{category}'",
+                "valid": sorted(valid_categories),
+                "saved": False,
+            },
+            ensure_ascii=False,
+        )
+
+    db = _open_db()
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        row = db.execute(
+            text("""
+                INSERT INTO brain_skills (name, description, content, category, created_at, updated_at)
+                VALUES (:name, :description, :content, :category, :now, :now)
+                ON CONFLICT (name) DO UPDATE SET
+                    description = EXCLUDED.description,
+                    content     = EXCLUDED.content,
+                    category    = EXCLUDED.category,
+                    updated_at  = EXCLUDED.updated_at
+                RETURNING id, (xmax = 0) AS inserted
+            """),
+            {
+                "name": name,
+                "description": description,
+                "content": content,
+                "category": category,
+                "now": now,
+            },
+        ).fetchone()
+        db.commit()
+        skill_id = row[0] if row else None
+        was_insert = bool(row[1]) if row else False
+        logger.info(
+            "save_skill: %s id=%s name=%s",
+            "inserted" if was_insert else "updated", skill_id, name,
+        )
+        return json.dumps(
+            {
+                "saved": True,
+                "skill_id": skill_id,
+                "name": name,
+                "action": "inserted" if was_insert else "updated",
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error("save_skill error: %s", exc)
+        return json.dumps({"error": str(exc), "saved": False}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 __all__ = ["mcp"]
