@@ -62,6 +62,9 @@ BRAIN_TOOL_NAMES = {
     "get_session_summaries", "search_session_memory",
     "search_conversation_memory", "ensure_project_indexed",
     "create_project_with_index", "index_local_project",
+    # Skills library — startup checklist + reusable workflow snippets
+    "get_skill", "list_skills", "save_skill",
+    "brain_help",
 }
 
 

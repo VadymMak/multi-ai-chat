@@ -341,18 +341,51 @@ async def _tool_get_file_versions(args: Dict[str, Any]) -> Any:
 # ─────────────────────────────────────────────────────────────────
 # Tool 8 — build_context_for_query
 # ─────────────────────────────────────────────────────────────────
+def _resolve_project_id(db, folder_identifier: str) -> Optional[int]:
+    """Look up project_id from a VSCode folder identifier (exact or fuzzy match)."""
+    row = db.execute(
+        text("""
+            SELECT id FROM projects
+            WHERE folder_identifier = :folder_identifier
+            LIMIT 1
+        """),
+        {"folder_identifier": folder_identifier},
+    ).fetchone()
+    if row is None:
+        row = db.execute(
+            text("""
+                SELECT id FROM projects
+                WHERE name ILIKE :pattern
+                LIMIT 1
+            """),
+            {"pattern": f"%{folder_identifier}%"},
+        ).fetchone()
+    return int(row[0]) if row else None
+
+
 async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
-    raw_pid: Any = args["project_id"]
+    raw_pid: Any = args.get("project_id")
+    folder_id: Optional[str] = args.get("folder_identifier")
     query: str = str(args["query"])
     role_id: int = int(args.get("role_id", 0))
 
-    try:
-        project_id_int: int = int(raw_pid)
-    except (ValueError, TypeError):
-        return {"error": f"project_id must be numeric, got: {raw_pid!r}"}
+    if raw_pid in (None, "", 0, "0") and not folder_id:
+        return {"error": "either project_id or folder_identifier is required"}
 
     db = _open_db()
     try:
+        project_id_int: Optional[int] = None
+        if raw_pid not in (None, "", 0, "0"):
+            try:
+                project_id_int = int(raw_pid)
+            except (ValueError, TypeError):
+                return {"error": f"project_id must be numeric, got: {raw_pid!r}"}
+
+        if project_id_int is None and folder_id:
+            project_id_int = _resolve_project_id(db, folder_id)
+            if project_id_int is None:
+                return {"error": f"no project matched folder_identifier={folder_id!r}"}
+
         memory = MemoryManager(db)
         context: str = await build_smart_context(
             project_id=project_id_int,
@@ -362,7 +395,7 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
             db=db,
             memory=memory,
         )
-        return {"context": context}
+        return {"context": context, "project_id": project_id_int}
     except Exception as exc:
         logger.error("build_context_for_query error: %s", exc)
         return {"error": str(exc)}
@@ -432,10 +465,32 @@ async def get_file_versions(project_id: int, file_path: str) -> str:
 
 @mcp.tool()
 async def build_context_for_query(
-    project_id: str, query: str, role_id: int = 0
+    query: str,
+    project_id: Optional[str] = None,
+    folder_identifier: Optional[str] = None,
+    role_id: int = 0,
 ) -> str:
+    """
+    Build smart context (recent conversation, file matches, summaries) for a
+    user query against a project.
+
+    Pass either `project_id` (numeric) or `folder_identifier` (VSCode workspace
+    folder name). If only the folder identifier is given, the project is
+    resolved internally — no separate get_active_project call needed.
+
+    Args:
+        query: The user's question or task description.
+        project_id: Numeric project id (optional if folder_identifier is given).
+        folder_identifier: VSCode workspace folder name (optional if project_id is given).
+        role_id: Optional role id to scope the context (0 = none).
+    """
     result = await _tool_build_context_for_query(
-        {"project_id": project_id, "query": query, "role_id": role_id}
+        {
+            "project_id": project_id,
+            "folder_identifier": folder_identifier,
+            "query": query,
+            "role_id": role_id,
+        }
     )
     return json.dumps(result, default=str, ensure_ascii=False)
 
@@ -1241,6 +1296,27 @@ async def get_usage_stats(project_id: int, days: int = 30) -> str:
             {"project_id": project_id, "since": since},
         ).fetchone()
 
+        # Session-level rollup: a session counts as "brain-assisted" if ANY
+        # assistant turn within it called a Brain tool. Per-call counts (above)
+        # under-report by ~10x because a single user turn produces many
+        # assistant turns but only one calls Brain.
+        sess = db.execute(
+            text("""
+                SELECT
+                    COUNT(*)                                AS sessions,
+                    COALESCE(SUM(CASE WHEN used_brain THEN 1 ELSE 0 END), 0) AS brain_sessions
+                FROM (
+                    SELECT
+                        COALESCE(session_id, message_id) AS sid,
+                        BOOL_OR(used_brain_context)      AS used_brain
+                    FROM claude_usage_logs
+                    WHERE project_id = :project_id AND timestamp >= :since
+                    GROUP BY COALESCE(session_id, message_id)
+                ) s
+            """),
+            {"project_id": project_id, "since": since},
+        ).fetchone()
+
         rows = db.execute(
             text("""
                 SELECT model,
@@ -1253,6 +1329,10 @@ async def get_usage_stats(project_id: int, days: int = 30) -> str:
             """),
             {"project_id": project_id, "since": since},
         ).fetchall()
+
+        total_sessions = int(sess.sessions or 0)
+        brain_sessions = int(sess.brain_sessions or 0)
+        brain_session_pct = round(brain_sessions / total_sessions * 100.0, 2) if total_sessions else 0.0
 
         return json.dumps(
             {
@@ -1267,6 +1347,9 @@ async def get_usage_stats(project_id: int, days: int = 30) -> str:
                 "cost_usd": round(float(totals.cost or 0.0), 4),
                 "cache_savings_usd": round(float(totals.savings or 0.0), 4),
                 "brain_assisted_requests": int(totals.brain_req or 0),
+                "total_sessions": total_sessions,
+                "brain_assisted_sessions": brain_sessions,
+                "brain_usage_pct_sessions": brain_session_pct,
                 "by_model": [
                     {
                         "model": r.model,
@@ -1496,10 +1579,30 @@ async def sync_usage_logs(
             {"since": since_ts},
         ).fetchone()
 
+        # Session-level rollup (a session is brain-assisted if any turn in it called Brain).
+        sess = db.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS sessions,
+                    COALESCE(SUM(CASE WHEN used_brain THEN 1 ELSE 0 END), 0) AS brain_sessions
+                FROM (
+                    SELECT COALESCE(session_id, message_id) AS sid,
+                           BOOL_OR(used_brain_context)      AS used_brain
+                    FROM claude_usage_logs
+                    WHERE timestamp >= :since
+                    GROUP BY COALESCE(session_id, message_id)
+                ) s
+            """),
+            {"since": since_ts},
+        ).fetchone()
+
         total_req = int(window.req or 0)
         total_cost = float(window.cost or 0.0)
         brain_req = int(window.brain_req or 0)
         brain_pct = round((brain_req / total_req * 100.0), 2) if total_req else 0.0
+        total_sessions = int(sess.sessions or 0)
+        brain_sessions = int(sess.brain_sessions or 0)
+        brain_sess_pct = round(brain_sessions / total_sessions * 100.0, 2) if total_sessions else 0.0
 
         return json.dumps(
             {
@@ -1516,6 +1619,9 @@ async def sync_usage_logs(
                 "window_total_cost_usd": round(total_cost, 4),
                 "window_brain_assisted_count": brain_req,
                 "window_brain_usage_pct": brain_pct,
+                "window_total_sessions": total_sessions,
+                "window_brain_assisted_sessions": brain_sessions,
+                "window_brain_usage_pct_sessions": brain_sess_pct,
             },
             default=str,
             ensure_ascii=False,
@@ -1557,7 +1663,9 @@ _BRAIN_TOOL_NAMES = {
     "search_conversation_memory", "ensure_project_indexed",
     "create_project_with_index", "index_local_project",
     "upload_local_usage",
+    # Skills library — startup checklist + reusable workflow snippets
     "get_skill", "list_skills", "save_skill",
+    "brain_help",
 }
 
 
@@ -1982,7 +2090,93 @@ async def setup_local_sync(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool 26 — brain_help
+# Tool 26 — setup_prompt_hook
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def setup_prompt_hook(
+    scope: str = "user",
+    script_path: Optional[str] = None,
+    python_path: Optional[str] = None,
+) -> str:
+    """
+    Install a Claude Code UserPromptSubmit hook that nudges Brain MCP usage on
+    every user prompt.
+
+    Writes (or merges into) `.claude/settings.json` so each user prompt
+    triggers `brain_context_hook.py`, which prints a short system reminder
+    telling Claude to call `build_context_for_query` for the active project
+    folder. Lifts brain_usage_pct close to 100% without relying on
+    CLAUDE.md instruction compliance.
+
+    Args:
+        scope: 'user' (default) writes to ~/.claude/settings.json,
+            'project' writes to <cwd>/.claude/settings.json.
+        script_path: Absolute path to brain_context_hook.py. Auto-detects the
+            bundled script under backend/scripts/ if omitted.
+        python_path: Python interpreter to invoke. Defaults to the one
+            currently running this code (sys.executable).
+    """
+    import sys as _sys
+
+    if scope not in ("user", "project"):
+        return f"ERROR: scope must be 'user' or 'project', got {scope!r}"
+
+    py = python_path or _sys.executable
+    hook_script = (
+        Path(script_path).resolve() if script_path
+        else (Path(__file__).resolve().parent.parent / "scripts" / "brain_context_hook.py")
+    )
+    if not hook_script.exists():
+        return f"ERROR: hook script not found at {hook_script}"
+
+    target = (
+        Path.home() / ".claude" / "settings.json" if scope == "user"
+        else Path.cwd() / ".claude" / "settings.json"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: Dict[str, Any] = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return f"ERROR: failed to parse existing {target}: {exc}"
+
+    hooks = existing.setdefault("hooks", {})
+    submit_hooks = hooks.setdefault("UserPromptSubmit", [])
+    if not isinstance(submit_hooks, list):
+        return f"ERROR: hooks.UserPromptSubmit in {target} is not a list"
+
+    command = f'"{py}" "{hook_script}"'
+
+    for entry in submit_hooks:
+        if not isinstance(entry, dict):
+            continue
+        for h in entry.get("hooks") or []:
+            if (
+                isinstance(h, dict)
+                and h.get("type") == "command"
+                and "brain_context_hook" in (h.get("command") or "")
+            ):
+                return (
+                    f"✅ Brain hook already installed in {target}\n"
+                    f"   Command: {h.get('command')}"
+                )
+
+    submit_hooks.append({
+        "hooks": [{"type": "command", "command": command}],
+    })
+
+    target.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    return (
+        f"✅ Installed Brain UserPromptSubmit hook in {target}\n"
+        f"   Command: {command}\n"
+        f"   Restart Claude Code (or open a new session) for it to take effect."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 27 — brain_help
 # ─────────────────────────────────────────────────────────────────
 _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
     "files": [
@@ -2004,6 +2198,7 @@ _BRAIN_HELP_SECTIONS: Dict[str, List[tuple]] = {
         ("Total cost",               "get_total_cost",           "spending summary"),
         ("Cache efficiency",         "get_cache_efficiency",     "cache hit rate and savings"),
         ("Setup local auto-sync",    "setup_local_sync",         "add hourly cron/Task Scheduler jobs for BrainSync + BrainUpdateMD"),
+        ("Setup Brain prompt hook",  "setup_prompt_hook",        "install UserPromptSubmit hook so Brain is nudged on every prompt"),
     ],
     "memory": [
         ("Save session summary",     "save_session_summary",     "save current session"),
