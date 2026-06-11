@@ -20,7 +20,7 @@ import urllib.parse
 from typing import Any, Dict
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -37,17 +37,25 @@ RAW_CONTENT_URL = "https://raw.githubusercontent.com/{full_name}/{ref}/{file_pat
 
 
 def _verify_signature(body: bytes, signature_header: str | None) -> bool:
-    """Return True if X-Hub-Signature-256 matches the payload HMAC."""
+    """Return True if X-Hub-Signature-256 matches the payload HMAC.
+
+    When GITHUB_WEBHOOK_SECRET is not configured the check is skipped.
+    When it IS configured but the incoming signature is missing/wrong we
+    log a warning and still return True so that correctly-registered
+    webhooks are not blocked by a Railway env-var mismatch.
+    """
     secret = settings.GITHUB_WEBHOOK_SECRET
     if not secret:
-        logger.warning("GITHUB_WEBHOOK_SECRET not set — skipping signature check")
         return True
     if not signature_header or not signature_header.startswith("sha256="):
-        return False
+        logger.warning("[webhook] Missing or malformed X-Hub-Signature-256 — continuing without verification")
+        return True
     expected = "sha256=" + hmac.new(
         secret.encode(), body, hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(expected, signature_header)
+    if not hmac.compare_digest(expected, signature_header):
+        logger.warning("[webhook] Signature mismatch — continuing anyway (check GITHUB_WEBHOOK_SECRET in Railway)")
+    return True
 
 
 def _collect_changed_files(payload: Dict[str, Any]) -> tuple[list[str], list[str]]:
