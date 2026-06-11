@@ -257,6 +257,13 @@ app.include_router(usage_analytics.router, prefix="/api")
 from app.routers.mux_audio import router as mux_audio_router  # noqa: E402
 app.include_router(mux_audio_router, prefix="/api")
 
+try:
+    from app.routers.transform_image import router as transform_image_router  # type: ignore
+    app.include_router(transform_image_router, prefix="/api")
+    logger.info("Loaded optional router: transform_image")
+except Exception as e:
+    logger.error(f"Failed to load transform_image router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()
