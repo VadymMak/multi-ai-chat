@@ -253,6 +253,10 @@ app.include_router(pattern_analyzer.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
 app.include_router(usage_analytics.router, prefix="/api")
 
+# Media processing
+from app.routers.mux_audio import router as mux_audio_router  # noqa: E402
+app.include_router(mux_audio_router, prefix="/api")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()
