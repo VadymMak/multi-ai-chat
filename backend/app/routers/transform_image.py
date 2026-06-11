@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ class OutputFormat(str, Enum):
     webp = "webp"
     png = "png"
     auto = "auto"
+
+
+class FitMode(str, Enum):
+    crop = "crop"          # center-crop to exact size (ImageOps.fit)
+    fit = "fit"            # fit within + white padding
+    fit_blur = "fit_blur"  # fit within + blurred image background
 
 
 class Preset(str, Enum):
@@ -68,8 +74,42 @@ PRESET_SIZES: dict[Preset, tuple[int, int]] = {
 }
 
 
-def _smart_crop(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    return ImageOps.fit(img, (target_w, target_h), method=Image.LANCZOS)
+def process_to_size(img: Image.Image, target_w: int, target_h: int, mode: FitMode) -> Image.Image:
+    """
+    Resize/crop image to exact target dimensions using the given fit mode.
+
+    crop      — center-crop (no empty space, may cut edges)
+    fit       — letterbox with white padding (full image visible)
+    fit_blur  — letterbox with blurred version of the image as background
+    """
+    if mode == FitMode.crop:
+        return ImageOps.fit(img, (target_w, target_h), method=Image.LANCZOS)
+
+    # Fit the foreground within target, preserving aspect ratio
+    fg = img.copy()
+    fg.thumbnail((target_w, target_h), Image.LANCZOS)
+    fg_w, fg_h = fg.size
+    x = (target_w - fg_w) // 2
+    y = (target_h - fg_h) // 2
+
+    if mode == FitMode.fit:
+        canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+        if fg.mode == "RGBA":
+            canvas.paste(fg, (x, y), fg)
+        else:
+            canvas.paste(fg, (x, y))
+        return canvas
+
+    # fit_blur: scale original to cover → blur → paste foreground centered
+    bg = ImageOps.fit(img.copy().convert("RGB"), (target_w, target_h), method=Image.LANCZOS)
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=30))
+
+    if fg.mode == "RGBA":
+        bg.paste(fg, (x, y), fg)
+    else:
+        bg.paste(fg.convert("RGB"), (x, y))
+
+    return bg
 
 
 def _smart_resize(img: Image.Image, max_width: int, max_height: int) -> Image.Image:
@@ -119,16 +159,20 @@ async def transform_image(
     height: Optional[int] = Form(None, description="Target height in pixels"),
     quality: Optional[int] = Form(None, description="Output quality 1-100 (default: 85)"),
     format: OutputFormat = Form(OutputFormat.auto, description="Output format"),
-    crop: bool = Form(False, description="Crop to exact dimensions (True) or fit within (False)"),
+    fit_mode: FitMode = Form(FitMode.fit_blur, description="How to fill target dimensions: crop / fit / fit_blur"),
 ):
     """
     Transform an image: resize, compress, convert, crop, or apply social media preset.
 
+    fit_mode values:
+    - crop: center-crop to exact size (may cut edges)
+    - fit: fit within + white letterbox padding
+    - fit_blur: fit within + blurred image background (default, looks best for social)
+
     Modes:
-    - preset: Apply social media preset (e.g. instagram_square → 1080x1080 crop)
-    - width + height + crop=True: Crop to exact dimensions
-    - width + height + crop=False: Fit within dimensions (preserve aspect ratio)
-    - width only / height only: Resize with proportional other dimension
+    - preset: Apply social media preset with fit_mode (default fit_blur)
+    - width + height: Resize/crop to exact dimensions using fit_mode
+    - width only / height only: Proportional resize (no padding/crop)
     - No size params: Compress/convert only
     """
     data = await image.read()
@@ -147,19 +191,19 @@ async def transform_image(
 
     if preset:
         target_w, target_h = PRESET_SIZES[preset]
-        img = _smart_crop(img, target_w, target_h)
-        logger.info(f"[transform] Preset {preset.value}: {target_w}x{target_h}")
+        img = process_to_size(img, target_w, target_h, fit_mode)
+        logger.info(f"[transform] Preset {preset.value} ({fit_mode.value}): {target_w}x{target_h}")
+
+    elif width and height:
+        img = process_to_size(img, width, height, fit_mode)
+        logger.info(f"[transform] process_to_size ({fit_mode.value}): {width}x{height}")
 
     elif width or height:
+        # Proportional resize — no padding needed
         target_w = width or int(original_w * (height / original_h))
         target_h = height or int(original_h * (width / original_w))
-
-        if crop:
-            img = _smart_crop(img, target_w, target_h)
-            logger.info(f"[transform] Crop: {target_w}x{target_h}")
-        else:
-            img = _smart_resize(img, target_w, target_h)
-            logger.info(f"[transform] Resize: {img.size[0]}x{img.size[1]}")
+        img = _smart_resize(img, target_w, target_h)
+        logger.info(f"[transform] Proportional resize: {img.size[0]}x{img.size[1]}")
 
     fmt_name, mime_type, save_kwargs = _pick_format(img, format)
 
@@ -182,7 +226,7 @@ async def transform_image(
     base_name = (image.filename or "image").rsplit(".", 1)[0]
     ext = fmt_name.lower()
     if preset:
-        out_filename = f"{base_name}_{preset.value}.{ext}"
+        out_filename = f"{base_name}_{preset.value}_{fit_mode.value}.{ext}"
     elif width or height:
         out_filename = f"{base_name}_{final_w}x{final_h}.{ext}"
     else:
@@ -197,6 +241,7 @@ async def transform_image(
             "X-Original-Size": str(len(data)),
             "X-Output-Size": str(output_size),
             "X-Dimensions": f"{final_w}x{final_h}",
+            "X-Fit-Mode": fit_mode.value,
             "X-Compression-Ratio": f"{len(data) / max(output_size, 1):.1f}x",
         },
     )
