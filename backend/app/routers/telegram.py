@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from openai import OpenAI
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
@@ -99,9 +100,16 @@ async def _tg_send_message(chat_id: int, text: str) -> None:
 async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
     """Return (content, kind). kind ∈ {text, voice, photo}."""
 
-    # Plain text
+    # Plain text — detect /ask or ? prefix for Q&A mode
     if "text" in message:
-        return message["text"], "text"
+        txt: str = message["text"]
+        if txt.startswith("/ask"):
+            query = txt[4:].strip()
+            return query, "ask"
+        if txt.startswith("?"):
+            query = txt[1:].strip()
+            return query, "ask"
+        return txt, "text"
 
     # Voice or audio → transcribe with Whisper
     if "voice" in message or "audio" in message:
@@ -199,10 +207,106 @@ def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
     return entry
 
 
+# ── Brain Q&A (vector search → GPT-4o → reply) ───────────────────
+
+_ANSWER_SYSTEM_PROMPT = (
+    "You are the user's personal knowledge base assistant. "
+    "Answer the question using ONLY the provided notes. "
+    "Reply in the same language as the question. "
+    "Be concise and direct. "
+    "After the answer, add an 'Источники:' section listing "
+    "the matched note snippets (first 100 chars each) and their dates. "
+    "If the notes do not contain a relevant answer, say so honestly."
+)
+
+_MIN_SIMILARITY = 0.2
+_SEARCH_LIMIT = 5
+_MAX_REPLY_LEN = 4096
+
+
+async def _answer_from_brain(query: str, chat_id: int) -> None:
+    """Embed query → cosine search over memory_entries → GPT-4o answer → sendMessage."""
+    if not query.strip():
+        await _tg_send_message(chat_id, "❓ Пустой вопрос. Напиши что-нибудь после /ask или ?.")
+        return
+
+    db = SessionLocal()
+    try:
+        from app.services.vector_service import create_embedding
+        query_embedding: list[float] = create_embedding(query)
+
+        rows = db.execute(
+            text("""
+                SELECT raw_text, summary, timestamp,
+                       1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
+                FROM memory_entries
+                WHERE project_id = :project_id
+                  AND embedding IS NOT NULL
+                  AND deleted = FALSE
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :limit
+            """),
+            {
+                "query_embedding": query_embedding,
+                "project_id": _PROJECT_ID_STR,
+                "limit": _SEARCH_LIMIT,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.error("[telegram/ask] Vector search error: %s", exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка поиска по заметкам. Попробуй позже.")
+        return
+    finally:
+        db.close()
+
+    hits = [r for r in rows if float(r.similarity) >= _MIN_SIMILARITY]
+    if not hits:
+        await _tg_send_message(
+            chat_id,
+            "🔍 Ничего не нашлось в заметках по этому запросу. Попробуй другие слова.",
+        )
+        return
+
+    # Build context block from top hits
+    context_parts: list[str] = []
+    for i, r in enumerate(hits, 1):
+        note_text = (r.raw_text or r.summary or "").strip()
+        ts = r.timestamp.strftime("%Y-%m-%d %H:%M") if r.timestamp else "?"
+        context_parts.append(f"[{i}] ({ts})\n{note_text[:600]}")
+    context_block = "\n\n---\n\n".join(context_parts)
+
+    # GPT-4o answer generation
+    try:
+        client = _get_openai_client()
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Notes:\n{context_block}\n\nQuestion: {query}",
+                },
+            ],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        answer = response.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.error("[telegram/ask] GPT-4o error: %s", exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка генерации ответа. Попробуй позже.")
+        return
+
+    if len(answer) > _MAX_REPLY_LEN:
+        answer = answer[: _MAX_REPLY_LEN - 3] + "..."
+
+    await _tg_send_message(chat_id, answer)
+    logger.info("[telegram/ask] Answered (hits=%d, chars=%d)", len(hits), len(answer))
+
+
 # ── Async background task ─────────────────────────────────────────
 
 async def _process_update(message: Dict[str, Any]) -> None:
-    """Extract content, persist to Brain, confirm to user. Never raises."""
+    """Route message: /ask or ? → Q&A from Brain; everything else → save. Never raises."""
     chat_id: int = message.get("chat", {}).get("id", 0)
     try:
         content, kind = await _extract_content(message)
@@ -210,6 +314,12 @@ async def _process_update(message: Dict[str, Any]) -> None:
             logger.info("[telegram] Unsupported message type — skipped")
             return
 
+        # Q&A mode — search Brain, answer, do NOT save as INBOX note
+        if kind == "ask":
+            await _answer_from_brain(content, chat_id)
+            return
+
+        # Save mode (text / voice / photo)
         db = SessionLocal()
         try:
             entry = _write_to_brain(db, content, kind)
