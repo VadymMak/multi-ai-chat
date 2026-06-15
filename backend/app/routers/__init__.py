@@ -59,6 +59,7 @@ def _try_import_optional(name: str) -> Optional[ModuleType]:
 
 _upload_file_mod = _try_import_optional("upload_file")
 _prompt_template_mod = _try_import_optional("prompt_template")
+_telegram_mod = _try_import_optional("telegram")
 
 # Public exports
 __all__ = [
@@ -82,3 +83,6 @@ if _upload_file_mod is not None:
 if _prompt_template_mod is not None:
     __all__.append("prompt_template")
     prompt_template = _prompt_template_mod  # type: ignore[assignment]
+if _telegram_mod is not None:
+    __all__.append("telegram")
+    telegram = _telegram_mod  # type: ignore[assignment]

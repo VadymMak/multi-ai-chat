@@ -143,6 +143,13 @@ class _Settings:
     # === GitHub webhook ===
     GITHUB_WEBHOOK_SECRET: str = _getenv_str("GITHUB_WEBHOOK_SECRET", "")
 
+    # === Telegram Bot (Brain input portal) ===
+    TELEGRAM_BOT_TOKEN: str = _getenv_str("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_WEBHOOK_SECRET: str = _getenv_str("TELEGRAM_WEBHOOK_SECRET", "")
+    TELEGRAM_DEFAULT_PROJECT_ID: int = _getenv_int("TELEGRAM_DEFAULT_PROJECT_ID", 20)
+    TELEGRAM_ALLOWED_USER_IDS: tuple[str, ...] = _getenv_csv("TELEGRAM_ALLOWED_USER_IDS")
+    TELEGRAM_ROLE_ID: Optional[int] = _getenv_int_opt("TELEGRAM_ROLE_ID")
+
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")
     YOUTUBE_SAFESEARCH: str = _getenv_str("YOUTUBE_SAFESEARCH", "moderate")  # none|moderate|strict

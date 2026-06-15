@@ -264,6 +264,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load transform_image router: {e}")
 
+try:
+    from app.routers.telegram import router as telegram_router  # type: ignore
+    app.include_router(telegram_router, prefix="/api")
+    logger.info("Loaded optional router: telegram")
+except Exception as e:
+    logger.error(f"Failed to load telegram router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()
