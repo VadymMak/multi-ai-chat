@@ -57,8 +57,13 @@ def _get_openai_client() -> OpenAI:
 
 # ── Telegram API helpers ──────────────────────────────────────────
 
+def _tg_token() -> str:
+    # Strip whitespace/newlines — Railway copy-paste often adds trailing \n
+    return settings.TELEGRAM_BOT_TOKEN.strip()
+
+
 def _tg_base() -> str:
-    return f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}"
+    return f"https://api.telegram.org/bot{_tg_token()}"
 
 
 async def _tg_get_file_path(file_id: str) -> str:
@@ -71,7 +76,7 @@ async def _tg_get_file_path(file_id: str) -> str:
 
 async def _tg_download_file(file_path: str) -> bytes:
     """Download a file from Telegram's CDN."""
-    url = f"https://api.telegram.org/file/bot{settings.TELEGRAM_BOT_TOKEN}/{file_path}"
+    url = f"https://api.telegram.org/file/bot{_tg_token()}/{file_path}"
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.get(url)
         r.raise_for_status()
@@ -80,7 +85,7 @@ async def _tg_download_file(file_path: str) -> bytes:
 
 async def _tg_send_message(chat_id: int, text: str) -> None:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             await client.post(
                 f"{_tg_base()}/sendMessage",
                 json={"chat_id": chat_id, "text": text},
@@ -156,7 +161,7 @@ def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
     Returns the MemoryEntry so the caller can attach the embedding.
     """
     now = datetime.utcnow()
-    title = content[:80]
+    title = content.replace("\n", " ").replace("\r", "")[:80]
 
     item = CanonItem(
         project_id=_PROJECT_ID_STR,
@@ -217,7 +222,7 @@ async def _process_update(message: Dict[str, Any]) -> None:
         finally:
             db.close()
 
-        title = content[:80]
+        title = content.replace("\n", " ").replace("\r", "")[:80]
         await _tg_send_message(
             chat_id,
             f"✅ Saved to Brain (project {_PROJECT_ID_INT}): {title}",
