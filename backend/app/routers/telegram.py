@@ -124,21 +124,53 @@ def _tg_base() -> str:
     return f"https://api.telegram.org/bot{_tg_token()}"
 
 
+_TG_TRANSIENT = (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TransportError)
+
+
+class _MediaDownloadError(Exception):
+    """Raised when all retry attempts to fetch a Telegram media file fail."""
+_TG_RETRY_DELAYS = (1.0, 2.0)  # seconds between attempts 1→2 and 2→3
+
+
 async def _tg_get_file_path(file_id: str) -> str:
-    """Return the file_path for a given Telegram file_id."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(f"{_tg_base()}/getFile", params={"file_id": file_id})
-        r.raise_for_status()
-        return r.json()["result"]["file_path"]
+    """Return the file_path for a given Telegram file_id (3 attempts, backoff)."""
+    timeout = httpx.Timeout(connect=10.0, read=60.0)
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt, delay in enumerate((*_TG_RETRY_DELAYS, None), start=1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(f"{_tg_base()}/getFile", params={"file_id": file_id})
+                r.raise_for_status()
+                return r.json()["result"]["file_path"]
+        except _TG_TRANSIENT as exc:
+            last_exc = exc
+            logger.warning("[telegram] getFile attempt %d failed: %s", attempt, exc)
+            if delay is not None:
+                await asyncio.sleep(delay)
+        except Exception:
+            raise
+    raise last_exc
 
 
 async def _tg_download_file(file_path: str) -> bytes:
-    """Download a file from Telegram's CDN."""
+    """Download a file from Telegram's CDN (3 attempts, backoff)."""
     url = f"https://api.telegram.org/file/bot{_tg_token()}/{file_path}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.content
+    timeout = httpx.Timeout(connect=10.0, read=60.0)
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt, delay in enumerate((*_TG_RETRY_DELAYS, None), start=1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                return r.content
+        except _TG_TRANSIENT as exc:
+            last_exc = exc
+            logger.warning("[telegram] download attempt %d failed: %s", attempt, exc)
+            if delay is not None:
+                await asyncio.sleep(delay)
+        except Exception:
+            raise
+    raise last_exc
 
 
 async def _tg_send_message(chat_id: int, text: str) -> None:
@@ -184,8 +216,11 @@ async def _extract_content(
     # Voice / audio → Whisper transcription
     if "voice" in message or "audio" in message:
         media = message.get("voice") or message.get("audio")
-        fp = await _tg_get_file_path(media["file_id"])
-        data = await _tg_download_file(fp)
+        try:
+            fp = await _tg_get_file_path(media["file_id"])
+            data = await _tg_download_file(fp)
+        except _TG_TRANSIENT as exc:
+            raise _MediaDownloadError("voice download failed") from exc
         client = _get_openai_client()
         buf = io.BytesIO(data)
         buf.name = "voice.oga"
@@ -209,8 +244,11 @@ async def _extract_content(
     if "photo" in message:
         largest = message["photo"][-1]
         caption: str = message.get("caption", "")
-        fp = await _tg_get_file_path(largest["file_id"])
-        data = await _tg_download_file(fp)
+        try:
+            fp = await _tg_get_file_path(largest["file_id"])
+            data = await _tg_download_file(fp)
+        except _TG_TRANSIENT as exc:
+            raise _MediaDownloadError("photo download failed") from exc
 
         # Chat mode: caption starts with chat trigger — pass raw bytes to AI
         chat_query = _strip_chat_trigger(caption)
@@ -886,6 +924,12 @@ async def _process_update(message: Dict[str, Any]) -> None:
             f"✅ Saved to Brain (project {pid_int}): {title}",
         )
 
+    except _MediaDownloadError as exc:
+        logger.warning("[telegram] media download failed after retries: %s", exc)
+        await _tg_send_message(
+            chat_id,
+            "⚠️ Не удалось скачать файл из Telegram, попробуй отправить ещё раз.",
+        )
     except Exception as exc:
         logger.error("[telegram] _process_update error: %s", exc, exc_info=True)
         await _tg_send_message(chat_id, "⚠️ Failed to process. Check server logs.")
