@@ -16,6 +16,8 @@ from sqlalchemy import text
 # Import existing services
 from app.services import vector_service
 from app.memory.manager import MemoryManager
+from app.memory.db import SessionLocal
+from app.utils.tracking import bump_access_bg
 
 
 def format_recent(messages: List[Dict[str, Any]]) -> str:
@@ -273,7 +275,7 @@ async def build_smart_context(
     try:
         session_rows = db.execute(
             text("""
-                SELECT title, body, created_at
+                SELECT id, title, body, created_at
                 FROM canon_items
                 WHERE project_id  = :project_id
                   AND type        = 'SESSION_SUMMARY'
@@ -283,6 +285,8 @@ async def build_smart_context(
             """),
             {"project_id": str(project_id)},
         ).fetchall()
+
+        bump_access_bg(SessionLocal, "canon_items", [r.id for r in session_rows])
 
         if session_rows:
             session_lines = []
@@ -306,7 +310,7 @@ async def build_smart_context(
     try:
         inbox_rows = db.execute(
             text("""
-                SELECT title, body, created_at
+                SELECT id, title, body, created_at
                 FROM canon_items
                 WHERE project_id = :project_id
                   AND type       = 'INBOX'
@@ -316,6 +320,8 @@ async def build_smart_context(
             """),
             {"project_id": str(project_id)},
         ).fetchall()
+
+        bump_access_bg(SessionLocal, "canon_items", [r.id for r in inbox_rows])
 
         if inbox_rows:
             inbox_lines = []

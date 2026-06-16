@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.memory.db import SessionLocal
 from app.memory.models import CanonItem, MemoryEntry
+from app.utils.tracking import bump_access_bg
 
 logger = logging.getLogger(__name__)
 
@@ -629,7 +630,7 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
 
         rows = db.execute(
             text("""
-                SELECT m.raw_text, m.summary, m.timestamp, m.project_id_int,
+                SELECT m.id, m.raw_text, m.summary, m.timestamp, m.project_id_int,
                        p.name AS project_name,
                        1 - (m.embedding <=> CAST(:query_embedding AS vector)) AS similarity
                 FROM memory_entries m
@@ -654,6 +655,7 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
         db.close()
 
     hits = [r for r in rows if float(r.similarity) >= _MIN_SIMILARITY]
+    bump_access_bg(SessionLocal, "memory_entries", [r.id for r in hits])
     if not hits:
         await _tg_send_message(
             chat_id,

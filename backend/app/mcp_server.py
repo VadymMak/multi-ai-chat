@@ -25,6 +25,7 @@ from app.memory.db import SessionLocal
 from app.memory.manager import MemoryManager
 from app.services.file_indexer import FileIndexer
 from app.services.smart_context import build_smart_context
+from app.utils.tracking import bump_access_bg
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
 
         rows = db.execute(
             text(f"""
-                SELECT raw_text, summary, timestamp, is_summary,
+                SELECT id, raw_text, summary, timestamp, is_summary,
                        1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
                 FROM memory_entries
                 WHERE project_id = :project_id
@@ -208,6 +209,9 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
             """),
             params,
         ).fetchall()
+
+        hit_ids = [r.id for r in rows]
+        bump_access_bg(SessionLocal, "memory_entries", hit_ids)
 
         return [
             {
@@ -253,6 +257,8 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
             """),
             params,
         ).fetchall()
+
+        bump_access_bg(SessionLocal, "canon_items", [r.id for r in rows])
 
         results: List[Dict[str, Any]] = []
         for r in rows:
