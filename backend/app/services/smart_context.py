@@ -300,6 +300,39 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] 2.5. Session summaries failed: {e}")
 
     # ============================================================
+    # 2.7. INBOX NOTES (captured via Telegram — phone notes, voice, photos)
+    # Queries canon_items WHERE type='INBOX', last 5 entries.
+    # ============================================================
+    try:
+        inbox_rows = db.execute(
+            text("""
+                SELECT title, body, created_at
+                FROM canon_items
+                WHERE project_id = :project_id
+                  AND type       = 'INBOX'
+                  AND is_active  = TRUE
+                ORDER BY created_at DESC
+                LIMIT 5
+            """),
+            {"project_id": str(project_id)},
+        ).fetchall()
+
+        if inbox_rows:
+            inbox_lines = []
+            for row in inbox_rows:
+                date = row.created_at.strftime("%Y-%m-%d %H:%M") if row.created_at else ""
+                preview = (row.body or row.title or "")[:200].replace("\n", " ")
+                inbox_lines.append(f"• ({date}) {preview}")
+            parts.append(
+                "📌 CAPTURED NOTES (from Telegram inbox):\n" + "\n".join(inbox_lines)
+            )
+            print(f"✅ [Smart Context] 2.7. Added {len(inbox_rows)} inbox notes")
+        else:
+            print("ℹ️ [Smart Context] 2.7. No inbox notes")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 2.7. Inbox notes failed: {e}")
+
+    # ============================================================
     # 3. RECENT MESSAGES (MIDDLE - conversation flow)
     # ============================================================
     try:
