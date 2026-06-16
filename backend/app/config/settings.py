@@ -149,6 +149,8 @@ class _Settings:
     TELEGRAM_DEFAULT_PROJECT_ID: int = _getenv_int("TELEGRAM_DEFAULT_PROJECT_ID", 20)
     TELEGRAM_ALLOWED_USER_IDS: tuple[str, ...] = _getenv_csv("TELEGRAM_ALLOWED_USER_IDS")
     TELEGRAM_ROLE_ID: Optional[int] = _getenv_int_opt("TELEGRAM_ROLE_ID")
+    # App user whose projects are searched by the Q&A mode (default: admin user id=1)
+    TELEGRAM_APP_USER_ID: int = _getenv_int("TELEGRAM_APP_USER_ID", 1)
 
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")

@@ -236,7 +236,7 @@ _ANSWER_SYSTEM_PROMPT = (
     "Reply in the same language as the question. "
     "Be concise and direct. "
     "After the answer, add an 'Источники:' section listing "
-    "the matched note snippets (first 100 chars each) and their dates. "
+    "the matched note snippets (first 100 chars each), their dates, and the project name. "
     "If the notes do not contain a relevant answer, say so honestly."
 )
 
@@ -258,18 +258,20 @@ async def _answer_from_brain(query: str, chat_id: int) -> None:
 
         rows = db.execute(
             text("""
-                SELECT raw_text, summary, timestamp,
-                       1 - (embedding <=> CAST(:query_embedding AS vector)) AS similarity
-                FROM memory_entries
-                WHERE project_id = :project_id
-                  AND embedding IS NOT NULL
-                  AND deleted = FALSE
-                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                SELECT m.raw_text, m.summary, m.timestamp, m.project_id_int,
+                       p.name AS project_name,
+                       1 - (m.embedding <=> CAST(:query_embedding AS vector)) AS similarity
+                FROM memory_entries m
+                JOIN projects p ON m.project_id_int = p.id
+                WHERE p.user_id = :uid
+                  AND m.embedding IS NOT NULL
+                  AND m.deleted = FALSE
+                ORDER BY m.embedding <=> CAST(:query_embedding AS vector)
                 LIMIT :limit
             """),
             {
                 "query_embedding": query_embedding,
-                "project_id": _PROJECT_ID_STR,
+                "uid": settings.TELEGRAM_APP_USER_ID,
                 "limit": _SEARCH_LIMIT,
             },
         ).fetchall()
@@ -293,7 +295,8 @@ async def _answer_from_brain(query: str, chat_id: int) -> None:
     for i, r in enumerate(hits, 1):
         note_text = (r.raw_text or r.summary or "").strip()
         ts = r.timestamp.strftime("%Y-%m-%d %H:%M") if r.timestamp else "?"
-        context_parts.append(f"[{i}] ({ts})\n{note_text[:600]}")
+        proj = r.project_name or f"project {r.project_id_int}"
+        context_parts.append(f"[{i}] ({ts}) [{proj}]\n{note_text[:600]}")
     context_block = "\n\n---\n\n".join(context_parts)
 
     # GPT-4o answer generation
