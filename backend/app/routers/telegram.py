@@ -78,6 +78,21 @@ def _strip_chat_trigger(text: str) -> Optional[str]:
     return text[m.end():].strip()
 
 
+# Web search trigger words (text + voice). Does NOT overlap with "найди" (brain Q&A).
+_WEB_TRIGGER_RE = re.compile(
+    r"^\s*(/web|погугли|поиск\s+в\s+интернете|search\s+web)\b[\s,:\-—.!?]*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_web_trigger(text: str) -> Optional[str]:
+    """Return query if text starts with a web-search trigger, else None."""
+    m = _WEB_TRIGGER_RE.match(text)
+    if not m:
+        return None
+    return text[m.end():].strip()
+
+
 # ── Lazy OpenAI client (same pattern as memory.py) ────────────────
 _openai_client: Optional[OpenAI] = None
 
@@ -144,7 +159,7 @@ async def _extract_content(
 ) -> tuple[str, str, Optional[bytes]]:
     """Return (content, kind, image_bytes).
 
-    kind ∈ {text, voice, photo, ask, chat, now, unknown}
+    kind ∈ {text, voice, photo, ask, chat, web, now, unknown}
     image_bytes is non-None only for kind="chat" with an attached photo.
     """
 
@@ -158,6 +173,9 @@ async def _extract_content(
         low = txt.strip().lower()
         if low == "/now" or low.startswith("что я сейчас"):
             return "", "now", None
+        web_query = _strip_web_trigger(txt)
+        if web_query is not None:
+            return web_query, "web", None
         chat_query = _strip_chat_trigger(txt)
         if chat_query is not None:
             return chat_query, "chat", None
@@ -175,11 +193,13 @@ async def _extract_content(
             lambda: client.audio.transcriptions.create(model="whisper-1", file=buf)
         )
         transcript: str = result.text
-        # Q&A trigger takes priority
+        # Priority: Q&A (brain) > web search > chat > save
         query = _strip_voice_trigger(transcript)
         if query is not None:
             return query, "ask", None
-        # Chat trigger
+        web_query = _strip_web_trigger(transcript)
+        if web_query is not None:
+            return web_query, "web", None
         chat_query = _strip_chat_trigger(transcript)
         if chat_query is not None:
             return chat_query, "chat", None
@@ -688,6 +708,83 @@ async def _report_current_activity(chat_id: int) -> None:
     await _tg_send_message(chat_id, msg)
 
 
+# ── Tavily web search ─────────────────────────────────────────────
+
+_WEB_SYSTEM_PROMPT = (
+    "Answer the user's question using ONLY the provided web search results below. "
+    "Reply in the same language as the user's question. "
+    "Be concise and factual. "
+    "After the answer, include a 'Источники:' section listing the URLs of the sources you used."
+)
+
+
+async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
+    logger.info("[telegram/web] search query user=%d q=%r", tg_user_id, query[:80])
+    if not query.strip():
+        await _tg_send_message(chat_id, "❓ Пустой поисковый запрос.")
+        return
+    api_key = settings.TAVILY_API_KEY
+    if not api_key:
+        await _tg_send_message(chat_id, "⚠️ TAVILY_API_KEY не настроен.")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "search_depth": settings.TAVILY_SEARCH_DEPTH,
+                    "max_results": 5,
+                    "include_answer": True,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.error("[telegram/web] Tavily error: %s", exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка поиска в интернете. Попробуй позже.")
+        return
+
+    results = data.get("results") or []
+    tavily_answer = (data.get("answer") or "").strip()
+    context_parts: list[str] = []
+    if tavily_answer:
+        context_parts.append(f"Tavily answer: {tavily_answer}")
+    for i, r in enumerate(results[:5], 1):
+        title = (r.get("title") or "").strip()
+        snippet = (r.get("content") or "").strip()[:500]
+        url = (r.get("url") or "").strip()
+        context_parts.append(f"[{i}] {title}\n{snippet}\nURL: {url}")
+    if not context_parts:
+        await _tg_send_message(chat_id, "🔍 Интернет-поиск не вернул результатов.")
+        return
+
+    context_block = "\n\n---\n\n".join(context_parts)
+    messages = [
+        {"role": "system", "content": _WEB_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Web results:\n{context_block}\n\nQuestion: {query}"},
+    ]
+
+    def _do_web_complete() -> str:
+        answer = _chat_complete_sync(messages)
+        _save_chat_turn_sync(tg_user_id, "user", f"[web] {query}")
+        _save_chat_turn_sync(tg_user_id, "assistant", answer)
+        return answer
+
+    try:
+        answer = await asyncio.to_thread(_do_web_complete)
+    except Exception as exc:
+        logger.error("[telegram/web] completion error: %s", exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка при генерации ответа. Попробуй позже.")
+        return
+
+    if len(answer) > _MAX_REPLY_LEN:
+        answer = answer[: _MAX_REPLY_LEN - 3] + "..."
+    await _tg_send_message(chat_id, answer)
+    logger.info("[telegram/web] replied user=%d chars=%d", tg_user_id, len(answer))
+
+
 # ── Async background task ─────────────────────────────────────────
 
 async def _process_update(message: Dict[str, Any]) -> None:
@@ -705,6 +802,11 @@ async def _process_update(message: Dict[str, Any]) -> None:
 
         if not content and not image_bytes:
             logger.info("[telegram] Unsupported message type — skipped")
+            return
+
+        # Tavily web search — real-time internet answer
+        if kind == "web":
+            await _answer_with_web(content, chat_id, tg_user_id)
             return
 
         # General AI chat — does NOT save to Brain notes

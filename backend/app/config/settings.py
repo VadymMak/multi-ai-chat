@@ -179,6 +179,10 @@ class _Settings:
     )
 
     # ── Telegram AI chat mode ─────────────────────────────────────
+    # Tavily web search
+    TAVILY_API_KEY: str = _getenv_str("TAVILY_API_KEY", "")
+    TAVILY_SEARCH_DEPTH: str = _getenv_str("TAVILY_SEARCH_DEPTH", "basic")
+
     # xAI Grok API key
     GROK_API_KEY: str = _getenv_str("GROK_API_KEY", "")
     # Grok text model; use grok-2-vision-1212 for images (auto-selected)
