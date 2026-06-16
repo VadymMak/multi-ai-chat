@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,22 @@ router = APIRouter(prefix="/telegram", tags=["telegram"])
 _PROJECT_ID_STR = str(settings.TELEGRAM_DEFAULT_PROJECT_ID)
 _PROJECT_ID_INT = settings.TELEGRAM_DEFAULT_PROJECT_ID
 _SESSION_ID = "telegram-inbox"
+
+# Trigger words that route a voice message to Q&A instead of saving.
+# Matches at the start of the transcript, followed by optional punctuation/space.
+_VOICE_TRIGGER_RE = re.compile(
+    r"^\s*(вопрос|спроси|спрашиваю|найди|question|ask|find)\b[\s,:\-—]*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_voice_trigger(transcript: str) -> Optional[str]:
+    """Return the query text if transcript starts with a trigger word, else None."""
+    m = _VOICE_TRIGGER_RE.match(transcript)
+    if not m:
+        return None
+    return transcript[m.end():].strip()
+
 
 # ── Lazy OpenAI client (same pattern as memory.py) ────────────────
 _openai_client: Optional[OpenAI] = None
@@ -120,7 +137,11 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
         buf = io.BytesIO(data)
         buf.name = "voice.oga"  # Whisper accepts .oga directly
         result = client.audio.transcriptions.create(model="whisper-1", file=buf)
-        return f"[voice transcript] {result.text}", "voice"
+        transcript: str = result.text
+        query = _strip_voice_trigger(transcript)
+        if query is not None:
+            return query, "ask"
+        return f"[voice transcript] {transcript}", "voice"
 
     # Photo → GPT-4o vision description
     if "photo" in message:
