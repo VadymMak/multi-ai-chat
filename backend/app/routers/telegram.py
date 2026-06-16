@@ -177,7 +177,7 @@ _TG_RETRY_DELAYS = (1.0, 2.0)  # seconds between attempts 1→2 and 2→3
 
 async def _tg_get_file_path(file_id: str) -> str:
     """Return the file_path for a given Telegram file_id (3 attempts, backoff)."""
-    timeout = httpx.Timeout(connect=10.0, read=60.0)
+    timeout = httpx.Timeout(60.0, connect=10.0)
     last_exc: Exception = RuntimeError("no attempts made")
     for attempt, delay in enumerate((*_TG_RETRY_DELAYS, None), start=1):
         try:
@@ -198,7 +198,7 @@ async def _tg_get_file_path(file_id: str) -> str:
 async def _tg_download_file(file_path: str) -> bytes:
     """Download a file from Telegram's CDN (3 attempts, backoff)."""
     url = f"https://api.telegram.org/file/bot{_tg_token()}/{file_path}"
-    timeout = httpx.Timeout(connect=10.0, read=60.0)
+    timeout = httpx.Timeout(60.0, connect=10.0)
     last_exc: Exception = RuntimeError("no attempts made")
     for attempt, delay in enumerate((*_TG_RETRY_DELAYS, None), start=1):
         try:
