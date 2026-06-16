@@ -185,8 +185,9 @@ class _Settings:
 
     # xAI Grok API key
     GROK_API_KEY: str = _getenv_str("GROK_API_KEY", "")
-    # Grok text model; use grok-2-vision-1212 for images (auto-selected)
-    GROK_MODEL: str = _getenv_str("GROK_MODEL", "grok-3")
+    # grok-4.3 is multimodal (text + vision); retired: grok-3, grok-2-vision-1212
+    GROK_MODEL: str = _getenv_str("GROK_MODEL", "grok-4.3")
+    GROK_VISION_MODEL: str = _getenv_str("GROK_VISION_MODEL", "grok-4.3")
     # Provider try-order for /chat: comma-separated gpt|claude|grok
     TELEGRAM_CHAT_PROVIDER_ORDER: tuple[str, ...] = (
         _getenv_csv("TELEGRAM_CHAT_PROVIDER_ORDER") or ("gpt", "claude", "grok")

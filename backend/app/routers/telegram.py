@@ -554,9 +554,8 @@ def _complete_grok(messages: list[dict], image_bytes: Optional[bytes]) -> str:
         base_url="https://api.x.ai/v1",
         http_client=httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0), trust_env=False),
     )
-    model = getattr(settings, "GROK_MODEL", "grok-3")
-    if image_bytes:
-        model = "grok-2-vision-1212"
+    # grok-4.3 handles both text and vision; override via GROK_MODEL / GROK_VISION_MODEL
+    model = settings.GROK_VISION_MODEL if image_bytes else settings.GROK_MODEL
     msgs = _inject_image_gpt(messages, image_bytes)
     resp = client.chat.completions.create(
         model=model,
@@ -596,10 +595,14 @@ def _chat_complete_sync(
             if result and not any(low.startswith(p) for p in ("[openai error]", "[claude error]")):
                 logger.info("[telegram/chat] provider=%s succeeded", provider)
                 return result, provider
+            logger.warning("[telegram/chat] provider=%s bad response: %r", provider, (result or "")[:120])
             errors.append(f"{provider}: bad response")
         except Exception as exc:
-            logger.warning("[telegram/chat] provider=%s error: %s", provider, exc)
-            errors.append(f"{provider}: {exc}")
+            logger.warning(
+                "[telegram/chat] provider=%s failed: %s: %s",
+                provider, type(exc).__name__, exc,
+            )
+            errors.append(f"{provider}: {type(exc).__name__}: {exc}")
 
     logger.error("[telegram/chat] All providers failed: %s", errors)
     return "⚠️ Все AI провайдеры временно недоступны. Попробуй позже.", "none"
