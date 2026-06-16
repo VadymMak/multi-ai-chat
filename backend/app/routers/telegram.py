@@ -33,9 +33,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
-_PROJECT_ID_STR = str(settings.TELEGRAM_DEFAULT_PROJECT_ID)
-_PROJECT_ID_INT = settings.TELEGRAM_DEFAULT_PROJECT_ID
 _SESSION_ID = "telegram-inbox"
+
+
+def _project_for_user(tg_user_id: int) -> tuple[str, int]:
+    """Return (project_id_str, project_id_int) for a Telegram sender.
+
+    Uses TELEGRAM_USER_PROJECT_MAP; falls back to TELEGRAM_DEFAULT_PROJECT_ID.
+    """
+    pid = settings.TELEGRAM_USER_PROJECT_MAP.get(
+        tg_user_id, settings.TELEGRAM_DEFAULT_PROJECT_ID
+    )
+    return str(pid), pid
 
 # Trigger words that route a voice message to Q&A instead of saving.
 # Matches at the start of the transcript, followed by optional punctuation/space.
@@ -184,7 +193,9 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
 
 # ── Brain persistence ─────────────────────────────────────────────
 
-def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
+def _write_to_brain(
+    db: Session, content: str, kind: str, project_id_str: str, project_id_int: int
+) -> MemoryEntry:
     """
     Dual-write:
       1. CanonItem(type=INBOX) — surfaces in build_context_for_query / list_canon_items
@@ -196,8 +207,8 @@ def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
     title = content.replace("\n", " ").replace("\r", "")[:80]
 
     item = CanonItem(
-        project_id=_PROJECT_ID_STR,
-        project_id_int=_PROJECT_ID_INT,
+        project_id=project_id_str,
+        project_id_int=project_id_int,
         role_id=settings.TELEGRAM_ROLE_ID,
         type="INBOX",
         title=title,
@@ -210,11 +221,11 @@ def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
     db.add(item)
     db.commit()
     db.refresh(item)
-    logger.info("[telegram] CanonItem id=%d type=INBOX kind=%s", item.id, kind)
+    logger.info("[telegram] CanonItem id=%d type=INBOX kind=%s project=%d", item.id, kind, project_id_int)
 
     entry = MemoryEntry(
-        project_id=_PROJECT_ID_STR,
-        project_id_int=_PROJECT_ID_INT,
+        project_id=project_id_str,
+        project_id_int=project_id_int,
         role_id=settings.TELEGRAM_ROLE_ID,
         chat_session_id=_SESSION_ID,
         summary=content[:2000],
@@ -226,7 +237,7 @@ def _write_to_brain(db: Session, content: str, kind: str) -> MemoryEntry:
     db.add(entry)
     db.commit()
     db.refresh(entry)
-    logger.info("[telegram] MemoryEntry id=%d session=%s", entry.id, _SESSION_ID)
+    logger.info("[telegram] MemoryEntry id=%d session=%s project=%d", entry.id, _SESSION_ID, project_id_int)
 
     return entry
 
@@ -248,8 +259,8 @@ _SEARCH_LIMIT = 5
 _MAX_REPLY_LEN = 4096
 
 
-async def _answer_from_brain(query: str, chat_id: int) -> None:
-    """Embed query → cosine search over memory_entries → GPT-4o answer → sendMessage."""
+async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
+    """Embed query → cosine search over sender's project memory → GPT-4o answer → sendMessage."""
     if not query.strip():
         await _tg_send_message(chat_id, "❓ Пустой вопрос. Напиши что-нибудь после /ask или ?.")
         return
@@ -266,7 +277,7 @@ async def _answer_from_brain(query: str, chat_id: int) -> None:
                        1 - (m.embedding <=> CAST(:query_embedding AS vector)) AS similarity
                 FROM memory_entries m
                 JOIN projects p ON m.project_id_int = p.id
-                WHERE p.user_id = :uid
+                WHERE m.project_id_int = :pid
                   AND m.embedding IS NOT NULL
                   AND m.deleted = FALSE
                 ORDER BY m.embedding <=> CAST(:query_embedding AS vector)
@@ -274,7 +285,7 @@ async def _answer_from_brain(query: str, chat_id: int) -> None:
             """),
             {
                 "query_embedding": query_embedding,
-                "uid": settings.TELEGRAM_APP_USER_ID,
+                "pid": sender_pid,
                 "limit": _SEARCH_LIMIT,
             },
         ).fetchall()
@@ -386,6 +397,9 @@ async def _report_current_activity(chat_id: int) -> None:
 async def _process_update(message: Dict[str, Any]) -> None:
     """Route message: /ask or ? → Q&A from Brain; everything else → save. Never raises."""
     chat_id: int = message.get("chat", {}).get("id", 0)
+    tg_user_id: int = message.get("from", {}).get("id", 0)
+    pid_str, pid_int = _project_for_user(tg_user_id)
+
     try:
         content, kind = await _extract_content(message)
 
@@ -398,15 +412,15 @@ async def _process_update(message: Dict[str, Any]) -> None:
             logger.info("[telegram] Unsupported message type — skipped")
             return
 
-        # Q&A mode — search Brain, answer, do NOT save as INBOX note
+        # Q&A mode — search sender's project Brain, answer, do NOT save as INBOX note
         if kind == "ask":
-            await _answer_from_brain(content, chat_id)
+            await _answer_from_brain(content, chat_id, sender_pid=pid_int)
             return
 
         # Save mode (text / voice / photo)
         db = SessionLocal()
         try:
-            entry = _write_to_brain(db, content, kind)
+            entry = _write_to_brain(db, content, kind, pid_str, pid_int)
             try:
                 from app.services.vector_service import store_message_with_embedding
                 store_message_with_embedding(db, entry.id, content)
@@ -419,7 +433,7 @@ async def _process_update(message: Dict[str, Any]) -> None:
         title = content.replace("\n", " ").replace("\r", "")[:80]
         await _tg_send_message(
             chat_id,
-            f"✅ Saved to Brain (project {_PROJECT_ID_INT}): {title}",
+            f"✅ Saved to Brain (project {pid_int}): {title}",
         )
 
     except Exception as exc:

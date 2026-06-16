@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 # ---------------------------- env helpers ----------------------------
@@ -37,6 +37,23 @@ def _getenv_int_opt(name: str) -> Optional[int]:
         return int(raw)
     except Exception:
         return None
+
+def _getenv_user_project_map(name: str) -> dict[int, int]:
+    """Parse 'tgId:projectId,tgId:projectId' into dict[int,int]."""
+    raw = os.getenv(name, "")
+    result: dict[int, int] = {}
+    if not raw:
+        return result
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        try:
+            tg_id, proj_id = pair.split(":", 1)
+            result[int(tg_id.strip())] = int(proj_id.strip())
+        except Exception:
+            continue
+    return result
 
 def _getenv_csv(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
@@ -151,6 +168,11 @@ class _Settings:
     TELEGRAM_ROLE_ID: Optional[int] = _getenv_int_opt("TELEGRAM_ROLE_ID")
     # App user whose projects are searched by the Q&A mode (default: admin user id=1)
     TELEGRAM_APP_USER_ID: int = _getenv_int("TELEGRAM_APP_USER_ID", 1)
+    # Per-Telegram-user project routing: "tgId:projectId,tgId:projectId"
+    # Falls back to TELEGRAM_DEFAULT_PROJECT_ID for unmapped senders.
+    TELEGRAM_USER_PROJECT_MAP: dict[int, int] = field(
+        default_factory=lambda: _getenv_user_project_map("TELEGRAM_USER_PROJECT_MAP")
+    )
 
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")
