@@ -712,10 +712,65 @@ async def _report_current_activity(chat_id: int) -> None:
 
 _WEB_SYSTEM_PROMPT = (
     "Answer the user's question using ONLY the provided web search results below. "
-    "Reply in the same language as the user's question. "
-    "Be concise and factual. "
-    "After the answer, include a 'Источники:' section listing the URLs of the sources you used."
+    "Identify the location mentioned in the user's question and answer using THAT location's "
+    "local currency and units (e.g., Slovakia and other eurozone countries use EUR €, "
+    "the UK uses GBP £, the US uses USD $, Ukraine uses UAH ₴ — NEVER default to RUB). "
+    "If the web results are from a different country or currency than the location asked about, "
+    "either convert to the correct local currency (state it is approximate) OR prefer the results "
+    "that match the asked location. "
+    "NEVER present a foreign-country price as if it were the local one. "
+    "Always answer in the same language as the user's question. "
+    "After the answer, include an 'Источники:' section listing the URLs of the sources you used."
 )
+
+# Country hints appended to Tavily query to bias results toward the correct region.
+# Key = substring found in query (lowercase); value = hint appended to search string.
+_COUNTRY_HINTS: list[tuple[str, str]] = [
+    ("словак",   "Slovakia EUR €"),
+    ("slovak",   "Slovakia EUR €"),
+    ("чехи",     "Czech Republic CZK"),
+    ("czech",    "Czech Republic CZK"),
+    ("польш",    "Poland PLN"),
+    ("poland",   "Poland PLN"),
+    ("венгри",   "Hungary HUF"),
+    ("hungary",  "Hungary HUF"),
+    ("австри",   "Austria EUR €"),
+    ("austria",  "Austria EUR €"),
+    ("германи",  "Germany EUR €"),
+    ("german",   "Germany EUR €"),
+    ("франци",   "France EUR €"),
+    ("france",   "France EUR €"),
+    ("итали",    "Italy EUR €"),
+    ("italy",    "Italy EUR €"),
+    ("испани",   "Spain EUR €"),
+    ("spain",    "Spain EUR €"),
+    ("украин",   "Ukraine UAH ₴"),
+    ("украін",   "Ukraine UAH ₴"),
+    ("ukraine",  "Ukraine UAH ₴"),
+    ("великобр", "UK GBP £"),
+    ("united kingdom", "UK GBP £"),
+    ("англи",    "UK GBP £"),
+    ("сша",      "USA USD $"),
+    ("америк",   "USA USD $"),
+    ("united states", "USA USD $"),
+    ("канад",    "Canada CAD"),
+    ("canada",   "Canada CAD"),
+    ("австрали", "Australia AUD"),
+    ("australia","Australia AUD"),
+    ("япони",    "Japan JPY ¥"),
+    ("japan",    "Japan JPY ¥"),
+    ("китай",    "China CNY ¥"),
+    ("china",    "China CNY ¥"),
+]
+
+
+def _localize_query(query: str) -> str:
+    """Append a region/currency hint to the query based on country keywords."""
+    low = query.lower()
+    for kw, hint in _COUNTRY_HINTS:
+        if kw in low:
+            return f"{query} {hint}"
+    return query
 
 
 async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
@@ -727,13 +782,16 @@ async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
     if not api_key:
         await _tg_send_message(chat_id, "⚠️ TAVILY_API_KEY не настроен.")
         return
+    localized_query = _localize_query(query)
+    if localized_query != query:
+        logger.debug("[telegram/web] query localized: %r -> %r", query, localized_query)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             resp = await client.post(
                 "https://api.tavily.com/search",
                 json={
                     "api_key": api_key,
-                    "query": query,
+                    "query": localized_query,
                     "search_depth": settings.TAVILY_SEARCH_DEPTH,
                     "max_results": 5,
                     "include_answer": True,
