@@ -96,6 +96,46 @@ def _strip_web_trigger(text: str) -> Optional[str]:
     return text[m.end():].strip()
 
 
+# ── Model-alias detection ─────────────────────────────────────────
+# Matches the start of the *remaining* text after a trigger word is stripped.
+# Groups cover natural Russian speech, Whisper transliterations, and English.
+_MODEL_ALIAS_PATS: dict[str, list[str]] = {
+    "gpt": [
+        r"gpt\w*", r"гпт\w*", r"джипиит\w*",
+        r"джи\s+пи\s+ти", r"чатgpt\w*", r"чат\s+gpt\w*",
+        r"openai\w*", r"опенаи\w*", r"гптшк\w*",
+    ],
+    "claude": [r"claude\w*", r"клод\w*", r"клауд\w*", r"клоуд\w*"],
+    "grok":   [r"grok\w*",  r"грок\w*", r"груk\w*"],
+}
+
+_MODEL_RE: dict[str, re.Pattern] = {
+    provider: re.compile(
+        r"^\s*(?:" + "|".join(pats) + r")\b[\s,\-—.!?]*",
+        re.IGNORECASE | re.UNICODE,
+    )
+    for provider, pats in _MODEL_ALIAS_PATS.items()
+}
+
+_MODEL_LABELS: dict[str, str] = {
+    "gpt":    "🤖 GPT",
+    "claude": "🤖 Claude",
+    "grok":   "🤖 Grok",
+}
+
+
+def _detect_model(text: str) -> tuple[Optional[str], str]:
+    """
+    If text starts with a model alias, return (provider, remaining_query).
+    Otherwise return (None, text) — caller keeps existing behaviour.
+    """
+    for provider, pat in _MODEL_RE.items():
+        m = pat.match(text)
+        if m:
+            return provider, text[m.end():].strip()
+    return None, text
+
+
 # ── Lazy OpenAI client (same pattern as memory.py) ────────────────
 _openai_client: Optional[OpenAI] = None
 
@@ -213,10 +253,13 @@ async def _extract_content(
             return web_query, "web", None
         chat_query = _strip_chat_trigger(txt)
         if chat_query is not None:
-            return chat_query, "chat", None
+            provider, q = _detect_model(chat_query)
+            return (q, f"chat:{provider}", None) if provider else (chat_query, "chat", None)
         notes_query = _strip_voice_trigger(txt)
         if notes_query is not None:
-            return notes_query, "ask", None
+            # "спроси <model> ..." → model chat; "спроси ..." → brain search
+            provider, q = _detect_model(notes_query)
+            return (q, f"chat:{provider}", None) if provider else (notes_query, "ask", None)
         return txt, "text", None
 
     # Voice / audio → Whisper transcription
@@ -240,10 +283,13 @@ async def _extract_content(
             return web_query, "web", None
         chat_query = _strip_chat_trigger(transcript)
         if chat_query is not None:
-            return chat_query, "chat", None
+            provider, q = _detect_model(chat_query)
+            return (q, f"chat:{provider}", None) if provider else (chat_query, "chat", None)
         query = _strip_voice_trigger(transcript)
         if query is not None:
-            return query, "ask", None
+            # "спроси <model> ..." → model chat; "спроси ..." → brain search
+            provider, q = _detect_model(query)
+            return (q, f"chat:{provider}", None) if provider else (query, "ask", None)
         return f"[voice transcript] {transcript}", "voice", None
 
     # Photo
@@ -259,7 +305,8 @@ async def _extract_content(
         # Chat mode: caption starts with chat trigger — pass raw bytes to AI
         chat_query = _strip_chat_trigger(caption)
         if chat_query is not None:
-            return chat_query, "chat", data
+            provider, q = _detect_model(chat_query)
+            return (q, f"chat:{provider}", data) if provider else (chat_query, "chat", data)
 
         # Default: describe with GPT-4o and save as INBOX note
         b64 = base64.b64encode(data).decode()
@@ -523,9 +570,14 @@ def _complete_grok(messages: list[dict], image_bytes: Optional[bytes]) -> str:
 def _chat_complete_sync(
     messages: list[dict],
     image_bytes: Optional[bytes] = None,
-) -> str:
-    """Try providers in TELEGRAM_CHAT_PROVIDER_ORDER, fall through on error."""
-    order = settings.TELEGRAM_CHAT_PROVIDER_ORDER or ("gpt", "claude", "grok")
+    preferred_provider: Optional[str] = None,
+) -> tuple[str, str]:
+    """Try providers in order; put preferred first. Returns (answer, provider_used)."""
+    base_order = list(settings.TELEGRAM_CHAT_PROVIDER_ORDER or ("gpt", "claude", "grok"))
+    if preferred_provider and preferred_provider in base_order:
+        order = [preferred_provider] + [p for p in base_order if p != preferred_provider]
+    else:
+        order = base_order
     errors: list[str] = []
 
     for provider in order:
@@ -543,14 +595,14 @@ def _chat_complete_sync(
             low = (result or "").lower()
             if result and not any(low.startswith(p) for p in ("[openai error]", "[claude error]")):
                 logger.info("[telegram/chat] provider=%s succeeded", provider)
-                return result
+                return result, provider
             errors.append(f"{provider}: bad response")
         except Exception as exc:
             logger.warning("[telegram/chat] provider=%s error: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
     logger.error("[telegram/chat] All providers failed: %s", errors)
-    return "⚠️ Все AI провайдеры временно недоступны. Попробуй позже."
+    return "⚠️ Все AI провайдеры временно недоступны. Попробуй позже.", "none"
 
 
 def _do_chat_sync(
@@ -558,15 +610,16 @@ def _do_chat_sync(
     tg_user_id: int,
     system: str,
     image_bytes: Optional[bytes],
-) -> str:
-    """Load history → call AI → save both turns. Returns answer. Sync."""
+    preferred_provider: Optional[str] = None,
+) -> tuple[str, str]:
+    """Load history → call AI → save both turns. Returns (answer, provider_used). Sync."""
     history = _load_chat_history_sync(tg_user_id)
     user_content = prompt or "Опиши это изображение."
     messages = [{"role": "system", "content": system}] + history + [{"role": "user", "content": user_content}]
-    answer = _chat_complete_sync(messages, image_bytes)
+    answer, provider_used = _chat_complete_sync(messages, image_bytes, preferred_provider)
     _save_chat_turn_sync(tg_user_id, "user", user_content)
     _save_chat_turn_sync(tg_user_id, "assistant", answer)
-    return answer
+    return answer, provider_used
 
 
 async def _answer_from_chat(
@@ -574,6 +627,7 @@ async def _answer_from_chat(
     chat_id: int,
     tg_user_id: int,
     image_bytes: Optional[bytes] = None,
+    preferred_provider: Optional[str] = None,
 ) -> None:
     """AI general chat: load history → multi-provider → save → reply."""
     if not prompt.strip() and not image_bytes:
@@ -587,16 +641,30 @@ async def _answer_from_chat(
     system = _DAUGHTER_SYSTEM_PROMPT if is_daughter else _CHAT_SYSTEM_PROMPT
 
     try:
-        answer = await asyncio.to_thread(_do_chat_sync, prompt, tg_user_id, system, image_bytes)
+        answer, provider_used = await asyncio.to_thread(
+            _do_chat_sync, prompt, tg_user_id, system, image_bytes, preferred_provider
+        )
     except Exception as exc:
         logger.error("[telegram/chat] error for user=%d: %s", tg_user_id, exc, exc_info=True)
         await _tg_send_message(chat_id, "⚠️ Ошибка при обработке запроса. Попробуй позже.")
         return
 
+    # Tag the reply when the user explicitly requested a model
+    if preferred_provider and provider_used in _MODEL_LABELS:
+        label = _MODEL_LABELS[provider_used]
+        # Add a fallback note if a different provider stepped in
+        if provider_used != preferred_provider:
+            wanted = _MODEL_LABELS.get(preferred_provider, preferred_provider)
+            label = f"{label} (fallback от {wanted})"
+        answer = f"{label}: {answer}"
+
     if len(answer) > _MAX_REPLY_LEN:
         answer = answer[: _MAX_REPLY_LEN - 3] + "..."
     await _tg_send_message(chat_id, answer)
-    logger.info("[telegram/chat] replied to user=%d chars=%d", tg_user_id, len(answer))
+    logger.info(
+        "[telegram/chat] replied user=%d preferred=%s used=%s chars=%d",
+        tg_user_id, preferred_provider, provider_used, len(answer),
+    )
 
 
 # ── Brain Q&A (vector search → GPT-4o → reply) ───────────────────
@@ -876,7 +944,7 @@ async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
     ]
 
     def _do_web_complete() -> str:
-        answer = _chat_complete_sync(messages)
+        answer, _ = _chat_complete_sync(messages)
         _save_chat_turn_sync(tg_user_id, "user", f"[web] {query}")
         _save_chat_turn_sync(tg_user_id, "assistant", answer)
         return answer
@@ -925,8 +993,10 @@ async def _process_update(message: Dict[str, Any]) -> None:
             return
 
         # General AI chat — does NOT save to Brain notes
-        if kind == "chat":
-            await _answer_from_chat(content, chat_id, tg_user_id, image_bytes)
+        # kind="chat" → default chain; kind="chat:<provider>" → prefer that model
+        if kind == "chat" or kind.startswith("chat:"):
+            preferred = kind.split(":", 1)[1] if ":" in kind else None
+            await _answer_from_chat(content, chat_id, tg_user_id, image_bytes, preferred)
             return
 
         # Brain Q&A — searches notes, does NOT save
