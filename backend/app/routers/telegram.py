@@ -78,9 +78,9 @@ def _strip_chat_trigger(text: str) -> Optional[str]:
     return text[m.end():].strip()
 
 
-# Web search trigger words (text + voice). Does NOT overlap with "найди" (brain Q&A).
+# Web search triggers: "поиск" or "/web". No overlap with brain/chat triggers.
 _WEB_TRIGGER_RE = re.compile(
-    r"^\s*(/web|погугли|поиск\s+в\s+интернете|search\s+web)\b[\s,:\-—.!?]*",
+    r"^\s*(поиск|/web)\b[\s,:\-—.!?]*",
     re.IGNORECASE | re.UNICODE,
 )
 
