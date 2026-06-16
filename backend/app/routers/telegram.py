@@ -117,7 +117,7 @@ async def _tg_send_message(chat_id: int, text: str) -> None:
 async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
     """Return (content, kind). kind ∈ {text, voice, photo}."""
 
-    # Plain text — detect /ask or ? prefix for Q&A mode
+    # Plain text — detect /ask, ?, or /now prefix
     if "text" in message:
         txt: str = message["text"]
         if txt.startswith("/ask"):
@@ -126,6 +126,9 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
         if txt.startswith("?"):
             query = txt[1:].strip()
             return query, "ask"
+        low = txt.strip().lower()
+        if low == "/now" or low.startswith("что я сейчас"):
+            return "", "now"
         return txt, "text"
 
     # Voice or audio → transcribe with Whisper
@@ -327,6 +330,57 @@ async def _answer_from_brain(query: str, chat_id: int) -> None:
     logger.info("[telegram/ask] Answered (hits=%d, chars=%d)", len(hits), len(answer))
 
 
+# ── VSCode activity ───────────────────────────────────────────────
+
+async def _report_current_activity(chat_id: int) -> None:
+    """Query latest vscode_activity for the configured user and send to Telegram."""
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("""
+                SELECT va.file_path, va.language, va.folder_identifier,
+                       va.updated_at, p.name AS project_name
+                FROM vscode_activity va
+                LEFT JOIN projects p ON va.project_id = p.id
+                WHERE va.user_id = :uid
+            """),
+            {"uid": settings.TELEGRAM_APP_USER_ID},
+        ).fetchone()
+    except Exception as exc:
+        logger.error("[telegram/now] DB error: %s", exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка при получении активности.")
+        return
+    finally:
+        db.close()
+
+    if not row:
+        await _tg_send_message(
+            chat_id,
+            "🖥 Нет данных о текущем файле. Убедись что VS Code Extension работает.",
+        )
+        return
+
+    now = datetime.utcnow()
+    delta = now - row.updated_at.replace(tzinfo=None)
+    mins = int(delta.total_seconds() // 60)
+    if mins < 1:
+        ago = "только что"
+    elif mins < 60:
+        ago = f"{mins} мин. назад"
+    else:
+        hours = mins // 60
+        ago = f"{hours} ч. назад"
+
+    proj = row.project_name or row.folder_identifier or "неизвестно"
+    lang = f" ({row.language})" if row.language else ""
+    msg = (
+        f"🖥 Сейчас открыт: {row.file_path}{lang}\n"
+        f"Проект: {proj}\n"
+        f"Обновлено: {ago}"
+    )
+    await _tg_send_message(chat_id, msg)
+
+
 # ── Async background task ─────────────────────────────────────────
 
 async def _process_update(message: Dict[str, Any]) -> None:
@@ -334,6 +388,12 @@ async def _process_update(message: Dict[str, Any]) -> None:
     chat_id: int = message.get("chat", {}).get("id", 0)
     try:
         content, kind = await _extract_content(message)
+
+        # /now — report current VSCode activity, no content needed
+        if kind == "now":
+            await _report_current_activity(chat_id)
+            return
+
         if not content:
             logger.info("[telegram] Unsupported message type — skipped")
             return

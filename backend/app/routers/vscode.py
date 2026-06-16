@@ -1901,3 +1901,77 @@ async def active_suggestions(
         query_used=query,
         search_ms=elapsed_ms,
     )
+
+
+# ============================================================
+# VSCODE ACTIVITY — current open file tracking
+# ============================================================
+
+class ActivityRequest(BaseModel):
+    file_path: str
+    language: Optional[str] = None
+    project_id: Optional[int] = None
+    folder_identifier: Optional[str] = None
+
+
+@router.post("/activity")
+async def report_activity(
+    request: ActivityRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Upsert the latest open file for this user (one row per user_id).
+    Called by the VS Code extension on active editor change / save (debounced 5s).
+    """
+    db.execute(
+        text("""
+            INSERT INTO vscode_activity
+                (user_id, project_id, folder_identifier, file_path, language, updated_at)
+            VALUES
+                (:uid, :pid, :folder, :fp, :lang, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                project_id        = EXCLUDED.project_id,
+                folder_identifier = EXCLUDED.folder_identifier,
+                file_path         = EXCLUDED.file_path,
+                language          = EXCLUDED.language,
+                updated_at        = NOW()
+        """),
+        {
+            "uid": current_user.id,
+            "pid": request.project_id,
+            "folder": (request.folder_identifier or "")[:64] or None,
+            "fp": request.file_path,
+            "lang": request.language,
+        },
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/activity")
+async def get_activity(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Return the latest vscode_activity row for this user."""
+    row = db.execute(
+        text("""
+            SELECT va.file_path, va.language, va.folder_identifier,
+                   va.updated_at, p.name AS project_name
+            FROM vscode_activity va
+            LEFT JOIN projects p ON va.project_id = p.id
+            WHERE va.user_id = :uid
+        """),
+        {"uid": current_user.id},
+    ).fetchone()
+    if not row:
+        return {"active": False}
+    return {
+        "active": True,
+        "file_path": row.file_path,
+        "language": row.language,
+        "folder_identifier": row.folder_identifier,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "project_name": row.project_name,
+    }
