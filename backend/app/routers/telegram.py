@@ -49,23 +49,25 @@ def _project_for_user(tg_user_id: int) -> tuple[str, int]:
 
 # Trigger words that route a voice message to Q&A instead of saving.
 # Matches at the start of the transcript, followed by optional punctuation/space.
+# Notes / brain Q&A trigger — applies to both text and voice.
+# "найди" alone = search notes; "найди в интернете" = web (handled by _WEB_TRIGGER_RE).
 _VOICE_TRIGGER_RE = re.compile(
-    r"^\s*(вопрос|спроси|спрашиваю|найди|question|ask|find)\b[\s,:\-—]*",
+    r"^\s*(вопрос\w*|спроси\w*|спрашиваю|question|ask\w*|find\w*)\b[\s,:\-—]*",
     re.IGNORECASE | re.UNICODE,
 )
 
 
 def _strip_voice_trigger(transcript: str) -> Optional[str]:
-    """Return the query text if transcript starts with a trigger word, else None."""
+    """Return the query text if transcript starts with a notes/brain trigger, else None."""
     m = _VOICE_TRIGGER_RE.match(transcript)
     if not m:
         return None
     return transcript[m.end():].strip()
 
 
-# Trigger words that route text/voice/photo-caption to the AI chat mode.
+# AI chat trigger — stem covers ответь/ответьте/ответ + /chat.
 _CHAT_TRIGGER_RE = re.compile(
-    r"^\s*(ответь|ответ|/chat)\b[\s,:\-—.!?]*",
+    r"^\s*(ответь\w*|ответ|/chat)\b[\s,:\-—.!?]*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -78,9 +80,9 @@ def _strip_chat_trigger(text: str) -> Optional[str]:
     return text[m.end():].strip()
 
 
-# Web search triggers: "поиск" or "/web". No overlap with brain/chat triggers.
+# Web search triggers. "найди в интернете" is distinct from bare "найди" (brain).
 _WEB_TRIGGER_RE = re.compile(
-    r"^\s*(поиск|/web)\b[\s,:\-—.!?]*",
+    r"^\s*(поиск\w*|поищи\w*|погугли\w*|найди\s+в\s+интернете|/web|search\s+web)\b[\s,:\-—.!?]*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -211,6 +213,9 @@ async def _extract_content(
         chat_query = _strip_chat_trigger(txt)
         if chat_query is not None:
             return chat_query, "chat", None
+        notes_query = _strip_voice_trigger(txt)
+        if notes_query is not None:
+            return notes_query, "ask", None
         return txt, "text", None
 
     # Voice / audio → Whisper transcription
@@ -228,16 +233,16 @@ async def _extract_content(
             lambda: client.audio.transcriptions.create(model="whisper-1", file=buf)
         )
         transcript: str = result.text
-        # Priority: Q&A (brain) > web search > chat > save
-        query = _strip_voice_trigger(transcript)
-        if query is not None:
-            return query, "ask", None
+        # Priority: web > chat > notes(brain) > save
         web_query = _strip_web_trigger(transcript)
         if web_query is not None:
             return web_query, "web", None
         chat_query = _strip_chat_trigger(transcript)
         if chat_query is not None:
             return chat_query, "chat", None
+        query = _strip_voice_trigger(transcript)
+        if query is not None:
+            return query, "ask", None
         return f"[voice transcript] {transcript}", "voice", None
 
     # Photo
@@ -758,7 +763,13 @@ _WEB_SYSTEM_PROMPT = (
     "that match the asked location. "
     "NEVER present a foreign-country price as if it were the local one. "
     "Always answer in the same language as the user's question. "
-    "After the answer, include an 'Источники:' section listing the URLs of the sources you used."
+    "Do NOT add a sources, links, or references section — sources will be appended automatically."
+)
+
+# Strip any model-generated sources block so we can append a single code-built one.
+_SOURCES_STRIP_RE = re.compile(
+    r"\n[\s\n]*(Источники|Sources|Ссылки|Links|References)\s*:.*",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Country hints appended to Tavily query to bias results toward the correct region.
@@ -874,6 +885,12 @@ async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
         logger.error("[telegram/web] completion error: %s", exc, exc_info=True)
         await _tg_send_message(chat_id, "⚠️ Ошибка при генерации ответа. Попробуй позже.")
         return
+
+    # Strip any model-generated sources block, then append exactly one code-built section.
+    answer = _SOURCES_STRIP_RE.sub("", answer).rstrip()
+    source_urls = [r.get("url", "").strip() for r in results[:5] if r.get("url")]
+    if source_urls:
+        answer += "\n\nИсточники:\n" + "\n".join(f"• {u}" for u in source_urls)
 
     if len(answer) > _MAX_REPLY_LEN:
         answer = answer[: _MAX_REPLY_LEN - 3] + "..."
