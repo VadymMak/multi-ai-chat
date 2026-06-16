@@ -50,10 +50,10 @@ def _project_for_user(tg_user_id: int) -> tuple[str, int]:
 
 # Trigger words that route a voice message to Q&A instead of saving.
 # Matches at the start of the transcript, followed by optional punctuation/space.
-# Notes / brain Q&A trigger — applies to both text and voice.
-# "найди" alone = search notes; "найди в интернете" = web (handled by _WEB_TRIGGER_RE).
+# Notes / brain Q&A trigger — "спроси" removed (now routes to AI chat).
+# "найди в заметках" stays here; "найди в интернете" = web (handled by _WEB_TRIGGER_RE).
 _VOICE_TRIGGER_RE = re.compile(
-    r"^\s*(вопрос\w*|спроси\w*|спрашиваю|question|ask\w*|find\w*)\b[\s,:\-—]*",
+    r"^\s*(вопрос\w*|спрашиваю|найди\s+в\s+заметках|question|ask\w*|find\w*)\b[\s,:\-—]*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -66,9 +66,9 @@ def _strip_voice_trigger(transcript: str) -> Optional[str]:
     return transcript[m.end():].strip()
 
 
-# AI chat trigger — stem covers ответь/ответьте/ответ + /chat.
+# AI chat trigger — "спроси" added here to avoid collision with notes search.
 _CHAT_TRIGGER_RE = re.compile(
-    r"^\s*(ответь\w*|ответ|/chat)\b[\s,:\-—.!?]*",
+    r"^\s*(ответь\w*|ответ|спроси\w*|/chat)\b[\s,:\-—.!?]*",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -101,12 +101,12 @@ def _strip_web_trigger(text: str) -> Optional[str]:
 # Groups cover natural Russian speech, Whisper transliterations, and English.
 _MODEL_ALIAS_PATS: dict[str, list[str]] = {
     "gpt": [
-        r"gpt\w*", r"гпт\w*", r"джипиит\w*",
-        r"джи\s+пи\s+ти", r"чатgpt\w*", r"чат\s+gpt\w*",
-        r"openai\w*", r"опенаи\w*", r"гптшк\w*",
+        r"gpt\w*", r"гпт\w*", r"джипит\w*",
+        r"джи\s+пи\s+ти", r"чатgpt\w*", r"чат\s*gpt\w*",
+        r"openai\w*", r"опенаи\w*", r"гптшк\w*", r"чатгпт\w*",
     ],
-    "claude": [r"claude\w*", r"клод\w*", r"клауд\w*", r"клоуд\w*"],
-    "grok":   [r"grok\w*",  r"грок\w*", r"груk\w*"],
+    "claude": [r"claude\w*", r"клод\w*", r"клот\w*", r"клауд\w*", r"клоуд\w*"],
+    "grok":   [r"grok\w*",  r"грок\w*", r"грук\w*", r"грокк\w*"],
 }
 
 _MODEL_RE: dict[str, re.Pattern] = {
@@ -652,14 +652,17 @@ async def _answer_from_chat(
         await _tg_send_message(chat_id, "⚠️ Ошибка при обработке запроса. Попробуй позже.")
         return
 
-    # Tag the reply when the user explicitly requested a model
-    if preferred_provider and provider_used in _MODEL_LABELS:
-        label = _MODEL_LABELS[provider_used]
-        # Add a fallback note if a different provider stepped in
+    # Always prefix with mode; show which model answered and flag fallbacks
+    if preferred_provider:
+        label = _MODEL_LABELS.get(provider_used, "🤖 ИИ")
         if provider_used != preferred_provider:
             wanted = _MODEL_LABELS.get(preferred_provider, preferred_provider)
             label = f"{label} (fallback от {wanted})"
-        answer = f"{label}: {answer}"
+    elif provider_used in _MODEL_LABELS:
+        label = _MODEL_LABELS[provider_used]
+    else:
+        label = "💬 ИИ"
+    answer = f"{label}: {answer}"
 
     if len(answer) > _MAX_REPLY_LEN:
         answer = answer[: _MAX_REPLY_LEN - 3] + "..."
@@ -730,7 +733,8 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
     if not hits:
         await _tg_send_message(
             chat_id,
-            "🔍 Ничего не нашлось в заметках по этому запросу. Попробуй другие слова.",
+            "🔎 Заметки: ничего не нашлось по этому запросу.\n\n"
+            "_Если хотел ответ от ИИ — скажи «ответь …» или «спроси Клода/Грока/GPT …»._",
         )
         return
 
@@ -766,6 +770,7 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
         await _tg_send_message(chat_id, "⚠️ Ошибка генерации ответа. Попробуй позже.")
         return
 
+    answer = f"🔎 Заметки:\n{answer}"
     if len(answer) > _MAX_REPLY_LEN:
         answer = answer[: _MAX_REPLY_LEN - 3] + "..."
 
@@ -937,7 +942,7 @@ async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
         url = (r.get("url") or "").strip()
         context_parts.append(f"[{i}] {title}\n{snippet}\nURL: {url}")
     if not context_parts:
-        await _tg_send_message(chat_id, "🔍 Интернет-поиск не вернул результатов.")
+        await _tg_send_message(chat_id, "🌐 Поиск: интернет-поиск не вернул результатов.")
         return
 
     context_block = "\n\n---\n\n".join(context_parts)
@@ -965,6 +970,7 @@ async def _answer_with_web(query: str, chat_id: int, tg_user_id: int) -> None:
     if source_urls:
         answer += "\n\nИсточники:\n" + "\n".join(f"• {u}" for u in source_urls)
 
+    answer = f"🌐 Поиск:\n{answer}"
     if len(answer) > _MAX_REPLY_LEN:
         answer = answer[: _MAX_REPLY_LEN - 3] + "..."
     await _tg_send_message(chat_id, answer)
