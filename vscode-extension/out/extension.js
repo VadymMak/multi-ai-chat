@@ -44,14 +44,54 @@ const http = __importStar(require("http"));
 // State
 // ─────────────────────────────────────────────
 let diagnosticDebounce;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let activityDebounce;
 const reportedErrors = new Set();
 // ─────────────────────────────────────────────
 // Activation — silent, no UI
 // ─────────────────────────────────────────────
 function activate(context) {
-    context.subscriptions.push(vscode.languages.onDidChangeDiagnostics(onDiagnosticsChange));
+    context.subscriptions.push(vscode.languages.onDidChangeDiagnostics(onDiagnosticsChange), vscode.window.onDidChangeActiveTextEditor(onActiveEditorChange), vscode.workspace.onDidSaveTextDocument(onDidSaveDocument));
+    // Report whatever is already open on activation
+    const editor = vscode.window.activeTextEditor;
+    if (editor)
+        scheduleActivityReport(editor.document);
 }
 function deactivate() { }
+// ─────────────────────────────────────────────
+// Activity tracking — report current open file
+// ─────────────────────────────────────────────
+function onActiveEditorChange(editor) {
+    if (!editor)
+        return;
+    scheduleActivityReport(editor.document);
+}
+function onDidSaveDocument(doc) {
+    scheduleActivityReport(doc);
+}
+function scheduleActivityReport(doc) {
+    if (activityDebounce)
+        clearTimeout(activityDebounce);
+    activityDebounce = setTimeout(() => reportActivity(doc), 5000);
+}
+async function reportActivity(doc) {
+    const cfg = getConfig();
+    if (!cfg.apiUrl || !cfg.apiToken)
+        return;
+    const folder = vscode.workspace.getWorkspaceFolder(doc.uri);
+    const projectId = folder ? getProjectId(doc.uri) : null;
+    const folderIdentifier = folder ? folder.name.slice(0, 64) : null;
+    const filePath = vscode.workspace.asRelativePath(doc.uri);
+    const language = doc.languageId;
+    const body = JSON.stringify({
+        project_id: projectId,
+        folder_identifier: folderIdentifier,
+        file_path: filePath,
+        language,
+    });
+    // Fire and forget — never surfaces failures to the user
+    post(`${cfg.apiUrl}/vscode/activity`, body, cfg.apiToken).catch(() => { });
+}
 // ─────────────────────────────────────────────
 // Diagnostics listener
 // ─────────────────────────────────────────────
