@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User
 from app.services.brain_effectiveness import compute_summary
@@ -374,6 +375,11 @@ def sync_usage_logs(
     (deduped by message_id via the parser's insert path).
     Without a body, parse `~/.claude/projects/*` on the server filesystem.
     """
+    if settings.DISABLE_USAGE_SYNC:
+        ignored = len(payload.records) if payload and payload.records else 0
+        logger.debug("[usage/sync] kill-switch active — ignored %d records", ignored)
+        return {"status": "disabled", "ignored": ignored}
+
     since_d: Optional[date] = None
     if since:
         try:

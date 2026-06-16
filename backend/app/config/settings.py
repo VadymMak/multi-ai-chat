@@ -168,6 +168,10 @@ class _Settings:
     TELEGRAM_ROLE_ID: Optional[int] = _getenv_int_opt("TELEGRAM_ROLE_ID")
     # App user whose projects are searched by the Q&A mode (default: admin user id=1)
     TELEGRAM_APP_USER_ID: int = _getenv_int("TELEGRAM_APP_USER_ID", 1)
+    # Kill-switch: return 200 immediately from /usage/sync without any DB work.
+    # Set DISABLE_USAGE_SYNC=true in Railway to stop a bulk-POST flood.
+    DISABLE_USAGE_SYNC: bool = _getenv_bool("DISABLE_USAGE_SYNC", False)
+
     # Per-Telegram-user project routing: "tgId:projectId,tgId:projectId"
     # Falls back to TELEGRAM_DEFAULT_PROJECT_ID for unmapped senders.
     TELEGRAM_USER_PROJECT_MAP: dict[int, int] = field(
