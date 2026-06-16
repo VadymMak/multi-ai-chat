@@ -178,6 +178,18 @@ class _Settings:
         default_factory=lambda: _getenv_user_project_map("TELEGRAM_USER_PROJECT_MAP")
     )
 
+    # ── Telegram AI chat mode ─────────────────────────────────────
+    # xAI Grok API key
+    GROK_API_KEY: str = _getenv_str("GROK_API_KEY", "")
+    # Grok text model; use grok-2-vision-1212 for images (auto-selected)
+    GROK_MODEL: str = _getenv_str("GROK_MODEL", "grok-3")
+    # Provider try-order for /chat: comma-separated gpt|claude|grok
+    TELEGRAM_CHAT_PROVIDER_ORDER: tuple[str, ...] = (
+        _getenv_csv("TELEGRAM_CHAT_PROVIDER_ORDER") or ("gpt", "claude", "grok")
+    )
+    # Optional: tg_user_id of daughter — enables age-appropriate system prompt
+    TELEGRAM_DAUGHTER_USER_ID: Optional[int] = _getenv_int_opt("TELEGRAM_DAUGHTER_USER_ID")
+
     # === YouTube deterministic search (new) ===
     YOUTUBE_REGION_CODE: str = _getenv_str("YOUTUBE_REGION_CODE", "US")
     YOUTUBE_SAFESEARCH: str = _getenv_str("YOUTUBE_SAFESEARCH", "moderate")  # none|moderate|strict

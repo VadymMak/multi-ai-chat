@@ -63,6 +63,21 @@ def _strip_voice_trigger(transcript: str) -> Optional[str]:
     return transcript[m.end():].strip()
 
 
+# Trigger words that route text/voice/photo-caption to the AI chat mode.
+_CHAT_TRIGGER_RE = re.compile(
+    r"^\s*(ответь|ответ|/chat)\b[\s,:\-—.!?]*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_chat_trigger(text: str) -> Optional[str]:
+    """Return the prompt text if the message starts with a chat trigger, else None."""
+    m = _CHAT_TRIGGER_RE.match(text)
+    if not m:
+        return None
+    return text[m.end():].strip()
+
+
 # ── Lazy OpenAI client (same pattern as memory.py) ────────────────
 _openai_client: Optional[OpenAI] = None
 
@@ -124,53 +139,70 @@ async def _tg_send_message(chat_id: int, text: str) -> None:
 
 # ── Content extraction ────────────────────────────────────────────
 
-async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
-    """Return (content, kind). kind ∈ {text, voice, photo}."""
+async def _extract_content(
+    message: Dict[str, Any],
+) -> tuple[str, str, Optional[bytes]]:
+    """Return (content, kind, image_bytes).
 
-    # Plain text — detect /ask, ?, or /now prefix
+    kind ∈ {text, voice, photo, ask, chat, now, unknown}
+    image_bytes is non-None only for kind="chat" with an attached photo.
+    """
+
+    # Plain text
     if "text" in message:
         txt: str = message["text"]
         if txt.startswith("/ask"):
-            query = txt[4:].strip()
-            return query, "ask"
+            return txt[4:].strip(), "ask", None
         if txt.startswith("?"):
-            query = txt[1:].strip()
-            return query, "ask"
+            return txt[1:].strip(), "ask", None
         low = txt.strip().lower()
         if low == "/now" or low.startswith("что я сейчас"):
-            return "", "now"
-        return txt, "text"
+            return "", "now", None
+        chat_query = _strip_chat_trigger(txt)
+        if chat_query is not None:
+            return chat_query, "chat", None
+        return txt, "text", None
 
-    # Voice or audio → transcribe with Whisper
+    # Voice / audio → Whisper transcription
     if "voice" in message or "audio" in message:
         media = message.get("voice") or message.get("audio")
         fp = await _tg_get_file_path(media["file_id"])
         data = await _tg_download_file(fp)
         client = _get_openai_client()
         buf = io.BytesIO(data)
-        buf.name = "voice.oga"  # Whisper accepts .oga directly
-        # Sync SDK call — run in thread so the event loop stays free
+        buf.name = "voice.oga"
         result = await asyncio.to_thread(
             lambda: client.audio.transcriptions.create(model="whisper-1", file=buf)
         )
         transcript: str = result.text
+        # Q&A trigger takes priority
         query = _strip_voice_trigger(transcript)
         if query is not None:
-            return query, "ask"
-        return f"[voice transcript] {transcript}", "voice"
+            return query, "ask", None
+        # Chat trigger
+        chat_query = _strip_chat_trigger(transcript)
+        if chat_query is not None:
+            return chat_query, "chat", None
+        return f"[voice transcript] {transcript}", "voice", None
 
-    # Photo → GPT-4o vision description
+    # Photo
     if "photo" in message:
         largest = message["photo"][-1]
         caption: str = message.get("caption", "")
         fp = await _tg_get_file_path(largest["file_id"])
         data = await _tg_download_file(fp)
+
+        # Chat mode: caption starts with chat trigger — pass raw bytes to AI
+        chat_query = _strip_chat_trigger(caption)
+        if chat_query is not None:
+            return chat_query, "chat", data
+
+        # Default: describe with GPT-4o and save as INBOX note
         b64 = base64.b64encode(data).decode()
         prompt_text = "Describe this image concisely. Focus on the main subject and any visible text."
         if caption:
             prompt_text += f"\n\nCaption: {caption}"
         client = _get_openai_client()
-        # Sync SDK call — run in thread so the event loop stays free
         response = await asyncio.to_thread(
             lambda: client.chat.completions.create(
                 model="gpt-4o",
@@ -193,9 +225,9 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
         full = f"[screenshot] {description}"
         if caption:
             full += f"\nCaption: {caption}"
-        return full, "photo"
+        return full, "photo", None
 
-    return "", "unknown"
+    return "", "unknown", None
 
 
 # ── Brain persistence ─────────────────────────────────────────────
@@ -269,6 +301,238 @@ def _save_to_brain_sync(content: str, kind: str, pid_str: str, pid_int: int) -> 
     finally:
         db.close()
     return content.replace("\n", " ").replace("\r", "")[:80]
+
+
+# ── AI chat mode — multi-provider, conversation memory ───────────
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are a helpful, friendly assistant. "
+    "Answer questions concisely and clearly. "
+    "Reply in the same language as the user's message. "
+    "Be warm and supportive."
+)
+
+_DAUGHTER_SYSTEM_PROMPT = (
+    "You are a friendly, educational AI assistant for a young girl. "
+    "Use simple, clear language that is easy for children to understand. "
+    "Be encouraging, positive, and always family-friendly. "
+    "Reply in the same language as her message."
+)
+
+_CHAT_HISTORY_LIMIT = 10  # last N messages per user
+
+
+# ── DB helpers (sync — call via asyncio.to_thread) ───────────────
+
+def _load_chat_history_sync(tg_user_id: int) -> list[dict]:
+    """Return the last _CHAT_HISTORY_LIMIT turns in chronological order."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT role, content FROM telegram_chat_history
+                WHERE tg_user_id = :uid
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": tg_user_id, "lim": _CHAT_HISTORY_LIMIT},
+        ).fetchall()
+        return [{"role": r.role, "content": r.content} for r in reversed(rows)]
+    finally:
+        db.close()
+
+
+def _save_chat_turn_sync(tg_user_id: int, role: str, content: str) -> None:
+    """Append one turn to telegram_chat_history."""
+    db = SessionLocal()
+    try:
+        db.execute(
+            text("""
+                INSERT INTO telegram_chat_history (tg_user_id, role, content, created_at)
+                VALUES (:uid, :role, :content, NOW())
+            """),
+            {"uid": tg_user_id, "role": role, "content": content},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+# ── Provider completions (sync — call via asyncio.to_thread) ─────
+
+def _inject_image_gpt(messages: list[dict], image_bytes: Optional[bytes]) -> list[dict]:
+    """Attach image_bytes to the last user message in OpenAI content-list format."""
+    if not image_bytes:
+        return messages
+    b64 = base64.b64encode(image_bytes).decode()
+    msgs = list(messages)
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i]["role"] == "user":
+            msgs[i] = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msgs[i]["content"]},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            }
+            break
+    return msgs
+
+
+def _complete_gpt(messages: list[dict], image_bytes: Optional[bytes]) -> str:
+    api_key = getattr(settings, "OPENAI_API_KEY", None)
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not configured")
+    client = _get_openai_client()
+    msgs = _inject_image_gpt(messages, image_bytes)
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=msgs,
+        max_tokens=800,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def _complete_claude(messages: list[dict], image_bytes: Optional[bytes]) -> str:
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", None)
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not configured")
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed")
+
+    system = None
+    conv_msgs: list[dict] = []
+    for m in messages:
+        if m["role"] == "system":
+            system = m["content"]
+        else:
+            conv_msgs.append(dict(m))
+
+    if image_bytes and conv_msgs and conv_msgs[-1]["role"] == "user":
+        b64 = base64.b64encode(image_bytes).decode()
+        conv_msgs[-1] = {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "text", "text": conv_msgs[-1]["content"]},
+            ],
+        }
+
+    client = Anthropic(
+        api_key=api_key,
+        http_client=httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0)),
+    )
+    model = getattr(settings, "ANTHROPIC_DEFAULT_MODEL", "claude-sonnet-4-20250514")
+    kwargs: dict = {"model": model, "max_tokens": 800, "messages": conv_msgs}
+    if system:
+        kwargs["system"] = system
+    resp = client.messages.create(**kwargs)
+    return resp.content[0].text.strip()
+
+
+def _complete_grok(messages: list[dict], image_bytes: Optional[bytes]) -> str:
+    api_key = getattr(settings, "GROK_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GROK_API_KEY not configured")
+    from openai import OpenAI as _XAI
+    client = _XAI(
+        api_key=api_key,
+        base_url="https://api.x.ai/v1",
+        http_client=httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0), trust_env=False),
+    )
+    model = getattr(settings, "GROK_MODEL", "grok-3")
+    if image_bytes:
+        model = "grok-2-vision-1212"
+    msgs = _inject_image_gpt(messages, image_bytes)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=msgs,
+        max_tokens=800,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def _chat_complete_sync(
+    messages: list[dict],
+    image_bytes: Optional[bytes] = None,
+) -> str:
+    """Try providers in TELEGRAM_CHAT_PROVIDER_ORDER, fall through on error."""
+    order = settings.TELEGRAM_CHAT_PROVIDER_ORDER or ("gpt", "claude", "grok")
+    errors: list[str] = []
+
+    for provider in order:
+        try:
+            if provider == "gpt":
+                result = _complete_gpt(messages, image_bytes)
+            elif provider == "claude":
+                result = _complete_claude(messages, image_bytes)
+            elif provider == "grok":
+                result = _complete_grok(messages, image_bytes)
+            else:
+                logger.warning("[telegram/chat] Unknown provider %r — skipping", provider)
+                continue
+
+            low = (result or "").lower()
+            if result and not any(low.startswith(p) for p in ("[openai error]", "[claude error]")):
+                logger.info("[telegram/chat] provider=%s succeeded", provider)
+                return result
+            errors.append(f"{provider}: bad response")
+        except Exception as exc:
+            logger.warning("[telegram/chat] provider=%s error: %s", provider, exc)
+            errors.append(f"{provider}: {exc}")
+
+    logger.error("[telegram/chat] All providers failed: %s", errors)
+    return "⚠️ Все AI провайдеры временно недоступны. Попробуй позже."
+
+
+def _do_chat_sync(
+    prompt: str,
+    tg_user_id: int,
+    system: str,
+    image_bytes: Optional[bytes],
+) -> str:
+    """Load history → call AI → save both turns. Returns answer. Sync."""
+    history = _load_chat_history_sync(tg_user_id)
+    user_content = prompt or "Опиши это изображение."
+    messages = [{"role": "system", "content": system}] + history + [{"role": "user", "content": user_content}]
+    answer = _chat_complete_sync(messages, image_bytes)
+    _save_chat_turn_sync(tg_user_id, "user", user_content)
+    _save_chat_turn_sync(tg_user_id, "assistant", answer)
+    return answer
+
+
+async def _answer_from_chat(
+    prompt: str,
+    chat_id: int,
+    tg_user_id: int,
+    image_bytes: Optional[bytes] = None,
+) -> None:
+    """AI general chat: load history → multi-provider → save → reply."""
+    if not prompt.strip() and not image_bytes:
+        await _tg_send_message(chat_id, "❓ Пустое сообщение. Напиши вопрос после 'ответь'.")
+        return
+
+    is_daughter = (
+        getattr(settings, "TELEGRAM_DAUGHTER_USER_ID", None) is not None
+        and settings.TELEGRAM_DAUGHTER_USER_ID == tg_user_id
+    )
+    system = _DAUGHTER_SYSTEM_PROMPT if is_daughter else _CHAT_SYSTEM_PROMPT
+
+    try:
+        answer = await asyncio.to_thread(_do_chat_sync, prompt, tg_user_id, system, image_bytes)
+    except Exception as exc:
+        logger.error("[telegram/chat] error for user=%d: %s", tg_user_id, exc, exc_info=True)
+        await _tg_send_message(chat_id, "⚠️ Ошибка при обработке запроса. Попробуй позже.")
+        return
+
+    if len(answer) > _MAX_REPLY_LEN:
+        answer = answer[: _MAX_REPLY_LEN - 3] + "..."
+    await _tg_send_message(chat_id, answer)
+    logger.info("[telegram/chat] replied to user=%d chars=%d", tg_user_id, len(answer))
 
 
 # ── Brain Q&A (vector search → GPT-4o → reply) ───────────────────
@@ -427,29 +691,33 @@ async def _report_current_activity(chat_id: int) -> None:
 # ── Async background task ─────────────────────────────────────────
 
 async def _process_update(message: Dict[str, Any]) -> None:
-    """Route message: /ask or ? → Q&A from Brain; everything else → save. Never raises."""
+    """Route message to the correct handler. Never raises."""
     chat_id: int = message.get("chat", {}).get("id", 0)
     tg_user_id: int = message.get("from", {}).get("id", 0)
     pid_str, pid_int = _project_for_user(tg_user_id)
 
     try:
-        content, kind = await _extract_content(message)
+        content, kind, image_bytes = await _extract_content(message)
 
-        # /now — report current VSCode activity, no content needed
         if kind == "now":
             await _report_current_activity(chat_id)
             return
 
-        if not content:
+        if not content and not image_bytes:
             logger.info("[telegram] Unsupported message type — skipped")
             return
 
-        # Q&A mode — search sender's project Brain, answer, do NOT save as INBOX note
+        # General AI chat — does NOT save to Brain notes
+        if kind == "chat":
+            await _answer_from_chat(content, chat_id, tg_user_id, image_bytes)
+            return
+
+        # Brain Q&A — searches notes, does NOT save
         if kind == "ask":
             await _answer_from_brain(content, chat_id, sender_pid=pid_int)
             return
 
-        # Save mode (text / voice / photo) — DB + embedding in thread pool
+        # Save mode (text / voice / photo) — writes to Brain
         title = await asyncio.to_thread(
             _save_to_brain_sync, content, kind, pid_str, pid_int
         )
@@ -460,7 +728,7 @@ async def _process_update(message: Dict[str, Any]) -> None:
 
     except Exception as exc:
         logger.error("[telegram] _process_update error: %s", exc, exc_info=True)
-        await _tg_send_message(chat_id, "⚠️ Failed to save. Check server logs.")
+        await _tg_send_message(chat_id, "⚠️ Failed to process. Check server logs.")
 
 
 # ── Webhook endpoint ──────────────────────────────────────────────
