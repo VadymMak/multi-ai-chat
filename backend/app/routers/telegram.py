@@ -12,6 +12,7 @@ filters by allowed user IDs, and stores messages in Brain:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
@@ -148,7 +149,10 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
         client = _get_openai_client()
         buf = io.BytesIO(data)
         buf.name = "voice.oga"  # Whisper accepts .oga directly
-        result = client.audio.transcriptions.create(model="whisper-1", file=buf)
+        # Sync SDK call — run in thread so the event loop stays free
+        result = await asyncio.to_thread(
+            lambda: client.audio.transcriptions.create(model="whisper-1", file=buf)
+        )
         transcript: str = result.text
         query = _strip_voice_trigger(transcript)
         if query is not None:
@@ -166,21 +170,24 @@ async def _extract_content(message: Dict[str, Any]) -> tuple[str, str]:
         if caption:
             prompt_text += f"\n\nCaption: {caption}"
         client = _get_openai_client()
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                        },
-                    ],
-                }
-            ],
-            max_tokens=500,
+        # Sync SDK call — run in thread so the event loop stays free
+        response = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=500,
+            )
         )
         description = response.choices[0].message.content.strip()
         full = f"[screenshot] {description}"
@@ -242,6 +249,28 @@ def _write_to_brain(
     return entry
 
 
+# ── Sync save helper (DB + embedding) — called via asyncio.to_thread ──
+
+def _save_to_brain_sync(content: str, kind: str, pid_str: str, pid_int: int) -> str:
+    """Write CanonItem + MemoryEntry + embedding. Returns title snippet.
+
+    Intentionally synchronous — call with asyncio.to_thread so the
+    event loop is never blocked by DB commits or the OpenAI embedding call.
+    """
+    db = SessionLocal()
+    try:
+        entry = _write_to_brain(db, content, kind, pid_str, pid_int)
+        try:
+            from app.services.vector_service import store_message_with_embedding
+            store_message_with_embedding(db, entry.id, content)
+            logger.info("[telegram] Embedding stored for entry %d", entry.id)
+        except Exception as emb_exc:
+            logger.warning("[telegram] Embedding skipped: %s", emb_exc)
+    finally:
+        db.close()
+    return content.replace("\n", " ").replace("\r", "")[:80]
+
+
 # ── Brain Q&A (vector search → GPT-4o → reply) ───────────────────
 
 _ANSWER_SYSTEM_PROMPT = (
@@ -268,7 +297,8 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
     db = SessionLocal()
     try:
         from app.services.vector_service import create_embedding
-        query_embedding: list[float] = create_embedding(query)
+        # Sync OpenAI embedding call — run in thread
+        query_embedding: list[float] = await asyncio.to_thread(create_embedding, query)
 
         rows = db.execute(
             text("""
@@ -313,20 +343,22 @@ async def _answer_from_brain(query: str, chat_id: int, sender_pid: int) -> None:
         context_parts.append(f"[{i}] ({ts}) [{proj}]\n{note_text[:600]}")
     context_block = "\n\n---\n\n".join(context_parts)
 
-    # GPT-4o answer generation
+    # GPT-4o answer generation — sync SDK call in thread
     try:
         client = _get_openai_client()
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Notes:\n{context_block}\n\nQuestion: {query}",
-                },
-            ],
-            max_tokens=800,
-            temperature=0.3,
+        response = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Notes:\n{context_block}\n\nQuestion: {query}",
+                    },
+                ],
+                max_tokens=800,
+                temperature=0.3,
+            )
         )
         answer = response.choices[0].message.content.strip()
     except Exception as exc:
@@ -417,20 +449,10 @@ async def _process_update(message: Dict[str, Any]) -> None:
             await _answer_from_brain(content, chat_id, sender_pid=pid_int)
             return
 
-        # Save mode (text / voice / photo)
-        db = SessionLocal()
-        try:
-            entry = _write_to_brain(db, content, kind, pid_str, pid_int)
-            try:
-                from app.services.vector_service import store_message_with_embedding
-                store_message_with_embedding(db, entry.id, content)
-                logger.info("[telegram] Embedding stored for entry %d", entry.id)
-            except Exception as emb_exc:
-                logger.warning("[telegram] Embedding skipped: %s", emb_exc)
-        finally:
-            db.close()
-
-        title = content.replace("\n", " ").replace("\r", "")[:80]
+        # Save mode (text / voice / photo) — DB + embedding in thread pool
+        title = await asyncio.to_thread(
+            _save_to_brain_sync, content, kind, pid_str, pid_int
+        )
         await _tg_send_message(
             chat_id,
             f"✅ Saved to Brain (project {pid_int}): {title}",
@@ -453,10 +475,12 @@ async def telegram_webhook(
     Telegram webhook receiver.
 
     1. Validates X-Telegram-Bot-Api-Secret-Token (skipped when TELEGRAM_WEBHOOK_SECRET unset).
-    2. Filters by TELEGRAM_ALLOWED_USER_IDS (returns ignored 200 when not in list).
-    3. Returns 200 immediately; heavy work (download/transcribe/embed) runs in background.
+    2. Filters by TELEGRAM_ALLOWED_USER_IDS (returns 200 when not in list).
+    3. Returns 200 immediately — ALL heavy work (download/transcribe/embed/DB) in background.
     """
-    # 1. Secret token check
+    logger.info("[telegram] webhook received")
+
+    # 1. Secret token check — 403 is intentional and correct here
     secret = settings.TELEGRAM_WEBHOOK_SECRET
     if secret and x_telegram_bot_api_secret_token != secret:
         logger.warning("[telegram] Invalid or missing X-Telegram-Bot-Api-Secret-Token")
@@ -468,17 +492,24 @@ async def telegram_webhook(
     except Exception:
         return {"status": "invalid_json"}
 
-    message: Optional[Dict[str, Any]] = update.get("message") or update.get("edited_message")
-    if not message:
-        return {"status": "ignored", "reason": "no_message"}
+    # 3-4. Dispatch — catch-all ensures we always return 200 so Telegram
+    # doesn't retry indefinitely on unexpected errors.
+    try:
+        message: Optional[Dict[str, Any]] = update.get("message") or update.get("edited_message")
+        if not message:
+            return {"status": "ignored", "reason": "no_message"}
 
-    # 3. Allowlist check
-    from_id = str(message.get("from", {}).get("id", ""))
-    allowed = settings.TELEGRAM_ALLOWED_USER_IDS
-    if allowed and from_id not in allowed:
-        logger.info("[telegram] User %s not in allowlist — ignored", from_id)
-        return {"status": "ignored", "reason": "not_allowed"}
+        from_id = str(message.get("from", {}).get("id", ""))
+        allowed = settings.TELEGRAM_ALLOWED_USER_IDS
+        if allowed and from_id not in allowed:
+            logger.info("[telegram] User %s not in allowlist — ignored", from_id)
+            return {"status": "ignored", "reason": "not_allowed"}
 
-    # 4. Schedule background processing — return 200 to Telegram immediately
-    background_tasks.add_task(_process_update, message)
-    return {"status": "queued"}
+        # Schedule background processing — returns 200 to Telegram immediately
+        background_tasks.add_task(_process_update, message)
+        logger.info("[telegram] queued update from user=%s", from_id)
+        return {"status": "queued"}
+
+    except Exception as exc:
+        logger.error("[telegram] webhook dispatch error: %s", exc, exc_info=True)
+        return {"status": "error"}
