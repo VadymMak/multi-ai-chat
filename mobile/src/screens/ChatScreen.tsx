@@ -178,7 +178,7 @@ export default function ChatScreen() {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") return;
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: "images",
       quality: 0.8,
     });
     if (!result.canceled && result.assets[0]) {
@@ -253,25 +253,26 @@ export default function ChatScreen() {
           <Text style={styles.headerTitle}>Brain</Text>
         </View>
 
-        {/* Messages */}
-        <FlatList
-          data={listData}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          inverted
-          contentContainerStyle={styles.listContent}
-          style={styles.list}
-          keyboardShouldPersistTaps="handled"
-          ListEmptyComponent={
-            <View style={styles.emptyWrap}>
-              <MaterialCommunityIcons name="brain" size={60} color={colors.textHint} />
-              <Text style={styles.emptyTitle}>Привет! Я Brain</Text>
-              <Text style={styles.emptyHint}>
-                Задайте вопрос, поищите в заметках или сохраните идею
-              </Text>
-            </View>
-          }
-        />
+        {/* Messages / empty state — empty rendered OUTSIDE inverted FlatList to avoid mirroring */}
+        {listData.length === 0 ? (
+          <View style={styles.emptyOuter}>
+            <MaterialCommunityIcons name="brain" size={60} color={colors.textHint} />
+            <Text style={styles.emptyTitle}>Привет! Я Brain</Text>
+            <Text style={styles.emptyHint}>
+              Задайте вопрос, поищите в заметках или сохраните идею
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={listData}
+            keyExtractor={(item) => item.id}
+            renderItem={renderItem}
+            inverted
+            contentContainerStyle={styles.listContent}
+            style={styles.list}
+            keyboardShouldPersistTaps="handled"
+          />
+        )}
 
         {/* Mode bar */}
         <View style={styles.modeBar}>
@@ -458,11 +459,12 @@ const styles = StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bgChat },
   listContent: { paddingHorizontal: 12, paddingVertical: 12 },
 
-  emptyWrap: {
-    transform: [{ scaleY: -1 }],
+  emptyOuter: {
+    flex: 1,
     alignItems: "center",
-    paddingTop: 72,
+    justifyContent: "center",
     gap: 12,
+    backgroundColor: colors.bgChat,
   },
   emptyTitle: { color: colors.textSecondary, fontSize: 18, fontWeight: "600" },
   emptyHint: {

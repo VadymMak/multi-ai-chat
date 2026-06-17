@@ -45,7 +45,8 @@
           "photosPermission": "Multi-AI Chat accesses your photos to send images.",
           "cameraPermission": "Multi-AI Chat uses your camera to take photos."
         }
-      ]
+      ],
+      "expo-audio"
     ]
   }
 }
