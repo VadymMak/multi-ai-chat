@@ -127,9 +127,10 @@ async def message(
                 status_code=400,
                 detail="Nothing to save: provide text, audio, or image",
             )
-        if image_bytes and not prompt:
+        if image_bytes:
             try:
-                prompt = await describe_image(image_bytes)
+                description = await describe_image(image_bytes)
+                prompt = f"{prompt}\n{description}".strip() if prompt else description
             except Exception as exc:
                 logger.error("[app/message] image description failed: %s", exc)
                 raise HTTPException(status_code=502, detail=f"Image description failed: {exc}")

@@ -88,13 +88,14 @@ export default function ChatScreen() {
       if (!text && !pendingImage && !audioUri) return;
       if (isLoading) return;
 
-      const userContent = audioUri
-        ? "🎤 Голосовое сообщение"
-        : pendingImage
-        ? text
-          ? `📷 ${text}`
-          : "📷 Фото"
-        : text;
+      const userContent =
+        audioUri && imgCopy
+          ? "🎤📷 Голосовое + фото"
+          : audioUri
+          ? "🎤 Голосовое сообщение"
+          : imgCopy
+          ? (text ? `📷 ${text}` : "📷 Фото")
+          : text;
 
       const imgCopy = pendingImage;
 
@@ -117,15 +118,15 @@ export default function ChatScreen() {
             type: "audio/m4a",
             name: "voice.m4a",
           } as unknown as Blob);
-        } else if (imgCopy) {
+        } else if (text) {
+          formData.append("text", text);
+        }
+        if (imgCopy) {
           formData.append("image", {
             uri: imgCopy.uri,
             type: imgCopy.mimeType || "image/jpeg",
             name: "photo.jpg",
           } as unknown as Blob);
-          if (text) formData.append("text", text);
-        } else {
-          formData.append("text", text);
         }
 
         const { data } = await api.post("/api/app/message", formData, {
