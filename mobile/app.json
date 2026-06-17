@@ -16,7 +16,8 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.vadymmak.multiaichat",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Multi-AI Chat uses your microphone for voice messages."
+        "NSMicrophoneUsageDescription": "Multi-AI Chat uses your microphone for voice messages.",
+        "NSPhotoLibraryUsageDescription": "Multi-AI Chat accesses your photos to send images."
       }
     },
     "android": {
@@ -26,7 +27,9 @@
       },
       "package": "com.vadymmak.multiaichat",
       "permissions": [
-        "RECORD_AUDIO"
+        "RECORD_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "READ_EXTERNAL_STORAGE"
       ]
     },
     "web": {
@@ -35,7 +38,14 @@
     "owner": "vadymmak",
     "plugins": [
       "expo-localization",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Multi-AI Chat accesses your photos to send images.",
+          "cameraPermission": "Multi-AI Chat uses your camera to take photos."
+        }
+      ]
     ]
   }
 }
