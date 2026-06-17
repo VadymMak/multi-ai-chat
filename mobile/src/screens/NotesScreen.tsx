@@ -7,11 +7,10 @@ import {
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
-  Animated,
-  PanResponder,
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Swipeable } from "react-native-gesture-handler";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "../lib/api";
 import { colors, spacing, borderRadius } from "../theme";
@@ -24,8 +23,8 @@ interface Note {
   created_at: string;
 }
 
-const DELETE_WIDTH = 80;
 const DELETE_BG = "#A32D2D";
+const DELETE_WIDTH = 80;
 
 function formatDate(iso: string): string {
   try {
@@ -39,7 +38,7 @@ function formatDate(iso: string): string {
   }
 }
 
-// ── Swipeable row ──────────────────────────────────────────────
+// ── Note row with swipe-to-delete + trash icon fallback ────────
 
 interface SwipeableNoteProps {
   item: Note;
@@ -47,101 +46,71 @@ interface SwipeableNoteProps {
 }
 
 function SwipeableNote({ item, onDelete }: SwipeableNoteProps) {
-  const translateX = useRef(new Animated.Value(0)).current;
-  const isOpen = useRef(false);
-
-  function snapOpen() {
-    isOpen.current = true;
-    Animated.spring(translateX, {
-      toValue: -DELETE_WIDTH,
-      useNativeDriver: true,
-      tension: 100,
-      friction: 10,
-    }).start();
-  }
-
-  function snapClose() {
-    isOpen.current = false;
-    Animated.spring(translateX, {
-      toValue: 0,
-      useNativeDriver: true,
-      tension: 100,
-      friction: 10,
-    }).start();
-  }
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, gs) =>
-        Math.abs(gs.dx) > 6 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
-      onPanResponderMove: (_, gs) => {
-        const base = isOpen.current ? -DELETE_WIDTH : 0;
-        translateX.setValue(
-          Math.max(-DELETE_WIDTH, Math.min(0, base + gs.dx))
-        );
-      },
-      onPanResponderRelease: (_, gs) => {
-        const base = isOpen.current ? -DELETE_WIDTH : 0;
-        const projected = base + gs.dx;
-        if (projected < -(DELETE_WIDTH / 2) || gs.vx < -0.4) {
-          snapOpen();
-        } else {
-          snapClose();
-        }
-      },
-      onPanResponderTerminate: () => snapClose(),
-    })
-  ).current;
+  const swipeRef = useRef<Swipeable>(null);
 
   function handleDeletePress() {
+    swipeRef.current?.close();
     Alert.alert(
       "Удалить заметку?",
       item.title || "Без названия",
       [
-        { text: "Отмена", style: "cancel", onPress: snapClose },
+        { text: "Отмена", style: "cancel" },
         { text: "Удалить", style: "destructive", onPress: () => onDelete(item.id) },
       ]
     );
   }
 
-  return (
-    <View style={swipeStyles.wrapper}>
-      {/* Delete action sits absolutely on the right; card slides to reveal it */}
-      <View style={[StyleSheet.absoluteFill, swipeStyles.actionContainer]}>
-        <TouchableOpacity
-          style={swipeStyles.deleteBtn}
-          onPress={handleDeletePress}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="trash-outline" size={20} color="#fff" />
-          <Text style={swipeStyles.deleteBtnText}>Удалить</Text>
-        </TouchableOpacity>
-      </View>
+  const renderRightActions = () => (
+    <TouchableOpacity
+      style={swipeStyles.deleteAction}
+      onPress={handleDeletePress}
+      activeOpacity={0.85}
+    >
+      <Ionicons name="trash-outline" size={20} color="#fff" />
+      <Text style={swipeStyles.deleteBtnText}>Удалить</Text>
+    </TouchableOpacity>
+  );
 
-      <Animated.View
-        {...panResponder.panHandlers}
-        style={{ transform: [{ translateX }] }}
-      >
-        <View style={styles.card}>
+  return (
+    <Swipeable
+      ref={swipeRef}
+      renderRightActions={renderRightActions}
+      rightThreshold={40}
+      overshootRight={false}
+      friction={1.5}
+    >
+      <View style={styles.card}>
+        {/* Title row: text + visible trash icon */}
+        <View style={styles.cardHeader}>
           <Text style={styles.cardTitle} numberOfLines={1}>
             {item.title || "Без названия"}
           </Text>
-          <Text style={styles.cardBody} numberOfLines={3}>
-            {item.body}
-          </Text>
-          {item.tags?.length > 0 && (
-            <View style={styles.tagsRow}>
-              {item.tags.slice(0, 4).map((tag, i) => (
-                <View key={i} style={styles.tag}>
-                  <Text style={styles.tagText}>#{tag}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-          <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
+          <TouchableOpacity
+            onPress={handleDeletePress}
+            hitSlop={10}
+            activeOpacity={0.6}
+          >
+            <Ionicons name="trash-outline" size={15} color={colors.textHint} />
+          </TouchableOpacity>
         </View>
-      </Animated.View>
-    </View>
+
+        <Text style={styles.cardBody} numberOfLines={3}>
+          {item.body}
+        </Text>
+
+        {item.tags?.length > 0 && (
+          <View style={styles.tagsRow}>
+            {item.tags.slice(0, 4).map((tag, i) => (
+              <View key={i} style={styles.tag}>
+                <Text style={styles.tagText}>#{tag}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
+      </View>
+    </Swipeable>
   );
 }
 
@@ -182,7 +151,6 @@ export default function NotesScreen() {
 
   const handleDelete = useCallback(
     async (id: number) => {
-      // Optimistic: remove immediately, restore on error
       setNotes((prev) => prev.filter((n) => n.id !== id));
       try {
         await api.delete(`/api/app/notes/${id}`);
@@ -262,16 +230,7 @@ export default function NotesScreen() {
 // ── Styles ─────────────────────────────────────────────────────
 
 const swipeStyles = StyleSheet.create({
-  wrapper: {
-    // No overflow:hidden — card slides left off-screen edge, revealing delete behind
-    position: "relative",
-  },
-  actionContainer: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    alignItems: "stretch",
-  },
-  deleteBtn: {
+  deleteAction: {
     width: DELETE_WIDTH,
     backgroundColor: DELETE_BG,
     alignItems: "center",
@@ -338,7 +297,12 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     gap: 6,
   },
-  cardTitle: { color: colors.textPrimary, fontSize: 15, fontWeight: "600" },
+  cardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  cardTitle: { color: colors.textPrimary, fontSize: 15, fontWeight: "600", flex: 1 },
   cardBody: { color: colors.textSecondary, fontSize: 13, lineHeight: 18 },
   tagsRow: { flexDirection: "row", flexWrap: "wrap", gap: 4 },
   tag: {
