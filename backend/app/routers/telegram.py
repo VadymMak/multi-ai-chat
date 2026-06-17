@@ -255,17 +255,25 @@ async def _extract_content(
         except _TG_TRANSIENT as exc:
             raise _MediaDownloadError("photo download failed") from exc
 
-        chat_query = _strip_chat_trigger(caption)
-        if chat_query is not None:
-            provider, q = _detect_model(chat_query)
-            return (q, f"chat:{provider}", data) if provider else (chat_query, "chat", data)
-
-        # Default: describe + save
-        description = await brain_assistant.describe_image(data, caption)
-        full = f"[screenshot] {description}"
+        # Caption present → vision chat regardless of mode trigger.
+        # Image always wins: web/notes cannot process images.
         if caption:
-            full += f"\nCaption: {caption}"
-        return full, "photo", None
+            # Strip any trigger prefix to get the actual question.
+            vision_prompt = caption
+            for strip_fn in (_strip_chat_trigger, _strip_web_trigger, _strip_voice_trigger):
+                stripped = strip_fn(caption)
+                if stripped is not None:
+                    vision_prompt = stripped
+                    break
+            if not vision_prompt.strip():
+                vision_prompt = "Что на изображении?"
+            provider, q = _detect_model(vision_prompt)
+            prompt = q.strip() or vision_prompt.strip()
+            return (prompt, f"chat:{provider}", data) if provider else (prompt, "chat", data)
+
+        # No caption → describe + save (original behaviour)
+        description = await brain_assistant.describe_image(data, "")
+        return f"[screenshot] {description}", "photo", None
 
     return "", "unknown", None
 

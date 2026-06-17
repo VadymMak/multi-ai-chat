@@ -113,6 +113,13 @@ async def message(
             raise HTTPException(status_code=400, detail="Uploaded image file is empty")
         kind = "photo"
 
+    # ── Image present + non-save mode → force vision chat ────────────────────
+    # web / notes cannot process images; image always wins except in save mode.
+    if image_bytes and mode != "save":
+        mode = "chat"
+        if not prompt:
+            prompt = "Что на изображении?"
+
     # ── save ─────────────────────────────────────────────────
     if mode == "save":
         if not prompt and not image_bytes:
