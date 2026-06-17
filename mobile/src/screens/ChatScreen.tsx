@@ -1,6 +1,7 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { colors } from "../theme";
 
 export default function ChatScreen() {
   return (
@@ -16,13 +17,13 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0A0A0A" },
+  container: { flex: 1, backgroundColor: colors.bg },
   header: {
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#222",
+    borderBottomColor: colors.border,
   },
-  title: { color: "#FFFFFF", fontSize: 20, fontWeight: "bold" },
+  title: { color: colors.textPrimary, fontSize: 20, fontWeight: "bold" },
   body: { flex: 1, alignItems: "center", justifyContent: "center" },
-  placeholder: { color: "#666666", fontSize: 16 },
+  placeholder: { color: colors.textHint, fontSize: 16 },
 });
