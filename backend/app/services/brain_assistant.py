@@ -203,6 +203,44 @@ async def save_note(project_id: int, content: str, kind: str = "text") -> dict:
     return await asyncio.to_thread(_save_note_sync, project_id, content, kind)
 
 
+async def delete_note(db: Session, project_id: int, note_id: int) -> dict:
+    """Soft-delete a note: set canon_items.is_active=False + memory_entries.deleted=True.
+
+    Verifies the note belongs to ``project_id`` before touching anything.
+    Raises ValueError if the note is not found or already deleted.
+    Returns ``{"deleted": True, "id": note_id}``.
+    """
+    item = (
+        db.query(CanonItem)
+        .filter(
+            CanonItem.id == note_id,
+            CanonItem.project_id_int == project_id,
+            CanonItem.is_active == True,
+        )
+        .first()
+    )
+    if not item:
+        raise ValueError(f"Note {note_id} not found in project {project_id}")
+
+    item.is_active = False
+
+    db.execute(
+        text("""
+            UPDATE memory_entries
+               SET deleted = TRUE
+             WHERE project_id_int = :pid
+               AND raw_text     = :body
+               AND timestamp    = :ts
+               AND deleted      = FALSE
+        """),
+        {"pid": project_id, "body": item.body, "ts": item.created_at},
+    )
+
+    db.commit()
+    logger.info("[brain/delete] note id=%d project=%d soft-deleted", note_id, project_id)
+    return {"deleted": True, "id": note_id}
+
+
 # ── transcribe / describe_image ───────────────────────────────
 
 async def transcribe(audio_bytes: bytes) -> str:

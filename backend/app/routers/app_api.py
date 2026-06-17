@@ -20,6 +20,7 @@ from app.memory.models import User
 from app.services.brain_assistant import (
     answer_from_notes,
     chat,
+    delete_note as delete_note_svc,
     describe_image,
     get_or_create_user_project,
     save_note,
@@ -227,6 +228,32 @@ async def message(
 
     # Should be unreachable
     raise HTTPException(status_code=500, detail="Unhandled mode")
+
+
+@router.delete("/notes/{note_id}")
+async def delete_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Soft-delete a note that belongs to the current user's project.
+
+    Sets ``canon_items.is_active = False`` and ``memory_entries.deleted = True``
+    so the note disappears from both the notes list and semantic search.
+    The rows are NOT hard-deleted (reversible).
+    Returns ``{"deleted": true, "id": <note_id>}``.
+    """
+    project = get_or_create_user_project(db, current_user)
+    try:
+        return await delete_note_svc(db, project.id, note_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.error(
+            "[app/notes] delete failed user=%d note=%d: %s",
+            current_user.id, note_id, exc,
+        )
+        raise HTTPException(status_code=502, detail=f"Delete failed: {exc}")
 
 
 @router.get("/notes")

@@ -88,6 +88,8 @@ export default function ChatScreen() {
       if (!text && !pendingImage && !audioUri) return;
       if (isLoading) return;
 
+      const imgCopy = pendingImage;
+
       const userContent =
         audioUri && imgCopy
           ? "🎤📷 Голосовое + фото"
@@ -96,8 +98,6 @@ export default function ChatScreen() {
           : imgCopy
           ? (text ? `📷 ${text}` : "📷 Фото")
           : text;
-
-      const imgCopy = pendingImage;
 
       setMessages((prev) => [
         { id: String(Date.now()), role: "user", content: userContent },
