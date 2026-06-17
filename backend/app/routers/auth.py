@@ -10,7 +10,6 @@ from app.memory.db import get_db
 from app.memory.models import User
 from app.deps import get_current_user, get_current_active_user, get_superuser
 from app.utils.security import validate_password, create_access_token
-from app.config.settings import settings
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -70,15 +69,13 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == user_data.username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
     
-    # Create user with trial period
-    trial_ends = datetime.utcnow() + timedelta(days=settings.TRIAL_DAYS)
-    
     user = User(
         email=user_data.email,
         username=user_data.username,
         password_hash=User.hash_password(user_data.password),
-        status="trial",
-        trial_ends_at=trial_ends,
+        status="active",
+        trial_ends_at=None,
+        subscription_ends_at=None,
         is_superuser=False,
         is_active=True
     )
