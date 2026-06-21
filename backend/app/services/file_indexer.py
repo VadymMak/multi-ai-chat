@@ -334,7 +334,13 @@ def resolve_typescript_import(
     # Skip node_modules / external packages
     if not import_path.startswith(".") and not import_path.startswith("@/"):
         return None
-    
+
+    # Skip non-code assets (CSS modules, images, fonts, etc.)
+    _ASSET_EXTS = (".css", ".scss", ".sass", ".less", ".svg", ".png", ".jpg",
+                   ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".json")
+    if any(import_path.endswith(ext) for ext in _ASSET_EXTS):
+        return None
+
     # Normalize source file path (replace backslashes)
     source_file = source_file.replace("\\", "/")
     
