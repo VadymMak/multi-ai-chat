@@ -340,15 +340,19 @@ def resolve_typescript_import(
     
     # Handle @/ alias (typically maps to src/)
     if import_path.startswith("@/"):
-        # Find src/ in source_file to determine base
+        rest = import_path[2:]  # strip @/  →  "lib/db"
         if "/src/" in source_file:
+            # e.g. "frontend/src/app/..." → base is "frontend/src/"
             src_idx = source_file.find("/src/")
-            base_path = source_file[:src_idx + 5]  # e.g., "frontend/src/"
-            import_path = "./" + import_path[2:]  # @/hooks → ./hooks
-            # Pretend source is at src/index.ts for resolution
-            source_file = base_path + "index.ts"
+            base_prefix = source_file[:src_idx + 5]
+            source_file = base_prefix + "index.ts"
+            import_path = "./" + rest
+        elif source_file.startswith("src/"):
+            # Project indexed from root: @/ maps to src/
+            source_file = "src/index.ts"
+            import_path = "./" + rest
         else:
-            import_path = "./" + import_path[2:]
+            import_path = "./" + rest
     
     # Get directory of source file
     if "/" in source_file:
