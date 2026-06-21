@@ -618,6 +618,72 @@ Imports: {', '.join(metadata.get('imports', []))}
     )
 
 
+@router.post("/rebuild-dependencies/{project_id}")
+async def rebuild_dependencies(
+    project_id: int,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Rebuild all file dependencies for a project.
+
+    Fetches all indexed files, re-resolves imports against the
+    already-complete file list, and saves fresh dependencies.
+    Run this AFTER full indexing to get accurate dep graph.
+    """
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.user_id == current_user.id
+    ).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    # Load all files with their metadata (imports stored as JSON)
+    rows = db.execute(text("""
+        SELECT file_path, language, metadata
+        FROM file_embeddings
+        WHERE project_id = :project_id
+    """), {"project_id": project_id}).fetchall()
+
+    # Clear existing dependencies
+    db.execute(text("""
+        DELETE FROM file_dependencies WHERE project_id = :project_id
+    """), {"project_id": project_id})
+    db.commit()
+
+    total_deps = 0
+    files_processed = 0
+
+    for row in rows:
+        file_path, language, metadata_raw = row
+        if not metadata_raw:
+            continue
+        try:
+            meta = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
+            imports = meta.get("imports", [])
+            if imports and language in ("typescript", "javascript"):
+                deps = save_file_dependencies(
+                    project_id=project_id,
+                    source_file=file_path,
+                    imports=imports,
+                    language=language,
+                    db=db,
+                )
+                total_deps += deps
+                db.commit()
+        except Exception as e:
+            logger.error(f"  ❌ rebuild deps for {file_path}: {e}")
+        files_processed += 1
+
+    logger.info(f"✅ rebuild-dependencies project={project_id}: files={files_processed}, deps={total_deps}")
+    return {
+        "success": True,
+        "project_id": project_id,
+        "files_processed": files_processed,
+        "dependencies_saved": total_deps,
+    }
+
+
 @router.get("/find-related/{project_id}")
 async def find_related_files(
     project_id: int,
@@ -628,10 +694,10 @@ async def find_related_files(
 ):
     """
     Find files related to a specific file.
-    
+
     Uses the file's embedding to find similar files.
     Useful for understanding dependencies and related code.
-    
+
     Args:
         project_id: Project ID
         file_path: Path of the file to find related files for
