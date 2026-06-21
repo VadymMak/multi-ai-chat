@@ -16,6 +16,7 @@ Endpoints:
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import hashlib
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import text
