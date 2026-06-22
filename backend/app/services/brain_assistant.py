@@ -428,8 +428,7 @@ def _complete_glm(messages: list[dict], image_bytes: Optional[bytes] = None) -> 
     kwargs: dict = {"model": model, "max_tokens": 800, "messages": conv}
     if system:
         kwargs["system"] = system
-    result = client.messages.create(**kwargs).content[0].text.strip()
-    return f"🤖 GLM: {result}"
+    return client.messages.create(**kwargs).content[0].text.strip()
 
 
 def _chat_complete_sync(

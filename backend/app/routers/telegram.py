@@ -94,6 +94,7 @@ _MODEL_ALIAS_PATS: dict[str, list[str]] = {
     ],
     "claude": [r"claude\w*", r"клод\w*", r"клот\w*", r"клауд\w*", r"клоуд\w*"],
     "grok":   [r"grok\w*", r"грок\w*", r"грук\w*", r"грокк\w*"],
+    "glm":    [r"glm[\w.\-]*", r"глм\w*", r"гэлэм\w*", r"джиэлэм\w*", r"глэм\w*"],
 }
 
 _MODEL_RE: dict[str, re.Pattern] = {
@@ -108,6 +109,7 @@ _MODEL_LABELS: dict[str, str] = {
     "gpt":    "🤖 GPT",
     "claude": "🤖 Claude",
     "grok":   "🤖 Grok",
+    "glm":    "🤖 GLM",
 }
 
 
