@@ -401,6 +401,37 @@ def _complete_grok(messages: list[dict], image_bytes: Optional[bytes] = None) ->
     ).choices[0].message.content.strip()
 
 
+def _complete_glm(messages: list[dict], image_bytes: Optional[bytes] = None) -> str:
+    api_key = getattr(settings, "GLM_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GLM_API_KEY not configured")
+    base_url = getattr(settings, "GLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    model = getattr(settings, "GLM_MODEL", "glm-5.2")
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed")
+
+    system = None
+    conv: list[dict] = []
+    for m in messages:
+        if m["role"] == "system":
+            system = m["content"]
+        else:
+            conv.append(dict(m))
+
+    client = Anthropic(
+        api_key=api_key,
+        base_url=base_url,
+        http_client=httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0)),
+    )
+    kwargs: dict = {"model": model, "max_tokens": 800, "messages": conv}
+    if system:
+        kwargs["system"] = system
+    result = client.messages.create(**kwargs).content[0].text.strip()
+    return f"🤖 GLM: {result}"
+
+
 def _chat_complete_sync(
     messages: list[dict],
     image_bytes: Optional[bytes] = None,
@@ -408,8 +439,12 @@ def _chat_complete_sync(
 ) -> tuple[str, str]:
     """Try providers in (preferred-first) order. Returns (answer, provider_used)."""
     base_order: list[str] = list(settings.TELEGRAM_CHAT_PROVIDER_ORDER or ("gpt", "claude", "grok"))
-    if preferred_provider and preferred_provider in base_order:
-        order = [preferred_provider] + [p for p in base_order if p != preferred_provider]
+    if preferred_provider:
+        if preferred_provider in base_order:
+            order = [preferred_provider] + [p for p in base_order if p != preferred_provider]
+        else:
+            # e.g. "glm" explicitly requested but not in default order — try it first
+            order = [preferred_provider] + list(base_order)
     else:
         order = base_order
 
@@ -422,12 +457,14 @@ def _chat_complete_sync(
                 result = _complete_claude(messages, image_bytes)
             elif provider == "grok":
                 result = _complete_grok(messages, image_bytes)
+            elif provider == "glm":
+                result = _complete_glm(messages, image_bytes)
             else:
                 logger.warning("[brain/chat] unknown provider %r — skipped", provider)
                 continue
 
             low = (result or "").lower()
-            if result and not any(low.startswith(p) for p in ("[openai error]", "[claude error]")):
+            if result and not any(low.startswith(p) for p in ("[openai error]", "[claude error]", "[glm error]")):
                 logger.info("[brain/chat] provider=%s succeeded", provider)
                 return result, provider
 

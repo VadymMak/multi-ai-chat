@@ -211,6 +211,11 @@ class _Settings:
     # === Downloads feature flag (reserved for later steps) ===
     ENABLE_YT_DOWNLOADS: bool = _getenv_bool("ENABLE_YT_DOWNLOADS", False)
 
+    # === Z.ai GLM (Anthropic-API compatible) ===
+    GLM_API_KEY: str = _getenv_str("GLM_API_KEY", "")
+    GLM_BASE_URL: str = _getenv_str("GLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    GLM_MODEL: str = _getenv_str("GLM_MODEL", "glm-5.2")
+
 settings = _Settings()
 
 # ------------------------- thresholds helper --------------------------

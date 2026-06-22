@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
     except Exception:  # pragma: no cover
         _HAS_REQ_NOTREQ = False
 
-Provider = Literal["openai", "anthropic"]
+Provider = Literal["openai", "anthropic", "glm"]
 
 if _HAS_REQ_NOTREQ:
     class ModelInfo(TypedDict):
@@ -142,6 +142,16 @@ MODEL_REGISTRY: Dict[str, ModelInfo] = {
     "claude-sonnet-4-5-20250929": {  # ← Alias
         "provider": "anthropic",
         "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 8192,
+        "temperature": 0.7,
+    },
+
+    # ---------------------------------------------------------------------
+    # Z.ai GLM (Anthropic-API compatible)
+    # ---------------------------------------------------------------------
+    "glm-5.2": {
+        "provider": "glm",
+        "model": "glm-5.2",
         "max_tokens": 8192,
         "temperature": 0.7,
     },

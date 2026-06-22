@@ -7,6 +7,7 @@ from app.config.settings import settings
 from app.config.model_registry import MODEL_REGISTRY
 from app.providers.openai_provider import ask_openai
 from app.providers.claude_provider import ask_claude
+from app.providers.glm_provider import ask_glm
 
 
 def _normalize_messages(messages: List[dict]) -> List[Dict[str, str]]:
@@ -46,7 +47,7 @@ def _is_bad(answer: Optional[str]) -> bool:
         return True
     s = str(answer).strip()
     low = s.lower()
-    if low.startswith("[openai error]") or low.startswith("[claude error]") or low.startswith("[claude overloaded]"):
+    if low.startswith("[openai error]") or low.startswith("[claude error]") or low.startswith("[claude overloaded]") or low.startswith("[glm error]"):
         return True
     if "overloaded" in low:
         return True
@@ -202,8 +203,17 @@ def ask_model(
         if api_key:
             claude_kwargs["api_key"] = api_key
         answer = ask_claude(**claude_kwargs)
-        # AFTER:
-     
+    elif provider == "glm":
+        glm_kwargs: Dict[str, Any] = {
+            "messages": norm_messages,
+            "model": model,
+            "system": sys_prompt,
+            "temperature": temp,
+            "max_tokens": out_tokens,
+        }
+        if api_key:
+            glm_kwargs["api_key"] = api_key
+        answer = ask_glm(**glm_kwargs)
     else:
         raise RuntimeError(f"Unsupported provider '{provider}' for model_key '{requested_key}'")
 
@@ -241,7 +251,7 @@ def ask_model(
         if api_key:
             openai_kwargs2["api_key"] = api_key
         answer2 = ask_openai(**openai_kwargs2)
-    else:
+    elif provider == "anthropic":
         claude_kwargs2: Dict[str, Any] = {
             "messages": repaired,
             "model": model,
@@ -252,6 +262,17 @@ def ask_model(
         if api_key:
             claude_kwargs2["api_key"] = api_key
         answer2 = ask_claude(**claude_kwargs2)
+    else:  # glm
+        glm_kwargs2: Dict[str, Any] = {
+            "messages": repaired,
+            "model": model,
+            "system": sys_prompt,
+            "temperature": temp,
+            "max_tokens": out_tokens,
+        }
+        if api_key:
+            glm_kwargs2["api_key"] = api_key
+        answer2 = ask_glm(**glm_kwargs2)
 
     if provider == "anthropic" and getattr(settings, "CLAUDE_OVERLOAD_SHORTCIRCUIT", True) and _is_overloaded(answer2):
         fb_key = _fallback_key_for_provider(provider)
@@ -291,7 +312,7 @@ def ask_model(
             if api_key:
                 openai_kwargs3["api_key"] = api_key
             answer3 = ask_openai(**openai_kwargs3)
-        else:
+        elif provider == "anthropic":
             claude_kwargs3: Dict[str, Any] = {
                 "messages": repaired,
                 "model": fb["model"],
@@ -302,6 +323,17 @@ def ask_model(
             if api_key:
                 claude_kwargs3["api_key"] = api_key
             answer3 = ask_claude(**claude_kwargs3)
+        else:  # glm
+            glm_kwargs3: Dict[str, Any] = {
+                "messages": repaired,
+                "model": fb["model"],
+                "system": sys_prompt,
+                "temperature": float(fb.get("temperature", temp)),
+                "max_tokens": int(fb.get("max_tokens", out_tokens)),
+            }
+            if api_key:
+                glm_kwargs3["api_key"] = api_key
+            answer3 = ask_glm(**glm_kwargs3)
         if not _is_bad(answer3):
             return str(answer3).strip()
 
