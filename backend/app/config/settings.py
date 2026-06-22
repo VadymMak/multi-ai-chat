@@ -216,6 +216,9 @@ class _Settings:
     GLM_BASE_URL: str = _getenv_str("GLM_BASE_URL", "https://api.z.ai/api/anthropic")
     GLM_MODEL: str = _getenv_str("GLM_MODEL", "glm-5.2")
 
+    # === IP geolocation (fallback when no explicit location given) ===
+    ENABLE_IP_GEO: bool = _getenv_bool("ENABLE_IP_GEO", False)
+
 settings = _Settings()
 
 # ------------------------- thresholds helper --------------------------

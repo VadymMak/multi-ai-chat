@@ -18,7 +18,7 @@ import base64
 import io
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -43,6 +43,9 @@ _CHAT_SYSTEM_PROMPT = (
     "Be warm and supportive."
 )
 
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 _ANSWER_SYSTEM_PROMPT = (
     "You are the user's personal knowledge base assistant. "
     "Answer the question using ONLY the provided notes. "
@@ -53,13 +56,16 @@ _ANSWER_SYSTEM_PROMPT = (
     "If the notes do not contain a relevant answer, say so honestly."
 )
 
-_WEB_SYSTEM_PROMPT = (
-    "Answer the user's question using ONLY the provided web search results. "
-    "Use the location's local currency (Slovakia→EUR, Ukraine→UAH, UK→GBP, "
-    "US→USD — NEVER default to RUB). "
-    "Reply in the same language as the user's question. "
-    "Do NOT add a sources section — it will be appended automatically."
-)
+def _build_web_system_prompt() -> str:
+    today = _today_utc()
+    return (
+        f"Current date: {today} (UTC). Treat this as today. "
+        "Answer the user's question using ONLY the provided web search results. "
+        "Use the location's local currency (Slovakia→EUR, Ukraine→UAH, UK→GBP, "
+        "US→USD — NEVER default to RUB). "
+        "Reply in the same language as the user's question. "
+        "Do NOT add a sources section — it will be appended automatically."
+    )
 
 _SOURCES_STRIP_RE = re.compile(
     r"\n[\s\n]*(Источники|Sources|Ссылки|Links|References)\s*:.*",
@@ -84,6 +90,34 @@ _COUNTRY_HINTS: list[tuple[str, str]] = [
     ("япони", "Japan JPY ¥"), ("japan", "Japan JPY ¥"),
     ("китай", "China CNY ¥"), ("china", "China CNY ¥"),
 ]
+
+# Patterns that signal the answer requires live/current data → route to web
+_REALTIME_RE = re.compile(
+    r"\b("
+    r"weather|погод[аеуыи]|прогноз\w*|forecast|температур[аы]?"
+    r"|precipitation|humidity"
+    r"|сейчас|сегодня|today|tonight|right\s*now|current(?:ly)?"
+    r"|прямо\s+сейчас"
+    r"|курс\s+\w+|exchange\s+rate"
+    r"|latest\s+news|breaking\s+news|свеж\w+\s+новост\w+"
+    r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_realtime_query(prompt: str) -> bool:
+    return bool(_REALTIME_RE.search(prompt))
+
+
+def _enrich_web_query(query: str, location: str, today: str) -> str:
+    """Append location (if not already in the query) and today's date."""
+    parts = [query]
+    if location:
+        loc_first = location.split()[0].lower()
+        if loc_first and loc_first not in query.lower():
+            parts.append(location)
+    parts.append(today)
+    return " ".join(parts)
 
 
 # ── Lazy OpenAI client ────────────────────────────────────────
@@ -501,13 +535,28 @@ async def chat(
     preferred_provider: Optional[str] = None,
     image_bytes: Optional[bytes] = None,
     system: Optional[str] = None,
+    location: str = "",
 ) -> tuple[str, str]:
     """Multi-provider chat with persistent history. Returns (answer, provider_used).
 
     session_key: positive int for Telegram (tg_user_id), negative int for mobile (-(user_id)).
     Creates its own DB session internally — safe for background tasks.
+    Always injects current date into the system prompt.
+    Realtime queries (weather, current prices, news) are auto-routed to web_answer.
     """
-    sys_prompt = system or _CHAT_SYSTEM_PROMPT
+    today = _today_utc()
+    loc_hint = f" User's location: {location}." if location else ""
+    base_sys = system or _CHAT_SYSTEM_PROMPT
+    sys_prompt = f"Current date: {today} (UTC). Treat this as today.{loc_hint} {base_sys}"
+
+    # Auto-route realtime queries (weather, current events, etc.) to Tavily web search
+    if not image_bytes and _is_realtime_query(prompt) and getattr(settings, "TAVILY_API_KEY", ""):
+        logger.info("[brain/chat] realtime intent detected — routing to web: %r", prompt[:80])
+        answer, sources = await web_answer(session_key=session_key, query=prompt, location=location)
+        if sources:
+            answer += "\n\nИсточники:\n" + "\n".join(f"• {u}" for u in sources)
+        return answer, "web"
+
     return await asyncio.to_thread(
         _do_chat_sync, session_key, prompt, sys_prompt, image_bytes, preferred_provider
     )
@@ -631,16 +680,20 @@ def _localize_query(query: str) -> str:
 async def web_answer(
     session_key: int,
     query: str,
+    location: str = "",
 ) -> tuple[str, list[str]]:
     """Tavily search → AI answer. Returns (answer_text, source_urls).
 
     Creates its own DB session for history — safe for background tasks.
+    Always injects current date; appends location when not already in the query.
     """
+    today = _today_utc()
     api_key = settings.TAVILY_API_KEY
     if not api_key:
         raise RuntimeError("TAVILY_API_KEY not configured")
 
-    localized = _localize_query(query)
+    enriched = _enrich_web_query(query, location, today)
+    localized = _localize_query(enriched)
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
@@ -671,8 +724,9 @@ async def web_answer(
         return "Поиск не вернул результатов.", []
 
     context_block = "\n\n---\n\n".join(context_parts)
+    web_sys = _build_web_system_prompt()
     messages = [
-        {"role": "system", "content": _WEB_SYSTEM_PROMPT},
+        {"role": "system", "content": web_sys},
         {"role": "user", "content": f"Web results:\n{context_block}\n\nQuestion: {query}"},
     ]
 

@@ -12,9 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+import httpx
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
+from app.config.settings import settings
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User
 from app.services.brain_assistant import (
@@ -33,7 +35,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/app", tags=["app"])
 
 _VALID_MODES = {"chat", "notes", "web", "save"}
-_VALID_MODELS = {"gpt", "claude", "grok"}
+_VALID_MODELS = {"gpt", "claude", "grok", "glm"}
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+async def _geolocate_ip(ip: str) -> str:
+    """Return 'City, Country' from IP using ipapi.co free tier. Empty string on failure."""
+    if not ip or ip in ("127.0.0.1", "::1", ""):
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"https://ipapi.co/{ip}/json/")
+            if r.status_code == 200:
+                data = r.json()
+                city = data.get("city") or ""
+                country = data.get("country_name") or ""
+                loc = f"{city}, {country}".strip(", ")
+                logger.info("[app/geo] ip=%s → %r", ip, loc)
+                return loc
+    except Exception as exc:
+        logger.debug("[app/geo] geolocate failed ip=%s: %s", ip, exc)
+    return ""
 
 
 def _session_key(user_id: int) -> int:
@@ -47,9 +75,11 @@ def _session_key(user_id: int) -> int:
 
 @router.post("/message")
 async def message(
+    request: Request,
     mode: str = Form(..., description="chat | notes | web | save"),
-    model: Optional[str] = Form(None, description="gpt | claude | grok (for chat/web mode)"),
+    model: Optional[str] = Form(None, description="gpt | claude | grok | glm (for chat/web mode)"),
     text: Optional[str] = Form(None),
+    location: Optional[str] = Form(None, description="User location hint, e.g. 'Trenčín, Slovakia'"),
     audio: Optional[UploadFile] = File(None),
     image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
@@ -86,6 +116,12 @@ async def message(
             status_code=400,
             detail=f"model must be one of {sorted(_VALID_MODELS)}",
         )
+
+    # ── Resolve location (explicit > IP geo) ─────────────────────────────────
+    resolved_location: str = (location or "").strip()
+    if not resolved_location and getattr(settings, "ENABLE_IP_GEO", False):
+        client_ip = _get_client_ip(request)
+        resolved_location = await _geolocate_ip(client_ip)
 
     project = get_or_create_user_project(db, current_user)
     sk = _session_key(current_user.id)
@@ -159,6 +195,7 @@ async def message(
                 prompt=prompt,
                 preferred_provider=model,
                 image_bytes=image_bytes,
+                location=resolved_location,
             )
         except Exception as exc:
             logger.error("[app/message] chat failed user=%d: %s", current_user.id, exc)
@@ -212,7 +249,7 @@ async def message(
                 detail="Provide a query for web search (text or audio)",
             )
         try:
-            answer, sources = await web_answer(session_key=sk, query=prompt)
+            answer, sources = await web_answer(session_key=sk, query=prompt, location=resolved_location)
         except Exception as exc:
             logger.error("[app/message] web search failed user=%d: %s", current_user.id, exc)
             raise HTTPException(status_code=502, detail=f"Web search failed: {exc}")
