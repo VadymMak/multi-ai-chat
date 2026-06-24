@@ -7,6 +7,17 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/8bbf4823-4070-4584-a572-c9c42f8f2e31",
+      "enabled": true,
+      "fallbackToCacheTimeout": 0,
+      "requestHeaders": {
+        "expo-channel-name": "production"
+      }
+    },
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -27,9 +38,10 @@
       },
       "package": "com.vadymmak.multiaichat",
       "permissions": [
-        "RECORD_AUDIO",
-        "READ_MEDIA_IMAGES",
-        "READ_EXTERNAL_STORAGE"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
     "web": {
@@ -46,7 +58,14 @@
           "cameraPermission": "Multi-AI Chat uses your camera to take photos."
         }
       ],
-      "expo-audio"
-    ]
+      "expo-audio",
+      "@react-native-community/datetimepicker",
+      "expo-updates"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8bbf4823-4070-4584-a572-c9c42f8f2e31"
+      }
+    }
   }
 }

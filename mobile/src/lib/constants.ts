@@ -9,4 +9,5 @@ export const STORAGE_KEYS = {
   USER_ID: "@multiaichat/user_id",
   TOKEN_EXPIRY: "@multiaichat/token_expiry",
   DEFAULT_MODEL: "@multiaichat/default_model",
+  REMINDERS: "@multiaichat/reminders",
 } as const;

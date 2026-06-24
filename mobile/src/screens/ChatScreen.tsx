@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   Text,
@@ -21,6 +21,8 @@ import { api } from "../lib/api";
 import { useVoiceRecorder } from "../hooks/useVoiceRecorder";
 import { STORAGE_KEYS } from "../lib/constants";
 import { colors, spacing, borderRadius } from "../theme";
+import { addReminder } from "../lib/reminders";
+import { requestNotificationPermission } from "../lib/notifications";
 
 type Mode = "chat" | "notes" | "web" | "save";
 type ModelKey = "gpt" | "claude" | "grok";
@@ -81,12 +83,64 @@ export default function ChatScreen() {
     });
   }, []);
 
+  const REMINDER_RE = /^(напомни|remind)\b/i;
+
+  const sendReminder = useCallback(
+    async (rawText: string) => {
+      if (isLoading) return;
+      setMessages((prev) => [
+        { id: String(Date.now()), role: "user", content: rawText },
+        { id: "__loading__", role: "assistant", content: "" },
+        ...prev,
+      ]);
+      setInputText("");
+      setIsLoading(true);
+      try {
+        const granted = await requestNotificationPermission();
+        if (!granted) {
+          throw new Error("Разрешение на уведомления не выдано");
+        }
+        const { data } = await api.post("/api/app/parse-reminder", { text: rawText });
+        await addReminder(data.text, data.fire_at);
+        const when = new Date(data.fire_at).toLocaleString("ru-RU", {
+          day: "2-digit", month: "2-digit", year: "2-digit",
+          hour: "2-digit", minute: "2-digit",
+        });
+        setMessages((prev) => [
+          {
+            id: String(Date.now() + 1),
+            role: "assistant",
+            content: `🔔 Напоминание установлено на **${when}**:\n${data.text}`,
+            mode: "chat",
+          },
+          ...prev.filter((m) => m.id !== "__loading__"),
+        ]);
+      } catch (err: unknown) {
+        const msg = (err as { response?: { data?: { detail?: string } }; message?: string })
+          ?.response?.data?.detail ?? (err as { message?: string })?.message ?? "Ошибка";
+        setMessages((prev) => [
+          { id: String(Date.now() + 1), role: "assistant", content: `❌ ${msg}`, mode: "chat" },
+          ...prev.filter((m) => m.id !== "__loading__"),
+        ]);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [isLoading]
+  );
+
   const send = useCallback(
     async (opts?: { audioUri?: string }) => {
       const text = inputText.trim();
       const audioUri = opts?.audioUri;
       if (!text && !pendingImage && !audioUri) return;
       if (isLoading) return;
+
+      // Reminder shortcut — text only, no audio/image
+      if (text && !audioUri && !pendingImage && REMINDER_RE.test(text)) {
+        await sendReminder(text);
+        return;
+      }
 
       const imgCopy = pendingImage;
 
@@ -167,7 +221,7 @@ export default function ChatScreen() {
         setIsLoading(false);
       }
     },
-    [inputText, pendingImage, isLoading, mode, selectedModel]
+    [inputText, pendingImage, isLoading, mode, selectedModel, sendReminder]
   );
 
   const { isRecording, startRecording, stopRecording } = useVoiceRecorder({

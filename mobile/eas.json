@@ -13,14 +13,24 @@
       "distribution": "internal",
       "android": { "buildType": "apk" },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://mamalog-web.vercel.app"
+        "EXPO_PUBLIC_API_URL": "https://multi-ai-chat-production.up.railway.app"
       }
     },
     "production": {
-      "android": { "buildType": "app-bundle" }
+      "distribution": "internal",
+      "channel": "production",
+      "android": { "buildType": "apk" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://multi-ai-chat-production.up.railway.app"
+      }
     }
   },
   "submit": {
     "production": {}
+  },
+  "update": {
+    "production": {
+      "channel": "production"
+    }
   }
 }

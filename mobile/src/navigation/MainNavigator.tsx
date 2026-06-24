@@ -4,11 +4,13 @@ import { Ionicons } from "@expo/vector-icons";
 import { colors } from "../theme";
 import ChatScreen from "../screens/ChatScreen";
 import NotesScreen from "../screens/NotesScreen";
+import RemindersScreen from "../screens/RemindersScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 
 export type MainTabParamList = {
   Chat: undefined;
   Notes: undefined;
+  Reminders: undefined;
   Settings: undefined;
 };
 
@@ -36,6 +38,8 @@ export default function MainNavigator() {
             iconName = focused ? "chatbubble" : "chatbubble-outline";
           } else if (route.name === "Notes") {
             iconName = focused ? "bookmark" : "bookmark-outline";
+          } else if (route.name === "Reminders") {
+            iconName = focused ? "alarm" : "alarm-outline";
           } else {
             iconName = focused ? "settings" : "settings-outline";
           }
@@ -45,6 +49,7 @@ export default function MainNavigator() {
     >
       <Tab.Screen name="Chat" component={ChatScreen} options={{ tabBarLabel: "Чат" }} />
       <Tab.Screen name="Notes" component={NotesScreen} options={{ tabBarLabel: "Заметки" }} />
+      <Tab.Screen name="Reminders" component={RemindersScreen} options={{ tabBarLabel: "Будильник" }} />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ tabBarLabel: "Настройки" }} />
     </Tab.Navigator>
   );

@@ -1,41 +1,61 @@
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
-import { Platform } from "react-native";
+import { Alert, Platform } from "react-native";
 
-// ─── Push token registration ──────────────────────────────────────────────────
+// ─── Permission request ───────────────────────────────────────────────────────
+
+export async function requestNotificationPermission(): Promise<boolean> {
+  if (!Device.isDevice) return false;
+
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  if (existing === "granted") return true;
+
+  const { status } = await Notifications.requestPermissionsAsync();
+  if (status !== "granted") return false;
+
+  if (Platform.OS === "android") {
+    await Notifications.setNotificationChannelAsync("reminders", {
+      name: "Напоминания",
+      importance: Notifications.AndroidImportance.HIGH,
+      sound: "default",
+      vibrationPattern: [0, 250, 250, 250],
+    });
+  }
+
+  return true;
+}
+
+// ─── MIUI / Xiaomi hint ───────────────────────────────────────────────────────
+// Shows once on first-launch for Xiaomi devices where background notifications
+// are off by default. Caller is responsible for tracking "shown" state.
+
+export function showMiuiHint(): void {
+  Alert.alert(
+    "Xiaomi / MIUI",
+    "Для надёжной доставки напоминаний:\n\n" +
+      "1. Настройки → Приложения → Multi-AI Chat → Автозапуск → Вкл.\n" +
+      "2. Настройки → Батарея → Экономия энергии → выберите приложение → Нет ограничений.",
+    [{ text: "Понятно" }]
+  );
+}
+
+// ─── Push token registration (optional, for future server-push) ───────────────
 
 export async function registerForPushNotifications(): Promise<string | null> {
   if (!Device.isDevice) return null;
 
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let finalStatus = existingStatus;
+  const granted = await requestNotificationPermission();
+  if (!granted) return null;
 
-  if (existingStatus !== "granted") {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-
-  if (finalStatus !== "granted") return null;
-
-  let token: string | null = null;
   try {
     const result = await Notifications.getExpoPushTokenAsync();
-    token = result.data;
+    return result.data;
   } catch {
-    // Push token not required for local notifications
+    return null;
   }
-
-  if (Platform.OS === "android") {
-    await Notifications.setNotificationChannelAsync("default", {
-      name: "default",
-      importance: Notifications.AndroidImportance.MAX,
-    });
-  }
-
-  return token;
 }
 
-// ─── Local notification scheduling ───────────────────────────────────────────
+// ─── Legacy daily reminder (Mamalog compat) ───────────────────────────────────
 
 export async function scheduleDailyReminder(
   hour: number,

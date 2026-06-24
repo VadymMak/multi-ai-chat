@@ -4,16 +4,21 @@ app_api.py — REST API for the mobile app.
 All endpoints require JWT Bearer auth (token from /api/auth/login).
 Registered in main.py under prefix /api/app.
 
-POST /api/app/message  (multipart/form-data)
+POST /api/app/message          (multipart/form-data)
+POST /api/app/parse-reminder   (JSON) — parse NL reminder → {fire_at, text}
 GET  /api/app/notes
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
+from datetime import datetime
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
@@ -265,6 +270,64 @@ async def message(
 
     # Should be unreachable
     raise HTTPException(status_code=500, detail="Unhandled mode")
+
+
+class _ParseReminderRequest(BaseModel):
+    text: str
+
+
+@router.post("/parse-reminder")
+async def parse_reminder(
+    req: _ParseReminderRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Parse a natural-language reminder string into a structured {fire_at, text} pair.
+
+    Uses gpt-4o-mini with the current server date injected so relative times
+    ("tomorrow at 9", "through 10 minutes") resolve correctly.
+
+    Returns::
+
+        {"fire_at": "<ISO 8601 datetime>", "text": "<reminder body>"}
+    """
+    from openai import AsyncOpenAI
+
+    now = datetime.now()
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+    system_prompt = (
+        f"Today is {now.strftime('%A, %Y-%m-%d %H:%M')}. "
+        "Extract a reminder from the user's message. "
+        "Return ONLY a JSON object with two keys: "
+        '"fire_at" (ISO 8601 datetime in the user\'s local timezone, future date) '
+        'and "text" (the reminder body in the original language, concise). '
+        "No markdown, no extra text — pure JSON."
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": req.text},
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.error("[app/parse-reminder] LLM call failed user=%d: %s", current_user.id, exc)
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise HTTPException(status_code=422, detail="LLM did not return valid JSON")
+
+    try:
+        data = json.loads(match.group())
+        return {"fire_at": data["fire_at"], "text": data["text"]}
+    except (json.JSONDecodeError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
 
 
 @router.delete("/notes/{note_id}")
