@@ -161,25 +161,17 @@ async def message(
             logger.error("[app/message] transcription failed user=%d: %s", current_user.id, exc)
             raise HTTPException(status_code=502, detail=f"Audio transcription failed: {exc}")
 
-        # Voice reminder detection: intercept BEFORE normal routing
-        if _REMINDER_RE.search(prompt):
-            try:
-                fire_data = await parse_reminder_text(prompt)
-            except Exception as exc:
-                raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
-            body = _REMINDER_RE.sub("", prompt, 1).strip() or fire_data.get("text", "")
-            when = fire_data["fire_at"]
-            logger.info("[app/message] voice reminder user=%d fire_at=%s", current_user.id, when)
-            return {
-                "mode": "reminder",
-                "model_used": None,
-                "kind": "voice",
-                "answer": f"⏰ Напоминание: {body} — {when}",
-                "sources": [],
-                "saved_title": None,
-                "reminder": {"fire_at": when, "text": body},
-                "transcript": prompt,
-            }
+    # ── Reminder detection: text & voice, no image ────────────────────────────
+    # Runs after prompt is resolved (transcribed or typed), before any other routing.
+    # Image+reminder is handled separately in the image-directive block below.
+    if prompt and image is None and _REMINDER_RE.search(prompt):
+        try:
+            fire_data = await parse_reminder_text(prompt)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
+        body = _REMINDER_RE.sub("", prompt, 1).strip() or fire_data.get("text", "")
+        logger.info("[app/message] reminder user=%d fire_at=%s", current_user.id, fire_data["fire_at"])
+        return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
     # --- Read image bytes ---
     if image is not None:
@@ -203,17 +195,8 @@ async def message(
             except Exception as exc:
                 raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
             body = ocr_text.strip() or fire_data.get("text", "")
-            when = fire_data["fire_at"]
-            logger.info("[app/message] reminder+photo user=%d fire_at=%s", current_user.id, when)
-            return {
-                "mode": "reminder",
-                "model_used": "gpt-4o",
-                "kind": kind,
-                "answer": f"🔔 Напоминание на {when}:\n{body}",
-                "sources": [],
-                "saved_title": None,
-                "reminder": {"fire_at": when, "text": body},
-            }
+            logger.info("[app/message] reminder+photo user=%d fire_at=%s", current_user.id, fire_data["fire_at"])
+            return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
         # 2. Explicit OCR query: "что написано", "прочитай", "read this"
         if _OCR_QUERY_RE.search(prompt or ""):

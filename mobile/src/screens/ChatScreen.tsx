@@ -192,11 +192,11 @@ export default function ChatScreen() {
           timeout: 90_000,
         });
 
-        // Reminder from backend (voice or photo): schedule local notification
-        if (data.mode === "reminder" && data.reminder) {
+        // Reminder from backend (voice, text, or photo): schedule local notification
+        if (data.kind === "reminder" && data.fire_at) {
           try {
             await requestNotificationPermission();
-            await addReminder(data.reminder.text, data.reminder.fire_at);
+            await addReminder(data.text, data.fire_at);
           } catch {
             // Non-fatal
           }
@@ -205,13 +205,13 @@ export default function ChatScreen() {
         const content =
           data.mode === "save"
             ? `✅ Сохранено${data.saved_title ? `: ${data.saved_title}` : ""}`
-            : data.mode === "reminder" && data.reminder
+            : data.kind === "reminder" && data.fire_at
             ? (() => {
-                const when = new Date(data.reminder.fire_at).toLocaleString("ru-RU", {
+                const when = new Date(data.fire_at).toLocaleString("ru-RU", {
                   day: "2-digit", month: "2-digit", year: "2-digit",
                   hour: "2-digit", minute: "2-digit",
                 });
-                return `⏰ Напоминание: ${data.reminder.text} — ${when}`;
+                return `⏰ Напоминание: ${data.text} — ${when}`;
               })()
             : data.answer || "";
 
@@ -220,7 +220,7 @@ export default function ChatScreen() {
             id: String(Date.now() + 1),
             role: "assistant",
             content,
-            mode: data.mode as Mode,
+            mode: (data.kind === "reminder" ? "reminder" : data.mode) as Mode,
             modelUsed: data.model_used,
             sources: data.sources,
             savedTitle: data.saved_title,
