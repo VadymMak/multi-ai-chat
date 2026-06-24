@@ -51,7 +51,10 @@ def _project_for_user(tg_user_id: int) -> tuple[str, int]:
 # ── Trigger word patterns ─────────────────────────────────────
 
 # OCR / reminder directives for photos
-_PHOTO_REMINDER_RE = re.compile(r"^\s*(напомни|remind)\b", re.IGNORECASE | re.UNICODE)
+_PHOTO_REMINDER_RE = re.compile(
+    r"^\s*(напомн\w*|напомин\w*|remind\w*|reminder)\b[\s,:\-—]*",
+    re.IGNORECASE | re.UNICODE,
+)
 _PHOTO_OCR_RE = re.compile(
     r"\b(что\s+(тут|здесь|на\s*(фото|фотографии|изображении))?\s*написано"
     r"|прочита[йте]|прочти"

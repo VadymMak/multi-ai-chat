@@ -43,7 +43,10 @@ _VALID_MODES = {"chat", "notes", "web", "save"}
 _VALID_MODELS = {"gpt", "claude", "grok", "glm"}
 
 # ── Directive patterns for image routing ─────────────────────
-_REMINDER_RE = re.compile(r"^\s*(напомни|remind)\b", re.IGNORECASE)
+_REMINDER_RE = re.compile(
+    r"^\s*(напомн\w*|напомин\w*|remind\w*|reminder)\b[\s,:\-—]*",
+    re.IGNORECASE | re.UNICODE,
+)
 _OCR_QUERY_RE = re.compile(
     r"\b(что\s+(тут|здесь|на\s*(фото|фотографии|изображении))?\s*написано"
     r"|прочита[йте]|прочти"
@@ -157,6 +160,26 @@ async def message(
         except Exception as exc:
             logger.error("[app/message] transcription failed user=%d: %s", current_user.id, exc)
             raise HTTPException(status_code=502, detail=f"Audio transcription failed: {exc}")
+
+        # Voice reminder detection: intercept BEFORE normal routing
+        if _REMINDER_RE.search(prompt):
+            try:
+                fire_data = await parse_reminder_text(prompt)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
+            body = _REMINDER_RE.sub("", prompt, 1).strip() or fire_data.get("text", "")
+            when = fire_data["fire_at"]
+            logger.info("[app/message] voice reminder user=%d fire_at=%s", current_user.id, when)
+            return {
+                "mode": "reminder",
+                "model_used": None,
+                "kind": "voice",
+                "answer": f"⏰ Напоминание: {body} — {when}",
+                "sources": [],
+                "saved_title": None,
+                "reminder": {"fire_at": when, "text": body},
+                "transcript": prompt,
+            }
 
     # --- Read image bytes ---
     if image is not None:

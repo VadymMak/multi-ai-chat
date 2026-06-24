@@ -85,13 +85,14 @@ export default function ChatScreen() {
     });
   }, []);
 
-  const REMINDER_RE = /^(напомни|remind)\b/i;
+  const REMINDER_RE = /^\s*(напомн\w*|напомин\w*|remind\w*|reminder)\b[\s,:\-—]*/i;
 
   const sendReminder = useCallback(
-    async (rawText: string) => {
+    async (displayText: string, apiText: string) => {
       if (isLoading) return;
+      const payload = apiText.trim() || displayText.trim();
       setMessages((prev) => [
-        { id: String(Date.now()), role: "user", content: rawText },
+        { id: String(Date.now()), role: "user", content: displayText },
         { id: "__loading__", role: "assistant", content: "" },
         ...prev,
       ]);
@@ -102,7 +103,7 @@ export default function ChatScreen() {
         if (!granted) {
           throw new Error("Разрешение на уведомления не выдано");
         }
-        const { data } = await api.post("/api/app/parse-reminder", { text: rawText });
+        const { data } = await api.post("/api/app/parse-reminder", { text: payload });
         await addReminder(data.text, data.fire_at);
         const when = new Date(data.fire_at).toLocaleString("ru-RU", {
           day: "2-digit", month: "2-digit", year: "2-digit",
@@ -112,8 +113,8 @@ export default function ChatScreen() {
           {
             id: String(Date.now() + 1),
             role: "assistant",
-            content: `🔔 Напоминание установлено на **${when}**:\n${data.text}`,
-            mode: "chat",
+            content: `⏰ Напоминание: ${data.text} — ${when}`,
+            mode: "reminder" as Mode,
           },
           ...prev.filter((m) => m.id !== "__loading__"),
         ]);
@@ -140,7 +141,8 @@ export default function ChatScreen() {
 
       // Reminder shortcut — text only, no audio/image
       if (text && !audioUri && !pendingImage && REMINDER_RE.test(text)) {
-        await sendReminder(text);
+        const stripped = text.replace(REMINDER_RE, "").trim();
+        await sendReminder(text, stripped);
         return;
       }
 
@@ -190,19 +192,27 @@ export default function ChatScreen() {
           timeout: 90_000,
         });
 
-        // Image + "напомни..." → backend OCR'd the photo and parsed fire_at
+        // Reminder from backend (voice or photo): schedule local notification
         if (data.mode === "reminder" && data.reminder) {
           try {
             await requestNotificationPermission();
             await addReminder(data.reminder.text, data.reminder.fire_at);
           } catch {
-            // Non-fatal: reminder data still shown in chat
+            // Non-fatal
           }
         }
 
         const content =
           data.mode === "save"
             ? `✅ Сохранено${data.saved_title ? `: ${data.saved_title}` : ""}`
+            : data.mode === "reminder" && data.reminder
+            ? (() => {
+                const when = new Date(data.reminder.fire_at).toLocaleString("ru-RU", {
+                  day: "2-digit", month: "2-digit", year: "2-digit",
+                  hour: "2-digit", minute: "2-digit",
+                });
+                return `⏰ Напоминание: ${data.reminder.text} — ${when}`;
+              })()
             : data.answer || "";
 
         setMessages((prev) => [
