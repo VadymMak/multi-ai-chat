@@ -10,10 +10,8 @@ GET  /api/app/notes
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
-from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -29,7 +27,9 @@ from app.services.brain_assistant import (
     chat,
     delete_note as delete_note_svc,
     describe_image,
+    extract_text,
     get_or_create_user_project,
+    parse_reminder_text,
     save_note,
     search_notes,
     transcribe,
@@ -41,6 +41,16 @@ router = APIRouter(prefix="/app", tags=["app"])
 
 _VALID_MODES = {"chat", "notes", "web", "save"}
 _VALID_MODELS = {"gpt", "claude", "grok", "glm"}
+
+# ── Directive patterns for image routing ─────────────────────
+_REMINDER_RE = re.compile(r"^\s*(напомни|remind)\b", re.IGNORECASE)
+_OCR_QUERY_RE = re.compile(
+    r"\b(что\s+(тут|здесь|на\s*(фото|фотографии|изображении))?\s*написано"
+    r"|прочита[йте]|прочти"
+    r"|что\s+написа[лн][ои]?"
+    r"|read\s+(it|this|out|aloud|text))\b",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def _get_client_ip(request: Request) -> str:
@@ -155,28 +165,85 @@ async def message(
             raise HTTPException(status_code=400, detail="Uploaded image file is empty")
         kind = "photo"
 
-    # ── Image present + non-save mode → force vision chat ────────────────────
-    # web / notes cannot process images; image always wins except in save mode.
-    if image_bytes and mode != "save":
+    # ── Image-directive routing ───────────────────────────────────────────────
+    if image_bytes:
+        # 1. Reminder + photo → OCR body from image, fire_at from caption/voice
+        if prompt and _REMINDER_RE.search(prompt):
+            try:
+                ocr_text = await extract_text(image_bytes)
+            except Exception as exc:
+                logger.error("[app/message] OCR failed user=%d: %s", current_user.id, exc)
+                raise HTTPException(status_code=502, detail=f"OCR failed: {exc}")
+            directive = f"{prompt}\nТекст на фото: {ocr_text}" if ocr_text.strip() else prompt
+            try:
+                fire_data = await parse_reminder_text(directive)
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
+            body = ocr_text.strip() or fire_data.get("text", "")
+            when = fire_data["fire_at"]
+            logger.info("[app/message] reminder+photo user=%d fire_at=%s", current_user.id, when)
+            return {
+                "mode": "reminder",
+                "model_used": "gpt-4o",
+                "kind": kind,
+                "answer": f"🔔 Напоминание на {when}:\n{body}",
+                "sources": [],
+                "saved_title": None,
+                "reminder": {"fire_at": when, "text": body},
+            }
+
+        # 2. Explicit OCR query: "что написано", "прочитай", "read this"
+        if _OCR_QUERY_RE.search(prompt or ""):
+            try:
+                ocr_text = await extract_text(image_bytes)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"OCR failed: {exc}")
+            return {
+                "mode": "chat",
+                "model_used": "gpt-4o",
+                "kind": kind,
+                "answer": ocr_text.strip() or "Текст на изображении не обнаружен.",
+                "sources": [],
+                "saved_title": None,
+            }
+
+        # 3. Save mode + photo → OCR text as note body; fallback to describe
+        if mode == "save":
+            try:
+                ocr_text = await extract_text(image_bytes)
+            except Exception:
+                ocr_text = ""
+            if ocr_text.strip():
+                full = f"{prompt}\n{ocr_text}".strip() if prompt else ocr_text.strip()
+                result = await save_note(project.id, full, "ocr", extra_tags=["photo", "ocr"])
+            else:
+                try:
+                    description = await describe_image(image_bytes)
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"Image description failed: {exc}")
+                full = f"{prompt}\n{description}".strip() if prompt else description
+                result = await save_note(project.id, full, kind)
+            return {
+                "mode": "save",
+                "model_used": None,
+                "kind": kind,
+                "answer": None,
+                "sources": [],
+                "saved_title": result["saved_title"],
+            }
+
+        # 4. Default: force vision chat (web / notes cannot process images)
         mode = "chat"
         if not prompt:
             prompt = "Что на изображении?"
 
-    # ── save ─────────────────────────────────────────────────
+    # ── save (text / voice, no image) ────────────────────────
     if mode == "save":
-        if not prompt and not image_bytes:
+        if not prompt:
             raise HTTPException(
                 status_code=400,
                 detail="Nothing to save: provide text, audio, or image",
             )
-        if image_bytes:
-            try:
-                description = await describe_image(image_bytes)
-                prompt = f"{prompt}\n{description}".strip() if prompt else description
-            except Exception as exc:
-                logger.error("[app/message] image description failed: %s", exc)
-                raise HTTPException(status_code=502, detail=f"Image description failed: {exc}")
-
         result = await save_note(project.id, prompt, kind)
         return {
             "mode": "save",
@@ -281,53 +348,19 @@ async def parse_reminder(
     req: _ParseReminderRequest,
     current_user: User = Depends(get_current_active_user),
 ):
-    """Parse a natural-language reminder string into a structured {fire_at, text} pair.
+    """Parse a natural-language reminder string → {fire_at: ISO datetime, text: str}.
 
-    Uses gpt-4o-mini with the current server date injected so relative times
-    ("tomorrow at 9", "through 10 minutes") resolve correctly.
-
-    Returns::
-
-        {"fire_at": "<ISO 8601 datetime>", "text": "<reminder body>"}
+    Delegates to brain_assistant.parse_reminder_text which injects the current date
+    and uses gpt-4o-mini so relative times ("tomorrow at 9", "in 10 minutes") work.
     """
-    from openai import AsyncOpenAI
-
-    now = datetime.now()
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-
-    system_prompt = (
-        f"Today is {now.strftime('%A, %Y-%m-%d %H:%M')}. "
-        "Extract a reminder from the user's message. "
-        "Return ONLY a JSON object with two keys: "
-        '"fire_at" (ISO 8601 datetime in the user\'s local timezone, future date) '
-        'and "text" (the reminder body in the original language, concise). '
-        "No markdown, no extra text — pure JSON."
-    )
-
     try:
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.text},
-            ],
-            temperature=0,
-            max_tokens=120,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-    except Exception as exc:
-        logger.error("[app/parse-reminder] LLM call failed user=%d: %s", current_user.id, exc)
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
-
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        raise HTTPException(status_code=422, detail="LLM did not return valid JSON")
-
-    try:
-        data = json.loads(match.group())
+        data = await parse_reminder_text(req.text)
         return {"fire_at": data["fire_at"], "text": data["text"]}
-    except (json.JSONDecodeError, KeyError) as exc:
+    except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
+    except Exception as exc:
+        logger.error("[app/parse-reminder] failed user=%d: %s", current_user.id, exc)
+        raise HTTPException(status_code=502, detail=f"Parse failed: {exc}")
 
 
 @router.delete("/notes/{note_id}")

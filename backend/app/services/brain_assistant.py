@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -176,7 +177,12 @@ def get_or_create_user_project(db: Session, user: object) -> Project:
 
 # ── save_note ─────────────────────────────────────────────────
 
-def _save_note_sync(project_id: int, content: str, kind: str) -> dict:
+def _save_note_sync(
+    project_id: int,
+    content: str,
+    kind: str,
+    extra_tags: Optional[list] = None,
+) -> dict:
     """Dual-write: CanonItem(INBOX) + MemoryEntry + embedding. Sync."""
     db = SessionLocal()
     try:
@@ -184,6 +190,7 @@ def _save_note_sync(project_id: int, content: str, kind: str) -> dict:
         pid_str = str(project_id)
         role_id = getattr(settings, "TELEGRAM_ROLE_ID", None)
         title = content.replace("\n", " ").replace("\r", "")[:80]
+        tags = extra_tags if extra_tags is not None else ["mobile", kind]
 
         item = CanonItem(
             project_id=pid_str,
@@ -192,7 +199,7 @@ def _save_note_sync(project_id: int, content: str, kind: str) -> dict:
             type="INBOX",
             title=title,
             body=content,
-            tags=["mobile", kind],
+            tags=tags,
             terms=content[:1000],
             created_at=now,
             is_active=True,
@@ -228,13 +235,19 @@ def _save_note_sync(project_id: int, content: str, kind: str) -> dict:
         db.close()
 
 
-async def save_note(project_id: int, content: str, kind: str = "text") -> dict:
+async def save_note(
+    project_id: int,
+    content: str,
+    kind: str = "text",
+    extra_tags: Optional[list] = None,
+) -> dict:
     """Save text/voice/photo to Brain (CanonItem INBOX + MemoryEntry + embedding).
 
     Creates its own DB session — safe to call from background tasks.
+    extra_tags overrides the default ["mobile", kind] tag list.
     Returns ``{"saved_title": str, "canon_item_id": int}``.
     """
-    return await asyncio.to_thread(_save_note_sync, project_id, content, kind)
+    return await asyncio.to_thread(_save_note_sync, project_id, content, kind, extra_tags)
 
 
 async def delete_note(db: Session, project_id: int, note_id: int) -> dict:
@@ -310,6 +323,68 @@ async def describe_image(image_bytes: bytes, caption: str = "") -> str:
         return resp.choices[0].message.content.strip()
 
     return await asyncio.to_thread(_do)
+
+
+# ── extract_text (OCR) ────────────────────────────────────────
+
+def _extract_text_sync(image_bytes: bytes) -> str:
+    """Extract all visible text from image using vision model chain (GPT-4o → Claude → Grok)."""
+    ocr_prompt = (
+        "Extract ALL text visible in this image verbatim "
+        "(handwriting, printed text, labels, numbers, receipts, notes). "
+        "Return ONLY the extracted text with zero commentary or formatting. "
+        "If there is no text in the image, return an empty string."
+    )
+    msgs = [{"role": "user", "content": ocr_prompt}]
+    result, _ = _chat_complete_sync(msgs, image_bytes=image_bytes, preferred_provider="gpt")
+    return result
+
+
+async def extract_text(image_bytes: bytes) -> str:
+    """OCR: extract all text from an image. Falls back GPT-4o → Claude → Grok.
+
+    Returns the raw extracted text (may be empty if no text is in the image).
+    """
+    return await asyncio.to_thread(_extract_text_sync, image_bytes)
+
+
+# ── parse_reminder_text ───────────────────────────────────────
+
+def _parse_reminder_sync(directive: str) -> dict:
+    """Parse a natural-language reminder string into {fire_at: ISO str, text: str}."""
+    now = datetime.now()
+    system = (
+        f"Today is {now.strftime('%A, %Y-%m-%d %H:%M')}. "
+        "Extract a reminder from the user's message. "
+        "Return ONLY a JSON object with two keys: "
+        '"fire_at" (ISO 8601 datetime, must be in the future) '
+        'and "text" (reminder body in the original language, concise). '
+        "No markdown, no extra text — pure JSON."
+    )
+    client = _get_openai_client()
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": directive},
+        ],
+        temperature=0,
+        max_tokens=120,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"LLM did not return JSON: {raw!r}")
+    return json.loads(match.group())
+
+
+async def parse_reminder_text(directive: str) -> dict:
+    """Parse NL reminder directive → {fire_at: ISO str, text: str}.
+
+    Centralised helper used by /api/app/message (image+reminder),
+    /api/app/parse-reminder (text-only), and Telegram.
+    """
+    return await asyncio.to_thread(_parse_reminder_sync, directive)
 
 
 # ── Chat history helpers (sync, use telegram_chat_history table) ──

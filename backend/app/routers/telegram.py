@@ -50,6 +50,19 @@ def _project_for_user(tg_user_id: int) -> tuple[str, int]:
 
 # ── Trigger word patterns ─────────────────────────────────────
 
+# OCR / reminder directives for photos
+_PHOTO_REMINDER_RE = re.compile(r"^\s*(напомни|remind)\b", re.IGNORECASE | re.UNICODE)
+_PHOTO_OCR_RE = re.compile(
+    r"\b(что\s+(тут|здесь|на\s*(фото|фотографии|изображении))?\s*написано"
+    r"|прочита[йте]|прочти"
+    r"|что\s+написа[лн][ои]?"
+    r"|read\s+(it|this|out|aloud|text))\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_PHOTO_SAVE_RE = re.compile(
+    r"^\s*(сохрани|запомни|save|запиши)\b", re.IGNORECASE | re.UNICODE
+)
+
 # Notes / brain Q&A trigger
 _VOICE_TRIGGER_RE = re.compile(
     r"^\s*(вопрос\w*|спрашиваю|найди\s+в\s+заметках|question|ask\w*|find\w*)\b[\s,:\-—]*",
@@ -257,10 +270,20 @@ async def _extract_content(
         except _TG_TRANSIENT as exc:
             raise _MediaDownloadError("photo download failed") from exc
 
-        # Caption present → vision chat regardless of mode trigger.
-        # Image always wins: web/notes cannot process images.
         if caption:
-            # Strip any trigger prefix to get the actual question.
+            # Reminder directive + photo: OCR image → parse datetime
+            if _PHOTO_REMINDER_RE.search(caption):
+                return (caption, "ocr_reminder", data)
+
+            # Explicit OCR query: "что написано?", "прочитай"
+            if _PHOTO_OCR_RE.search(caption):
+                return (caption, "ocr_query", data)
+
+            # Save directive: "сохрани", "запомни"
+            if _PHOTO_SAVE_RE.search(caption):
+                return (caption, "ocr_save", data)
+
+            # Default: vision chat
             vision_prompt = caption
             for strip_fn in (_strip_chat_trigger, _strip_web_trigger, _strip_voice_trigger):
                 stripped = strip_fn(caption)
@@ -273,9 +296,8 @@ async def _extract_content(
             prompt = q.strip() or vision_prompt.strip()
             return (prompt, f"chat:{provider}", data) if provider else (prompt, "chat", data)
 
-        # No caption → describe + save (original behaviour)
-        description = await brain_assistant.describe_image(data, "")
-        return f"[screenshot] {description}", "photo", None
+        # No caption → OCR first; fallback to describe + save
+        return ("", "ocr_save", data)
 
     return "", "unknown", None
 
@@ -489,7 +511,78 @@ async def _process_update(message: Dict[str, Any]) -> None:
             await _answer_from_brain(content, chat_id, sender_pid=pid_int)
             return
 
-        # Save mode (text / voice / photo)
+        # ── OCR-based handlers ────────────────────────────────
+        if kind == "ocr_query":
+            # "что написано?" / "прочитай" + photo → OCR → reply text
+            try:
+                ocr_text = await brain_assistant.extract_text(image_bytes)
+            except Exception as exc:
+                await _tg_send_message(chat_id, f"⚠️ Не удалось распознать текст: {exc}")
+                return
+            reply = f"📝 Текст:\n{ocr_text.strip()}" if ocr_text.strip() else "📝 Текст на изображении не обнаружен."
+            await _tg_send_message(chat_id, reply[:_MAX_REPLY_LEN])
+            return
+
+        if kind == "ocr_save":
+            # Photo (captioned or bare) → OCR → save text; fallback to describe
+            try:
+                ocr_text = await brain_assistant.extract_text(image_bytes)
+            except Exception:
+                ocr_text = ""
+            if ocr_text.strip():
+                caption_prefix = content.strip() if content and not _PHOTO_SAVE_RE.search(content) else ""
+                body = f"{caption_prefix}\n{ocr_text}".strip() if caption_prefix else ocr_text.strip()
+                result = await brain_assistant.save_note(pid_int, body, "ocr", extra_tags=["photo", "ocr"])
+                await _tg_send_message(
+                    chat_id, f"✅ Сохранено (OCR): {result['saved_title']}"
+                )
+            else:
+                # No text detected → describe + save
+                try:
+                    description = await brain_assistant.describe_image(image_bytes)
+                except Exception as exc:
+                    await _tg_send_message(chat_id, f"⚠️ Не удалось обработать изображение: {exc}")
+                    return
+                body = f"[screenshot] {description}"
+                result = await brain_assistant.save_note(pid_int, body, "photo")
+                await _tg_send_message(
+                    chat_id, f"✅ Сохранено (фото): {result['saved_title']}"
+                )
+            return
+
+        if kind == "ocr_reminder":
+            # caption="напомни завтра в 9" + photo → OCR body + parse time → save + reply
+            try:
+                ocr_text = await brain_assistant.extract_text(image_bytes)
+            except Exception:
+                ocr_text = ""
+            directive = (
+                f"{content}\nТекст на фото: {ocr_text}" if ocr_text.strip() else content
+            )
+            try:
+                fire_data = await brain_assistant.parse_reminder_text(directive)
+            except Exception as exc:
+                await _tg_send_message(chat_id, f"⚠️ Не смог разобрать напоминание: {exc}")
+                return
+            body = ocr_text.strip() or fire_data.get("text", "")
+            when = fire_data["fire_at"]
+            # Save to Brain with reminder tag so it's searchable
+            try:
+                await brain_assistant.save_note(
+                    pid_int, body, "ocr", extra_tags=["photo", "ocr", "reminder"]
+                )
+            except Exception:
+                pass
+            await _tg_send_message(
+                chat_id,
+                f"🔔 Напоминание разобрано:\n"
+                f"⏰ Время: {when}\n"
+                f"📝 Текст: {body}\n\n"
+                f"Установить будильник можно в мобильном приложении.",
+            )
+            return
+
+        # Save mode (text / voice / legacy photo)
         result = await brain_assistant.save_note(pid_int, content, kind)
         await _tg_send_message(
             chat_id,

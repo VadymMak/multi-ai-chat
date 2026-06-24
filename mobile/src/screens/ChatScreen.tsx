@@ -24,7 +24,7 @@ import { colors, spacing, borderRadius } from "../theme";
 import { addReminder } from "../lib/reminders";
 import { requestNotificationPermission } from "../lib/notifications";
 
-type Mode = "chat" | "notes" | "web" | "save";
+type Mode = "chat" | "notes" | "web" | "save" | "reminder";
 type ModelKey = "gpt" | "claude" | "grok";
 
 interface Message {
@@ -37,7 +37,7 @@ interface Message {
   savedTitle?: string | null;
 }
 
-const MODE_OPTIONS: { key: Mode; label: string }[] = [
+const MODE_OPTIONS: { key: Exclude<Mode, "reminder">; label: string }[] = [
   { key: "chat", label: "Чат" },
   { key: "notes", label: "Заметки" },
   { key: "web", label: "Поиск" },
@@ -57,6 +57,7 @@ const MODE_META: Record<Mode, { emoji: string; bg: string; color: string }> = {
   notes: { emoji: "🔎", bg: colors.tagNotesBg, color: colors.tagNotes },
   web: { emoji: "🌐", bg: colors.tagSearchBg, color: colors.tagSearch },
   save: { emoji: "✅", bg: colors.tagNotesBg, color: colors.tagNotes },
+  reminder: { emoji: "🔔", bg: colors.tagSearchBg, color: colors.tagSearch },
 };
 
 const MODE_LABELS: Record<Mode, string> = {
@@ -64,6 +65,7 @@ const MODE_LABELS: Record<Mode, string> = {
   notes: "Заметки",
   web: "Поиск",
   save: "Сохранено",
+  reminder: "Напоминание",
 };
 
 export default function ChatScreen() {
@@ -188,6 +190,16 @@ export default function ChatScreen() {
           timeout: 90_000,
         });
 
+        // Image + "напомни..." → backend OCR'd the photo and parsed fire_at
+        if (data.mode === "reminder" && data.reminder) {
+          try {
+            await requestNotificationPermission();
+            await addReminder(data.reminder.text, data.reminder.fire_at);
+          } catch {
+            // Non-fatal: reminder data still shown in chat
+          }
+        }
+
         const content =
           data.mode === "save"
             ? `✅ Сохранено${data.saved_title ? `: ${data.saved_title}` : ""}`
@@ -198,7 +210,7 @@ export default function ChatScreen() {
             id: String(Date.now() + 1),
             role: "assistant",
             content,
-            mode: data.mode,
+            mode: data.mode as Mode,
             modelUsed: data.model_used,
             sources: data.sources,
             savedTitle: data.saved_title,
