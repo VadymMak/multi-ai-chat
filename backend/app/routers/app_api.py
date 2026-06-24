@@ -173,8 +173,8 @@ async def message(
             fire_data = await parse_reminder_text(prompt, resolved_tz)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
-        body = _REMINDER_RE.sub("", prompt, 1).strip() or fire_data.get("text", "")
-        logger.info("[app/message] reminder user=%d tz=%s fire_at=%s", current_user.id, resolved_tz, fire_data["fire_at"])
+        body = (fire_data.get("text") or "").strip() or "Напоминание"
+        logger.info("[app/message] reminder user=%d tz=%s fire_at=%s text=%r", current_user.id, resolved_tz, fire_data["fire_at"], body)
         return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
     # --- Read image bytes ---
@@ -198,8 +198,8 @@ async def message(
                 fire_data = await parse_reminder_text(directive, resolved_tz)
             except Exception as exc:
                 raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
-            body = ocr_text.strip() or fire_data.get("text", "")
-            logger.info("[app/message] reminder+photo user=%d tz=%s fire_at=%s", current_user.id, resolved_tz, fire_data["fire_at"])
+            body = (fire_data.get("text") or ocr_text or "").strip() or "Напоминание"
+            logger.info("[app/message] reminder+photo user=%d tz=%s fire_at=%s text=%r", current_user.id, resolved_tz, fire_data["fire_at"], body)
             return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
         # 2. Explicit OCR query: "что написано", "прочитай", "read this"
