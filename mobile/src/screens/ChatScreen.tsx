@@ -213,7 +213,7 @@ export default function ChatScreen() {
                 });
                 return `⏰ Напоминание: ${data.text} — ${when}`;
               })()
-            : data.answer || "";
+            : data.answer || "⚠️ Пустой ответ от сервера";
 
         setMessages((prev) => [
           {
