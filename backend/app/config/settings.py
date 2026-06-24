@@ -219,6 +219,9 @@ class _Settings:
     # === IP geolocation (fallback when no explicit location given) ===
     ENABLE_IP_GEO: bool = _getenv_bool("ENABLE_IP_GEO", False)
 
+    # === Timezone default for reminder parsing (IANA name) ===
+    DEFAULT_TIMEZONE: str = _getenv_str("DEFAULT_TIMEZONE", "Europe/Bratislava")
+
 settings = _Settings()
 
 # ------------------------- thresholds helper --------------------------

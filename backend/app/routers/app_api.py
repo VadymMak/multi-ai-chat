@@ -98,6 +98,7 @@ async def message(
     model: Optional[str] = Form(None, description="gpt | claude | grok | glm (for chat/web mode)"),
     text: Optional[str] = Form(None),
     location: Optional[str] = Form(None, description="User location hint, e.g. 'Trenčín, Slovakia'"),
+    tz: Optional[str] = Form(None, description="IANA timezone, e.g. 'Europe/Bratislava'"),
     audio: Optional[UploadFile] = File(None),
     image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
@@ -141,6 +142,9 @@ async def message(
         client_ip = _get_client_ip(request)
         resolved_location = await _geolocate_ip(client_ip)
 
+    # ── Resolve timezone (client-supplied > server default) ───────────────────
+    resolved_tz: str = (tz or "").strip() or settings.DEFAULT_TIMEZONE
+
     project = get_or_create_user_project(db, current_user)
     sk = _session_key(current_user.id)
 
@@ -166,11 +170,11 @@ async def message(
     # Image+reminder is handled separately in the image-directive block below.
     if prompt and image is None and _REMINDER_RE.search(prompt):
         try:
-            fire_data = await parse_reminder_text(prompt)
+            fire_data = await parse_reminder_text(prompt, resolved_tz)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
         body = _REMINDER_RE.sub("", prompt, 1).strip() or fire_data.get("text", "")
-        logger.info("[app/message] reminder user=%d fire_at=%s", current_user.id, fire_data["fire_at"])
+        logger.info("[app/message] reminder user=%d tz=%s fire_at=%s", current_user.id, resolved_tz, fire_data["fire_at"])
         return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
     # --- Read image bytes ---
@@ -191,11 +195,11 @@ async def message(
                 raise HTTPException(status_code=502, detail=f"OCR failed: {exc}")
             directive = f"{prompt}\nТекст на фото: {ocr_text}" if ocr_text.strip() else prompt
             try:
-                fire_data = await parse_reminder_text(directive)
+                fire_data = await parse_reminder_text(directive, resolved_tz)
             except Exception as exc:
                 raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")
             body = ocr_text.strip() or fire_data.get("text", "")
-            logger.info("[app/message] reminder+photo user=%d fire_at=%s", current_user.id, fire_data["fire_at"])
+            logger.info("[app/message] reminder+photo user=%d tz=%s fire_at=%s", current_user.id, resolved_tz, fire_data["fire_at"])
             return {"kind": "reminder", "fire_at": fire_data["fire_at"], "text": body}
 
         # 2. Explicit OCR query: "что написано", "прочитай", "read this"
@@ -347,6 +351,7 @@ async def message(
 
 class _ParseReminderRequest(BaseModel):
     text: str
+    tz: Optional[str] = None
 
 
 @router.post("/parse-reminder")
@@ -354,13 +359,15 @@ async def parse_reminder(
     req: _ParseReminderRequest,
     current_user: User = Depends(get_current_active_user),
 ):
-    """Parse a natural-language reminder string → {fire_at: ISO datetime, text: str}.
+    """Parse a natural-language reminder string → {fire_at: UTC ISO 'Z' str, text: str}.
 
-    Delegates to brain_assistant.parse_reminder_text which injects the current date
-    and uses gpt-4o-mini so relative times ("tomorrow at 9", "in 10 minutes") work.
+    Delegates to brain_assistant.parse_reminder_text which injects the current local time
+    in the user's timezone so relative ("in 2 minutes") and absolute ("at 9am") phrases
+    resolve correctly. fire_at is always returned as UTC with 'Z' suffix.
     """
+    resolved_tz = (req.tz or "").strip() or settings.DEFAULT_TIMEZONE
     try:
-        data = await parse_reminder_text(req.text)
+        data = await parse_reminder_text(req.text, resolved_tz)
         return {"fire_at": data["fire_at"], "text": data["text"]}
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=422, detail=f"Could not parse reminder: {exc}")

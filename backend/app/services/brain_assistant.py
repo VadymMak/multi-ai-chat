@@ -21,6 +21,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from openai import OpenAI
@@ -350,16 +351,21 @@ async def extract_text(image_bytes: bytes) -> str:
 
 # ── parse_reminder_text ───────────────────────────────────────
 
-def _parse_reminder_sync(directive: str) -> dict:
-    """Parse a natural-language reminder string into {fire_at: ISO str, text: str}."""
-    now = datetime.now()
+def _parse_reminder_sync(directive: str, tz: str = "Europe/Bratislava") -> dict:
+    """Parse a natural-language reminder string → {fire_at: UTC ISO 'Z' str, text: str}."""
+    try:
+        tz_info = ZoneInfo(tz)
+    except ZoneInfoNotFoundError:
+        tz_info = ZoneInfo("Europe/Bratislava")
+        tz = "Europe/Bratislava"
+    now_local = datetime.now(tz_info)
     system = (
-        f"Today is {now.strftime('%A, %Y-%m-%d %H:%M')}. "
-        "Extract a reminder from the user's message. "
-        "Return ONLY a JSON object with two keys: "
-        '"fire_at" (ISO 8601 datetime, must be in the future) '
-        'and "text" (reminder body in the original language, concise). '
-        "No markdown, no extra text — pure JSON."
+        f"Текущее локальное время пользователя: {now_local.strftime('%A, %Y-%m-%d %H:%M')} ({tz}). "
+        "Извлеки напоминание из сообщения пользователя. "
+        "Верни ТОЛЬКО JSON объект с двумя ключами: "
+        '"fire_at" (ISO 8601 datetime В ЛОКАЛЬНОМ ВРЕМЕНИ пользователя, без суффикса timezone, должен быть в будущем) '
+        'и "text" (текст напоминания на языке пользователя, кратко). '
+        "Никакого markdown, никакого лишнего текста — только JSON."
     )
     client = _get_openai_client()
     resp = client.chat.completions.create(
@@ -375,16 +381,25 @@ def _parse_reminder_sync(directive: str) -> dict:
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
         raise ValueError(f"LLM did not return JSON: {raw!r}")
-    return json.loads(match.group())
+    data = json.loads(match.group())
+
+    # Convert local naive datetime → UTC with 'Z' suffix
+    fire_at_str = data["fire_at"].replace("Z", "").split("+")[0]
+    local_dt = datetime.fromisoformat(fire_at_str)
+    if local_dt.tzinfo is None:
+        local_dt = local_dt.replace(tzinfo=tz_info)
+    utc_dt = local_dt.astimezone(timezone.utc)
+    data["fire_at"] = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return data
 
 
-async def parse_reminder_text(directive: str) -> dict:
-    """Parse NL reminder directive → {fire_at: ISO str, text: str}.
+async def parse_reminder_text(directive: str, tz: str = "Europe/Bratislava") -> dict:
+    """Parse NL reminder directive → {fire_at: UTC ISO 'Z' str, text: str}.
 
     Centralised helper used by /api/app/message (image+reminder),
     /api/app/parse-reminder (text-only), and Telegram.
     """
-    return await asyncio.to_thread(_parse_reminder_sync, directive)
+    return await asyncio.to_thread(_parse_reminder_sync, directive, tz)
 
 
 # ── Chat history helpers (sync, use telegram_chat_history table) ──

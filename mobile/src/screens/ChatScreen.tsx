@@ -86,6 +86,7 @@ export default function ChatScreen() {
   }, []);
 
   const REMINDER_RE = /^\s*(напомн\w*|напомин\w*|remind\w*|reminder)\b[\s,:\-—]*/i;
+  const DEVICE_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   const sendReminder = useCallback(
     async (displayText: string, apiText: string) => {
@@ -103,7 +104,7 @@ export default function ChatScreen() {
         if (!granted) {
           throw new Error("Разрешение на уведомления не выдано");
         }
-        const { data } = await api.post("/api/app/parse-reminder", { text: payload });
+        const { data } = await api.post("/api/app/parse-reminder", { text: payload, tz: DEVICE_TZ });
         await addReminder(data.text, data.fire_at);
         const when = new Date(data.fire_at).toLocaleString("ru-RU", {
           day: "2-digit", month: "2-digit", year: "2-digit",
@@ -168,6 +169,7 @@ export default function ChatScreen() {
       try {
         const formData = new FormData();
         formData.append("mode", mode);
+        formData.append("tz", DEVICE_TZ);
         if (selectedModel) formData.append("model", selectedModel);
 
         if (audioUri) {
