@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     "multi-ai-chat-mcp",
     json_response=True,
+    stateless_http=True,
     host="0.0.0.0",
 )
 
