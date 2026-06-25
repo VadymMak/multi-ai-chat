@@ -25,6 +25,7 @@ build/
 .env.production
 backend/.env
 backend/.env.development
+backend/.env..development
 backend/.env.local
 frontend/.env.local
 frontend/.env.development
