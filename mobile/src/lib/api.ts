@@ -20,7 +20,19 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
+// Injected by AuthProvider on mount; called when the server returns 401
+let _onUnauthorized: (() => Promise<void>) | null = null;
+
+export function setUnauthorizedHandler(handler: () => Promise<void>): void {
+  _onUnauthorized = handler;
+}
+
 api.interceptors.response.use(
   (response) => response,
-  (error: unknown) => Promise.reject(error)
+  async (error: unknown) => {
+    if ((error as any)?.response?.status === 401 && _onUnauthorized) {
+      await _onUnauthorized();
+    }
+    return Promise.reject(error);
+  }
 );

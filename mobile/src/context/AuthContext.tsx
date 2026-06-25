@@ -8,6 +8,7 @@ import React, {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { get, set, remove } from "../lib/storage";
 import { STORAGE_KEYS } from "../lib/constants";
+import { setUnauthorizedHandler } from "../lib/api";
 
 const TOKEN_LIFETIME_MS = 86400_000 * 30;
 
@@ -38,6 +39,13 @@ async function clearAll() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    setUnauthorizedHandler(async () => {
+      setUser(null);
+      await clearAll();
+    });
+  }, []);
 
   useEffect(() => {
     async function restore() {
