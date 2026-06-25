@@ -32,9 +32,8 @@ RUN mkdir -p /app/uploads
 # Expose port (Railway will set PORT env var)
 EXPOSE ${PORT:-8000}
 
-# Run check_users, init_auth, migrations, then start server
+# Run init_auth, migrations, then start server
 CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
-     python backend/scripts/check_users.py && \
      python backend/scripts/init_auth_tables.py && \
      python backend/scripts/reset_superuser_password.py && \
      python backend/migrations/add_git_integration_to_projects.py && \

@@ -41,10 +41,10 @@ DEFAULT_DB_PATH = os.path.abspath(os.path.join(PROJECT_ROOT, "memory.db"))
 DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
 
 # ═══════════════════════ DEBUG LOGGING ═══════════════════════
+_safe_url = DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL
 logger.info("=" * 80)
 logger.info("🔍 [DATABASE_URL DEBUG]")
-logger.info(f"  Raw value: {DATABASE_URL}")
-logger.info(f"  Type: {type(DATABASE_URL)}")
+logger.info(f"  Host/DB: {_safe_url}")
 logger.info(f"  Length: {len(DATABASE_URL) if DATABASE_URL else 0}")
 logger.info(f"  Starts with 'postgresql': {DATABASE_URL.startswith('postgresql') if DATABASE_URL else False}")
 logger.info(f"  Starts with 'sqlite': {DATABASE_URL.startswith('sqlite') if DATABASE_URL else False}")
