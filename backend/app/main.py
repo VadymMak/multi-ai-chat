@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from app.mcp_server import mcp   # ← MCP instance with all tools
-from app.memory.db import init_db, DATABASE_URL
+from app.memory.db import init_db, DATABASE_URL, mask_db_url
 
 import logging
 import os
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
         # Start MCP Streamable HTTP session manager (required for mcp==1.26.0)
         await stack.enter_async_context(mcp.session_manager.run())
 
-        logger.info(f"Initializing database… URL={DATABASE_URL}")
+        logger.info(f"Initializing database… URL={mask_db_url(DATABASE_URL)}")
         init_db()
 
         # 🔧 One-time migration: roles.description VARCHAR(255) -> TEXT

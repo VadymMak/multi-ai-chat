@@ -1,6 +1,7 @@
 # File: backend/app/memory/db.py
 
 import os
+import re
 import time
 import logging
 from typing import Generator
@@ -12,11 +13,15 @@ from sqlalchemy.exc import OperationalError
 
 from .models import Base
 
-__all__ = ["engine", "SessionLocal", "Base", "get_db", "init_db", "DATABASE_URL", "SQLALCHEMY_URL"]
+__all__ = ["engine", "SessionLocal", "Base", "get_db", "init_db", "DATABASE_URL", "SQLALCHEMY_URL", "mask_db_url"]
 
 # ─────────────────────────── Logging ───────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def mask_db_url(url: str) -> str:
+    """postgresql://user:PASSWORD@host/db -> postgresql://user:***@host/db"""
+    return re.sub(r"(://[^:/@]+:)[^@]+@", r"\1***@", url)
 
 # ──────────────────────── .env resolution ───────────────────────
 # Try project .env first; fall back to current working dir
@@ -41,10 +46,9 @@ DEFAULT_DB_PATH = os.path.abspath(os.path.join(PROJECT_ROOT, "memory.db"))
 DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
 
 # ═══════════════════════ DEBUG LOGGING ═══════════════════════
-_safe_url = DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL
 logger.info("=" * 80)
 logger.info("🔍 [DATABASE_URL DEBUG]")
-logger.info(f"  Host/DB: {_safe_url}")
+logger.info(f"  URL: {mask_db_url(DATABASE_URL)}")
 logger.info(f"  Length: {len(DATABASE_URL) if DATABASE_URL else 0}")
 logger.info(f"  Starts with 'postgresql': {DATABASE_URL.startswith('postgresql') if DATABASE_URL else False}")
 logger.info(f"  Starts with 'sqlite': {DATABASE_URL.startswith('sqlite') if DATABASE_URL else False}")
@@ -85,7 +89,7 @@ try:
             echo=ECHO
         )
         logger.info("✅ PostgreSQL configured with connection pooling")
-        logger.info(f"Database URL: {DATABASE_URL.split('@')[0]}@***")  # Hide credentials
+        logger.info(f"Database URL: {mask_db_url(DATABASE_URL)}")
     else:
         # SQLite without pooling
         from sqlalchemy.pool import NullPool
@@ -97,7 +101,7 @@ try:
             echo=ECHO
         )
         logger.info("✅ SQLite configured (development mode)")
-        logger.info(f"Database path: {DATABASE_URL}")
+        logger.info(f"Database path: {mask_db_url(DATABASE_URL)}")
         
 except Exception as e:
     logger.error(f"❌ Failed to create engine: {e}")
