@@ -34,11 +34,12 @@ export async function addReminder(
     content: {
       title: "Напоминание",
       body: text,
-      sound: true,
+      sound: "default",
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.DATE,
       date: new Date(fire_at),
+      channelId: "reminders-v2",
     },
   });
 

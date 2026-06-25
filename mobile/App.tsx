@@ -4,6 +4,7 @@ import * as Updates from "expo-updates";
 import * as Notifications from "expo-notifications";
 import { AuthProvider } from "./src/context/AuthContext";
 import AppNavigator from "./src/navigation/AppNavigator";
+import { ensureReminderChannel } from "./src/lib/notifications";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -30,6 +31,7 @@ async function checkForOTAUpdate() {
 export default function App() {
   useEffect(() => {
     checkForOTAUpdate();
+    ensureReminderChannel();
   }, []);
 
   return (

@@ -2,26 +2,37 @@ import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import { Alert, Platform } from "react-native";
 
+// ─── Notification channel ─────────────────────────────────────────────────────
+// "reminders-v2" uses a new id so Android picks up MAX importance/sound
+// (existing channel settings cannot be changed after first creation).
+
+export async function ensureReminderChannel(): Promise<void> {
+  if (Platform.OS !== "android") return;
+  await Notifications.setNotificationChannelAsync("reminders-v2", {
+    name: "Напоминания",
+    importance: Notifications.AndroidImportance.MAX,
+    sound: "default",
+    vibrationPattern: [0, 400, 250, 400],
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+    bypassDnd: false,
+  });
+}
+
 // ─── Permission request ───────────────────────────────────────────────────────
 
 export async function requestNotificationPermission(): Promise<boolean> {
   if (!Device.isDevice) return false;
 
   const { status: existing } = await Notifications.getPermissionsAsync();
-  if (existing === "granted") return true;
+  if (existing === "granted") {
+    await ensureReminderChannel();
+    return true;
+  }
 
   const { status } = await Notifications.requestPermissionsAsync();
   if (status !== "granted") return false;
 
-  if (Platform.OS === "android") {
-    await Notifications.setNotificationChannelAsync("reminders", {
-      name: "Напоминания",
-      importance: Notifications.AndroidImportance.HIGH,
-      sound: "default",
-      vibrationPattern: [0, 250, 250, 250],
-    });
-  }
-
+  await ensureReminderChannel();
   return true;
 }
 

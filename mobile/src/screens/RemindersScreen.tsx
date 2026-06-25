@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { useFocusEffect } from "@react-navigation/native";
 import {
   View,
   Text,
@@ -54,10 +55,22 @@ export default function RemindersScreen() {
     setReminders(await loadReminders());
   }, []);
 
+  // Reload every time this tab comes into focus so reminders added from
+  // ChatScreen appear immediately without requiring a full unmount/remount.
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        const r = await loadReminders();
+        if (active) setReminders(r);
+      })();
+      return () => { active = false; };
+    }, [])
+  );
+
   useEffect(() => {
-    reload();
     ensurePermissions();
-  }, [reload]);
+  }, []);
 
   async function ensurePermissions() {
     const granted = await requestNotificationPermission();
