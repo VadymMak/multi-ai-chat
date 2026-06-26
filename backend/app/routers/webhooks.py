@@ -20,7 +20,7 @@ import urllib.parse
 from typing import Any, Dict
 
 import httpx
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, BackgroundTasks, Header, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -71,9 +71,24 @@ def _collect_changed_files(payload: Dict[str, Any]) -> tuple[list[str], list[str
     return sorted(upsert), sorted(deleted)
 
 
+async def _full_reindex_background(project_id: int) -> None:
+    """Full project reindex — runs in background so webhook returns 200 immediately."""
+    db: Session = SessionLocal()
+    try:
+        token = getattr(settings, "GITHUB_TOKEN", None)
+        indexer = FileIndexer(db, github_token=token)
+        result = await indexer.index_project(project_id=project_id, force_reindex=True)
+        logger.info(f"[webhook] Full reindex done for project {project_id}: {result}")
+    except Exception as exc:
+        logger.error(f"[webhook] Full reindex failed for project {project_id}: {exc}")
+    finally:
+        db.close()
+
+
 @router.post("/github")
 async def github_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(None),
     x_github_event: str | None = Header(None),
 ):
@@ -112,6 +127,16 @@ async def github_webhook(
 
         project_id: int = row[0]
         logger.info(f"[webhook] Push to {full_name} → project {project_id} (sha={sha})")
+
+        # If no files indexed yet — schedule full reindex and return immediately
+        count_row = db.execute(
+            text("SELECT COUNT(*) FROM file_embeddings WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).fetchone()
+        if count_row and count_row[0] == 0:
+            logger.info(f"[webhook] project {project_id} has 0 files — scheduling full reindex in background")
+            background_tasks.add_task(_full_reindex_background, project_id)
+            return {"status": "ok", "project_id": project_id, "action": "full_reindex_scheduled"}
 
         upsert_paths, deleted_paths = _collect_changed_files(payload)
         indexer = FileIndexer(db)
