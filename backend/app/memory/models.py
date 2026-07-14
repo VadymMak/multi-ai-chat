@@ -27,6 +27,7 @@ __all__ = [
     "User",
     "UserAPIKey",
     "FileVersion",
+    "Lesson",
 ]
 
 # ✅ Role table
@@ -325,6 +326,7 @@ class User(Base):
     # Relationships
     api_keys = relationship("UserAPIKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+    lessons = relationship("Lesson", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r} status={self.status}>"
@@ -396,3 +398,26 @@ class UserAPIKey(Base):
     
     def __repr__(self) -> str:
         return f"<UserAPIKey user_id={self.user_id}>"
+
+
+# ✅ Lessons — AI answers saved by user (mobile only)
+class Lesson(Base):
+    __tablename__ = "lessons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    tags = Column(String(500), nullable=True)   # CSV, e.g. "python,async"
+    source = Column(String(100), nullable=True)  # e.g. "chat"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="lessons")
+
+    __table_args__ = (
+        Index("ix_lessons_user_created", "user_id", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Lesson id={self.id} user_id={self.user_id} title={self.title!r}>"

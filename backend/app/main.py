@@ -278,6 +278,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load app_api router: {e}")
 
+try:
+    from app.routers.lessons import router as lessons_router  # type: ignore
+    app.include_router(lessons_router, prefix="/api")
+    logger.info("Loaded router: lessons → /api/app/lessons")
+except Exception as e:
+    logger.error(f"Failed to load lessons router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()

@@ -11,6 +11,8 @@ import {
   Platform,
   Image,
   Pressable,
+  Modal,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -23,6 +25,7 @@ import { STORAGE_KEYS } from "../lib/constants";
 import { colors, spacing, borderRadius } from "../theme";
 import { addReminder } from "../lib/reminders";
 import { requestNotificationPermission } from "../lib/notifications";
+import { lessonApi } from "../lib/lessonApi";
 
 type Mode = "chat" | "notes" | "web" | "save" | "reminder";
 type ModelKey = "gpt" | "claude" | "grok";
@@ -76,6 +79,13 @@ export default function ChatScreen() {
   const [pendingImage, setPendingImage] =
     useState<ImagePicker.ImagePickerAsset | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // ── Save as lesson modal ──────────────────────────────────
+  const [lessonModal, setLessonModal] = useState(false);
+  const [lessonContent, setLessonContent] = useState("");
+  const [lessonTitle, setLessonTitle] = useState("");
+  const [lessonTags, setLessonTags] = useState("");
+  const [lessonSaving, setLessonSaving] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEYS.DEFAULT_MODEL).then((val) => {
@@ -267,6 +277,33 @@ export default function ChatScreen() {
   const toggleModel = (key: ModelKey) =>
     setSelectedModel((prev) => (prev === key ? null : key));
 
+  const openSaveLessonModal = (content: string) => {
+    const firstLine = content.split("\n").find((l) => l.trim().length > 0) ?? "";
+    setLessonContent(content);
+    setLessonTitle(firstLine.replace(/^#+\s*/, "").slice(0, 120));
+    setLessonTags("");
+    setLessonModal(true);
+  };
+
+  const saveLesson = async () => {
+    if (!lessonTitle.trim()) return;
+    setLessonSaving(true);
+    try {
+      await lessonApi.create({
+        title: lessonTitle.trim(),
+        content: lessonContent,
+        tags: lessonTags.trim() || undefined,
+        source: "chat",
+      });
+      setLessonModal(false);
+      Alert.alert("Сохранено", "Урок добавлен в раздел «Уроки».");
+    } catch {
+      Alert.alert("Ошибка", "Не удалось сохранить урок.");
+    } finally {
+      setLessonSaving(false);
+    }
+  };
+
   const listData: Message[] = isLoading
     ? [{ id: LOADING_ID, role: "assistant", content: "" }, ...messages]
     : messages;
@@ -294,26 +331,32 @@ export default function ChatScreen() {
     const meta = MODE_META[m];
 
     return (
-      <View style={[styles.bubble, styles.bubbleAssistant]}>
-        <View style={styles.metaRow}>
-          <View style={[styles.modeTag, { backgroundColor: meta.bg }]}>
-            <Text style={[styles.modeTagText, { color: meta.color }]}>
-              {meta.emoji} {MODE_LABELS[m]}
-            </Text>
-          </View>
-          {item.modelUsed ? (
-            <View style={styles.modelTag}>
-              <Text style={styles.modelTagText}>{item.modelUsed}</Text>
+      <TouchableOpacity
+        activeOpacity={1}
+        onLongPress={() => openSaveLessonModal(item.content)}
+        delayLongPress={500}
+      >
+        <View style={[styles.bubble, styles.bubbleAssistant]}>
+          <View style={styles.metaRow}>
+            <View style={[styles.modeTag, { backgroundColor: meta.bg }]}>
+              <Text style={[styles.modeTagText, { color: meta.color }]}>
+                {meta.emoji} {MODE_LABELS[m]}
+              </Text>
             </View>
+            {item.modelUsed ? (
+              <View style={styles.modelTag}>
+                <Text style={styles.modelTagText}>{item.modelUsed}</Text>
+              </View>
+            ) : null}
+          </View>
+
+          <Markdown style={mdStyles}>{item.content}</Markdown>
+
+          {item.sources && item.sources.length > 0 ? (
+            <SourcesList mode={m} sources={item.sources} />
           ) : null}
         </View>
-
-        <Markdown style={mdStyles}>{item.content}</Markdown>
-
-        {item.sources && item.sources.length > 0 ? (
-          <SourcesList mode={m} sources={item.sources} />
-        ) : null}
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -405,6 +448,58 @@ export default function ChatScreen() {
             </TouchableOpacity>
           </View>
         ) : null}
+
+        {/* Save as lesson modal */}
+        <Modal
+          visible={lessonModal}
+          animationType="slide"
+          presentationStyle="pageSheet"
+          onRequestClose={() => setLessonModal(false)}
+        >
+          <View style={styles.lessonModal}>
+            <View style={styles.lessonModalHeader}>
+              <TouchableOpacity onPress={() => setLessonModal(false)} style={styles.iconBtn}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+              <Text style={styles.lessonModalTitle}>Сохранить как урок</Text>
+              <TouchableOpacity
+                onPress={saveLesson}
+                style={[styles.lessonSaveBtn, !lessonTitle.trim() && styles.lessonSaveBtnOff]}
+                disabled={!lessonTitle.trim() || lessonSaving}
+                activeOpacity={0.8}
+              >
+                {lessonSaving ? (
+                  <ActivityIndicator color={colors.onAccent} size="small" />
+                ) : (
+                  <Text style={styles.lessonSaveBtnText}>Сохранить</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.lessonModalBody}>
+              <Text style={styles.lessonFieldLabel}>Название</Text>
+              <TextInput
+                style={styles.lessonTitleInput}
+                value={lessonTitle}
+                onChangeText={setLessonTitle}
+                placeholder="Название урока..."
+                placeholderTextColor={colors.textHint}
+                maxLength={120}
+                autoFocus
+              />
+              <Text style={styles.lessonFieldLabel}>Теги (через запятую)</Text>
+              <TextInput
+                style={styles.lessonTagsInput}
+                value={lessonTags}
+                onChangeText={setLessonTags}
+                placeholder="python, async, sql..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="none"
+                maxLength={200}
+              />
+            </View>
+          </View>
+        </Modal>
 
         {/* Input bar */}
         <View style={styles.inputBar}>
@@ -692,4 +787,63 @@ const styles = StyleSheet.create({
     padding: 6,
   },
   sourceNoteText: { color: colors.textSecondary, fontSize: 12 },
+
+  lessonModal: { flex: 1, backgroundColor: colors.bg },
+  lessonModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
+  },
+  lessonModalTitle: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  lessonSaveBtn: {
+    backgroundColor: colors.accent,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: borderRadius.md,
+    minWidth: 90,
+    alignItems: "center",
+  },
+  lessonSaveBtnOff: { backgroundColor: colors.inputBg },
+  lessonSaveBtnText: { color: colors.onAccent, fontSize: 14, fontWeight: "600" },
+
+  lessonModalBody: { padding: spacing.md, gap: spacing.sm },
+  lessonFieldLabel: {
+    color: colors.textHint,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  lessonTitleInput: {
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    color: colors.textPrimary,
+    fontSize: 16,
+    marginBottom: spacing.md,
+  },
+  lessonTagsInput: {
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    color: colors.textPrimary,
+    fontSize: 15,
+  },
 });
