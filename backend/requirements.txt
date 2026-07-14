@@ -55,6 +55,7 @@ openpyxl==3.1.2
 
 # Optional: Word documents
 python-docx==1.1.0
+mammoth==1.8.0
 
 # Optional: OCR support
 pillow==10.2.0

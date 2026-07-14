@@ -9,13 +9,18 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
 import { colors, spacing, borderRadius, typography } from "../theme";
 import { Lesson, lessonApi } from "../lib/lessonApi";
 import { lessonsCache } from "../lib/lessonsCache";
+import { api } from "../lib/api";
 import LessonReaderScreen from "./LessonReaderScreen";
 
 function formatDate(iso: string): string {
@@ -46,7 +51,16 @@ export default function LessonsScreen() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
 
-  // Collect all unique tags across loaded lessons for filter chips
+  // ── Manual add modal ───────────────────────────────────────
+  const [addModal, setAddModal] = useState(false);
+  const [addTitle, setAddTitle] = useState("");
+  const [addContent, setAddContent] = useState("");
+  const [addTags, setAddTags] = useState("");
+  const [addSaving, setAddSaving] = useState(false);
+
+  // ── Import state ───────────────────────────────────────────
+  const [importing, setImporting] = useState(false);
+
   const allTags = Array.from(
     new Set(lessons.flatMap((l) => parseTags(l.tags)))
   ).sort();
@@ -58,26 +72,18 @@ export default function LessonsScreen() {
       const { data } = await lessonApi.list({ q: q || undefined, tag: tag || undefined });
       setLessons(data);
       await lessonsCache.saveList(data);
-      // Pre-cache bodies for offline reading
       data.forEach((l) => lessonsCache.saveBody(l.id, l.content));
     } catch {
       setOffline(true);
-      const cached = await lessonsCache.loadList();
-      let filtered = cached;
+      let cached = await lessonsCache.loadList();
       if (q) {
         const lq = q.toLowerCase();
-        filtered = filtered.filter(
-          (l) =>
-            l.title.toLowerCase().includes(lq) ||
-            l.content.toLowerCase().includes(lq)
+        cached = cached.filter(
+          (l) => l.title.toLowerCase().includes(lq) || l.content.toLowerCase().includes(lq)
         );
       }
-      if (tag) {
-        filtered = filtered.filter((l) =>
-          parseTags(l.tags).includes(tag)
-        );
-      }
-      setLessons(filtered);
+      if (tag) cached = cached.filter((l) => parseTags(l.tags).includes(tag));
+      setLessons(cached);
     } finally {
       setLoading(false);
     }
@@ -89,12 +95,83 @@ export default function LessonsScreen() {
       fetchLessons(search, activeTag ?? undefined).then(() => {
         if (!active) return;
       });
-      return () => {
-        active = false;
-      };
+      return () => { active = false; };
     }, [fetchLessons, search, activeTag])
   );
 
+  // ── Manual add ────────────────────────────────────────────
+  const openAddModal = () => {
+    setAddTitle("");
+    setAddContent("");
+    setAddTags("");
+    setAddModal(true);
+  };
+
+  const handleManualAdd = async () => {
+    if (!addTitle.trim() || !addContent.trim()) return;
+    setAddSaving(true);
+    try {
+      await lessonApi.create({
+        title: addTitle.trim(),
+        content: addContent.trim(),
+        tags: addTags.trim() || undefined,
+        source: "manual",
+      });
+      setAddModal(false);
+      await lessonsCache.invalidate();
+      await fetchLessons(search, activeTag ?? undefined);
+    } catch {
+      Alert.alert("Ошибка", "Не удалось сохранить урок.");
+    } finally {
+      setAddSaving(false);
+    }
+  };
+
+  // ── File import ───────────────────────────────────────────
+  const handleImport = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: [
+          "text/plain",
+          "text/markdown",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "application/octet-stream", // fallback for .md on some Android
+        ],
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets?.length) return;
+
+      const asset = result.assets[0];
+      setImporting(true);
+
+      const formData = new FormData();
+      formData.append("file", {
+        uri: asset.uri,
+        name: asset.name,
+        type: asset.mimeType ?? "application/octet-stream",
+      } as unknown as Blob);
+
+      const { data } = await api.post<Lesson>("/api/app/lessons/import", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: 30_000,
+      });
+
+      await lessonsCache.invalidate();
+      await lessonsCache.saveBody(data.id, data.content);
+      await fetchLessons(search, activeTag ?? undefined);
+      Alert.alert("Импортировано", `«${data.title}» добавлен в уроки.`);
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Не удалось импортировать файл.";
+      Alert.alert("Ошибка импорта", detail);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // ── Delete ────────────────────────────────────────────────
   const handleDelete = (id: number) => {
     Alert.alert("Удалить урок?", "Это действие необратимо.", [
       { text: "Отмена", style: "cancel" },
@@ -123,9 +200,7 @@ export default function LessonsScreen() {
         onPress={() => setSelectedLesson(item)}
         onLongPress={() => handleDelete(item.id)}
       >
-        <Text style={styles.cardTitle} numberOfLines={2}>
-          {item.title}
-        </Text>
+        <Text style={styles.cardTitle} numberOfLines={2}>{item.title}</Text>
         <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
         {tags.length > 0 && (
           <View style={styles.tagRow}>
@@ -152,11 +227,34 @@ export default function LessonsScreen() {
           </View>
         )}
         <TouchableOpacity
-          style={styles.refreshBtn}
+          style={styles.headerBtn}
           onPress={() => fetchLessons(search, activeTag ?? undefined)}
           activeOpacity={0.7}
         >
           <Ionicons name="refresh-outline" size={20} color={colors.textSecondary} />
+        </TouchableOpacity>
+
+        {/* Import file */}
+        <TouchableOpacity
+          style={styles.headerBtn}
+          onPress={handleImport}
+          disabled={importing}
+          activeOpacity={0.7}
+        >
+          {importing ? (
+            <ActivityIndicator color={colors.accent} size="small" />
+          ) : (
+            <Ionicons name="document-text-outline" size={20} color={colors.textSecondary} />
+          )}
+        </TouchableOpacity>
+
+        {/* Manual add */}
+        <TouchableOpacity
+          style={[styles.headerBtn, styles.addBtn]}
+          onPress={openAddModal}
+          activeOpacity={0.8}
+        >
+          <Ionicons name="add" size={22} color={colors.onAccent} />
         </TouchableOpacity>
       </View>
 
@@ -195,9 +293,7 @@ export default function LessonsScreen() {
               }}
               activeOpacity={0.7}
             >
-              <Text
-                style={[styles.filterChipText, activeTag === tag && styles.filterChipTextActive]}
-              >
+              <Text style={[styles.filterChipText, activeTag === tag && styles.filterChipTextActive]}>
                 {tag}
               </Text>
             </TouchableOpacity>
@@ -205,7 +301,7 @@ export default function LessonsScreen() {
         </ScrollView>
       )}
 
-      {/* List */}
+      {/* Lessons list */}
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={colors.accent} size="large" />
@@ -215,7 +311,7 @@ export default function LessonsScreen() {
           <Ionicons name="book-outline" size={52} color={colors.textHint} />
           <Text style={styles.emptyTitle}>Уроков пока нет</Text>
           <Text style={styles.emptyHint}>
-            Долгий тап на ответ AI в чате → «Сохранить как урок»
+            Нажмите «+» чтобы добавить вручную, или значок файла чтобы импортировать .md/.txt/.docx.
           </Text>
         </View>
       ) : (
@@ -227,13 +323,82 @@ export default function LessonsScreen() {
         />
       )}
 
-      {/* Reader modal */}
+      {/* Reader */}
       {selectedLesson && (
         <LessonReaderScreen
           lesson={selectedLesson}
           onClose={() => setSelectedLesson(null)}
         />
       )}
+
+      {/* Manual add modal */}
+      <Modal
+        visible={addModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setAddModal(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalFlex}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <SafeAreaView style={styles.modalContainer} edges={["top", "bottom"]}>
+            <View style={styles.modalHeader}>
+              <TouchableOpacity onPress={() => setAddModal(false)} style={styles.headerBtn}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+              <Text style={styles.modalTitle}>Новый урок</Text>
+              <TouchableOpacity
+                style={[styles.saveBtn, (!addTitle.trim() || !addContent.trim()) && styles.saveBtnOff]}
+                onPress={handleManualAdd}
+                disabled={!addTitle.trim() || !addContent.trim() || addSaving}
+                activeOpacity={0.8}
+              >
+                {addSaving ? (
+                  <ActivityIndicator color={colors.onAccent} size="small" />
+                ) : (
+                  <Text style={styles.saveBtnText}>Сохранить</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+              <Text style={styles.fieldLabel}>Название</Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={addTitle}
+                onChangeText={setAddTitle}
+                placeholder="Название урока..."
+                placeholderTextColor={colors.textHint}
+                maxLength={120}
+                autoFocus
+              />
+
+              <Text style={styles.fieldLabel}>Содержимое (Markdown)</Text>
+              <TextInput
+                style={[styles.fieldInput, styles.contentInput]}
+                value={addContent}
+                onChangeText={setAddContent}
+                placeholder={"# Заголовок\n\nТекст урока..."}
+                placeholderTextColor={colors.textHint}
+                multiline
+                textAlignVertical="top"
+              />
+
+              <Text style={styles.fieldLabel}>Теги (через запятую)</Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={addTags}
+                onChangeText={setAddTags}
+                placeholder="python, async, sql..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="none"
+                maxLength={200}
+              />
+            </ScrollView>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -244,9 +409,9 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    gap: spacing.sm,
+    gap: 4,
     paddingHorizontal: spacing.md,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
@@ -264,7 +429,20 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.sm,
   },
   offlineText: { color: colors.accent, fontSize: 11, fontWeight: "600" },
-  refreshBtn: { padding: 4 },
+  headerBtn: {
+    padding: 8,
+    borderRadius: borderRadius.md,
+    minWidth: 36,
+    minHeight: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  addBtn: {
+    backgroundColor: colors.accent,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
 
   searchRow: {
     flexDirection: "row",
@@ -279,21 +457,10 @@ const styles = StyleSheet.create({
     height: 44,
   },
   searchIcon: { marginRight: 6 },
-  searchInput: {
-    flex: 1,
-    color: colors.textPrimary,
-    fontSize: 15,
-  },
+  searchInput: { flex: 1, color: colors.textPrimary, fontSize: 15 },
 
-  tagFilterRow: {
-    marginTop: spacing.sm,
-    maxHeight: 40,
-  },
-  tagFilterContent: {
-    paddingHorizontal: spacing.md,
-    gap: spacing.xs,
-    alignItems: "center",
-  },
+  tagFilterRow: { marginTop: spacing.sm, maxHeight: 40 },
+  tagFilterContent: { paddingHorizontal: spacing.md, alignItems: "center" },
   filterChip: {
     paddingHorizontal: 12,
     paddingVertical: 5,
@@ -303,15 +470,11 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     marginRight: 6,
   },
-  filterChipActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
-  },
+  filterChipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   filterChipText: { color: colors.textSecondary, fontSize: 12, fontWeight: "600" },
   filterChipTextActive: { color: colors.onAccent },
 
   listContent: { padding: spacing.md, gap: spacing.sm },
-
   card: {
     backgroundColor: colors.surface,
     borderRadius: borderRadius.md,
@@ -327,16 +490,8 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     lineHeight: 22,
   },
-  cardDate: {
-    color: colors.textHint,
-    fontSize: typography.caption.fontSize,
-  },
-  tagRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 4,
-    marginTop: 2,
-  },
+  cardDate: { color: colors.textHint, fontSize: typography.caption.fontSize },
+  tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 2 },
   tagChip: {
     backgroundColor: colors.inputBg,
     paddingHorizontal: 8,
@@ -352,15 +507,62 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
   },
-  emptyTitle: {
-    color: colors.textSecondary,
-    fontSize: typography.h3.fontSize,
-    fontWeight: "600",
+  emptyTitle: { color: colors.textSecondary, fontSize: typography.h3.fontSize, fontWeight: "600" },
+  emptyHint: { color: colors.textHint, fontSize: 14, textAlign: "center", lineHeight: 20 },
+
+  // ── Modal ───────────────────────────────────────────────────
+  modalFlex: { flex: 1 },
+  modalContainer: { flex: 1, backgroundColor: colors.bg },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
   },
-  emptyHint: {
-    color: colors.textHint,
-    fontSize: 14,
+  modalTitle: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: "600",
     textAlign: "center",
-    lineHeight: 20,
+  },
+  saveBtn: {
+    backgroundColor: colors.accent,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: borderRadius.md,
+    minWidth: 90,
+    alignItems: "center",
+  },
+  saveBtnOff: { backgroundColor: colors.inputBg },
+  saveBtnText: { color: colors.onAccent, fontSize: 14, fontWeight: "600" },
+
+  modalScroll: { flex: 1, padding: spacing.md },
+  fieldLabel: {
+    color: colors.textHint,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  fieldInput: {
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    color: colors.textPrimary,
+    fontSize: 15,
+    marginBottom: spacing.md,
+  },
+  contentInput: {
+    minHeight: 220,
+    lineHeight: 22,
+    paddingTop: 12,
   },
 });

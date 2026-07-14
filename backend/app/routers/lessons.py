@@ -6,16 +6,34 @@ prefix="/api/app/lessons"
 """
 from __future__ import annotations
 
+import io
+import os
+import re
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_active_user, get_db
 from app.memory.models import Lesson, User
+
+# Optional heavy imports — graceful fallback
+try:
+    import mammoth  # type: ignore
+    _HAS_MAMMOTH = True
+except ImportError:
+    _HAS_MAMMOTH = False
+
+try:
+    import docx as _docx  # type: ignore  # python-docx
+    _HAS_DOCX = True
+except ImportError:
+    _HAS_DOCX = False
+
+_MAX_IMPORT_BYTES = 2 * 1024 * 1024  # 2 MB
 
 router = APIRouter(prefix="/app/lessons", tags=["lessons"])
 
@@ -60,7 +78,83 @@ def _get_own_or_404(lesson_id: int, user: User, db: Session) -> Lesson:
     return lesson
 
 
+# ── Helpers ───────────────────────────────────────────────────
+
+def _extract_title(markdown: str, filename: str) -> str:
+    """First H1/H2 heading, or filename without extension."""
+    for line in markdown.splitlines():
+        m = re.match(r"^#{1,2}\s+(.+)", line.strip())
+        if m:
+            return m.group(1).strip()[:255]
+    return os.path.splitext(filename)[0][:255]
+
+
+def _docx_to_markdown(data: bytes) -> str:
+    """Convert docx bytes → markdown. Tries mammoth first, falls back to python-docx."""
+    if _HAS_MAMMOTH:
+        result = mammoth.convert_to_markdown(io.BytesIO(data))
+        text = result.value.strip()
+        if text:
+            return text
+    if _HAS_DOCX:
+        doc = _docx.Document(io.BytesIO(data))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n\n".join(paragraphs)
+    raise HTTPException(
+        status_code=400,
+        detail="DOCX conversion requires mammoth or python-docx. Neither is installed.",
+    )
+
+
 # ── Endpoints ─────────────────────────────────────────────────
+
+@router.post("/import", response_model=LessonOut, status_code=status.HTTP_201_CREATED)
+async def import_lesson_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Import a .md / .txt / .docx file and create a lesson from its content."""
+    content_bytes = await file.read()
+
+    if len(content_bytes) > _MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(content_bytes) // 1024} KB). Maximum is 2 MB.",
+        )
+
+    filename = file.filename or "imported"
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in {".md", ".txt", ".markdown"}:
+        markdown = content_bytes.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+    elif ext == ".docx":
+        markdown = _docx_to_markdown(content_bytes)
+    else:
+        # Best-effort: try UTF-8 text, otherwise reject
+        try:
+            markdown = content_bytes.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{ext}'. Use .md, .txt, or .docx.",
+            )
+
+    if not markdown:
+        raise HTTPException(status_code=400, detail="File is empty or produced no content.")
+
+    title = _extract_title(markdown, filename)
+    lesson = Lesson(
+        user_id=current_user.id,
+        title=title,
+        content=markdown,
+        source="import",
+    )
+    db.add(lesson)
+    db.commit()
+    db.refresh(lesson)
+    return lesson
+
 
 @router.post("", response_model=LessonOut, status_code=status.HTTP_201_CREATED)
 async def create_lesson(
