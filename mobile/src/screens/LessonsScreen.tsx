@@ -247,9 +247,19 @@ export default function LessonsScreen() {
         {tags.length > 0 && (
           <View style={styles.tagRow}>
             {tags.map((tag) => (
-              <View key={tag} style={styles.tagChip}>
-                <Text style={styles.tagText}>{tag}</Text>
-              </View>
+              <TouchableOpacity
+                key={tag}
+                style={[styles.tagChip, activeTag === tag && styles.tagChipActive]}
+                onPress={() => {
+                  const next = activeTag === tag ? null : tag;
+                  setActiveTag(next);
+                  fetchLessons(search, next ?? undefined);
+                }}
+                activeOpacity={0.7}
+                hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              >
+                <Text style={[styles.tagText, activeTag === tag && styles.tagTextActive]}>{tag}</Text>
+              </TouchableOpacity>
             ))}
           </View>
         )}
@@ -324,6 +334,21 @@ export default function LessonsScreen() {
           style={styles.tagFilterRow}
           contentContainerStyle={styles.tagFilterContent}
         >
+          {/* "All" chip — clears filter */}
+          <TouchableOpacity
+            key="__all__"
+            style={[styles.filterChip, activeTag === null && styles.filterChipActive]}
+            onPress={() => {
+              setActiveTag(null);
+              fetchLessons(search, undefined);
+            }}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.filterChipText, activeTag === null && styles.filterChipTextActive]}>
+              Все
+            </Text>
+          </TouchableOpacity>
+
           {allTags.map((tag) => (
             <TouchableOpacity
               key={tag}
@@ -553,8 +578,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  tagChipActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
   tagText: { color: colors.accent, fontSize: 11, fontWeight: "600" },
+  tagTextActive: { color: colors.onAccent },
 
   center: {
     flex: 1,
