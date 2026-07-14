@@ -6,6 +6,7 @@ export interface Lesson {
   content: string;
   tags: string | null;
   source: string | null;
+  pinned: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -21,6 +22,7 @@ export interface UpdateLesson {
   title?: string;
   content?: string;
   tags?: string;
+  pinned?: boolean;
 }
 
 export const lessonApi = {

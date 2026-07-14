@@ -51,6 +51,7 @@ class LessonUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     tags: Optional[str] = None
+    pinned: Optional[bool] = None
 
 
 class LessonOut(BaseModel):
@@ -59,6 +60,7 @@ class LessonOut(BaseModel):
     content: str
     tags: Optional[str]
     source: Optional[str]
+    pinned: bool
     created_at: datetime
     updated_at: datetime
 
@@ -194,7 +196,7 @@ async def list_lessons(
         # tags stored as CSV — match as substring so "python" matches "ai,python,async"
         query = query.filter(Lesson.tags.ilike(f"%{tag}%"))
 
-    lessons = query.order_by(Lesson.created_at.desc()).all()
+    lessons = query.order_by(Lesson.pinned.desc(), Lesson.created_at.desc()).all()
     return lessons
 
 
@@ -221,6 +223,8 @@ async def update_lesson(
         lesson.content = body.content
     if body.tags is not None:
         lesson.tags = body.tags
+    if body.pinned is not None:
+        lesson.pinned = body.pinned
     lesson.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(lesson)

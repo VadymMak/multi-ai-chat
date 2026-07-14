@@ -410,6 +410,7 @@ class Lesson(Base):
     content = Column(Text, nullable=False)
     tags = Column(String(500), nullable=True)   # CSV, e.g. "python,async"
     source = Column(String(100), nullable=True)  # e.g. "chat"
+    pinned = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -417,6 +418,7 @@ class Lesson(Base):
 
     __table_args__ = (
         Index("ix_lessons_user_created", "user_id", "created_at"),
+        Index("ix_lessons_user_pinned_created", "user_id", "pinned", "created_at"),
     )
 
     def __repr__(self) -> str:

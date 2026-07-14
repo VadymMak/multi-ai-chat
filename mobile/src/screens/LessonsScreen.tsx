@@ -171,6 +171,30 @@ export default function LessonsScreen() {
     }
   };
 
+  // ── Pin / unpin ───────────────────────────────────────────
+  const handleTogglePin = async (item: Lesson) => {
+    const next = !item.pinned;
+    // Optimistic update
+    setLessons((prev) =>
+      prev
+        .map((l) => (l.id === item.id ? { ...l, pinned: next } : l))
+        .sort((a, b) => {
+          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        })
+    );
+    try {
+      await lessonApi.update(item.id, { pinned: next });
+      await lessonsCache.invalidate();
+    } catch {
+      // Revert on error
+      setLessons((prev) =>
+        prev.map((l) => (l.id === item.id ? { ...l, pinned: item.pinned } : l))
+      );
+      Alert.alert("Ошибка", "Не удалось изменить закрепление.");
+    }
+  };
+
   // ── Delete ────────────────────────────────────────────────
   const handleDelete = (id: number) => {
     Alert.alert("Удалить урок?", "Это действие необратимо.", [
@@ -195,12 +219,30 @@ export default function LessonsScreen() {
     const tags = parseTags(item.tags);
     return (
       <TouchableOpacity
-        style={styles.card}
+        style={[styles.card, item.pinned && styles.cardPinned]}
         activeOpacity={0.75}
         onPress={() => setSelectedLesson(item)}
         onLongPress={() => handleDelete(item.id)}
       >
-        <Text style={styles.cardTitle} numberOfLines={2}>{item.title}</Text>
+        {/* Title row with pin button */}
+        <View style={styles.cardTitleRow}>
+          <Text style={styles.cardTitle} numberOfLines={2}>
+            {item.pinned ? "📌 " : ""}{item.title}
+          </Text>
+          <TouchableOpacity
+            onPress={() => handleTogglePin(item)}
+            style={styles.pinBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name={item.pinned ? "bookmark" : "bookmark-outline"}
+              size={18}
+              color={item.pinned ? colors.accent : colors.textHint}
+            />
+          </TouchableOpacity>
+        </View>
+
         <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
         {tags.length > 0 && (
           <View style={styles.tagRow}>
@@ -484,11 +526,25 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
     minHeight: 72,
   },
+  cardPinned: {
+    borderColor: colors.accent,
+    backgroundColor: "#1E1A12",
+  },
+  cardTitleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+  },
   cardTitle: {
+    flex: 1,
     color: colors.textPrimary,
     fontSize: typography.body.fontSize,
     fontWeight: "600",
     lineHeight: 22,
+  },
+  pinBtn: {
+    padding: 2,
+    marginTop: 1,
   },
   cardDate: { color: colors.textHint, fontSize: typography.caption.fontSize },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 2 },
