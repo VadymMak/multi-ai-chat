@@ -17,10 +17,16 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Speech from "expo-speech";
 import { colors, spacing, borderRadius, typography } from "../theme";
 import { Lesson } from "../lib/lessonApi";
-import { stripMarkdownToSpeakable, detectTtsLanguage } from "../lib/ttsText";
+import {
+  stripMarkdownToSpeakable,
+  detectTtsLanguage,
+  hasTtsMarkers,
+  extractSpeakable,
+} from "../lib/ttsText";
 
 const FONT_SCALE_KEY = "@lessons/font_scale";
 const TTS_RATE_KEY = "@lessons/tts_rate";
+const TTS_SELECTIVE_KEY = "@lessons/tts_selective";
 const FONT_SCALE_MIN = 0.85;
 const FONT_SCALE_MAX = 1.6;
 const FONT_SCALE_STEP = 0.1;
@@ -95,12 +101,17 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   const [fontScale, setFontScale] = useState(FONT_SCALE_DEFAULT);
   const [ttsState, setTtsState] = useState<TtsState>("idle");
   const [ttsRate, setTtsRate] = useState<TtsRate>(1.0);
+  // true = read only <!-- tts --> regions; false = read full text
+  const [ttsSelective, setTtsSelective] = useState(true);
 
-  // Restore persisted font scale and TTS rate on mount
+  const hasMarkers = hasTtsMarkers(lesson.content);
+
+  // Restore persisted font scale, TTS rate, and selective mode on mount
   useEffect(() => {
-    AsyncStorage.multiGet([FONT_SCALE_KEY, TTS_RATE_KEY]).then((pairs) => {
+    AsyncStorage.multiGet([FONT_SCALE_KEY, TTS_RATE_KEY, TTS_SELECTIVE_KEY]).then((pairs) => {
       const fontVal = pairs[0][1];
       const rateVal = pairs[1][1];
+      const selectVal = pairs[2][1];
       if (fontVal) {
         const n = parseFloat(fontVal);
         if (!isNaN(n)) setFontScale(n);
@@ -109,6 +120,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
         const r = parseFloat(rateVal) as TtsRate;
         if ((TTS_RATES as readonly number[]).includes(r)) setTtsRate(r);
       }
+      if (selectVal !== null) setTtsSelective(selectVal !== "false");
     });
   }, []);
 
@@ -154,8 +166,11 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 
   // ── TTS ──────────────────────────────────────────────────────
 
-  const startSpeaking = (rate: TtsRate) => {
-    const cleanText = stripMarkdownToSpeakable(lesson.content);
+  const startSpeaking = (rate: TtsRate, selective = ttsSelective) => {
+    const cleanText =
+      selective && hasMarkers
+        ? extractSpeakable(lesson.content)
+        : stripMarkdownToSpeakable(lesson.content);
     const language = detectTtsLanguage(cleanText);
     setTtsState("speaking");
     Speech.speak(cleanText, {
@@ -195,10 +210,18 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   const handleRateChange = (rate: TtsRate) => {
     setTtsRate(rate);
     AsyncStorage.setItem(TTS_RATE_KEY, String(rate));
-    // Restart with new rate if already speaking
     if (ttsState === "speaking") {
       Speech.stop();
       setTimeout(() => startSpeaking(rate), 120);
+    }
+  };
+
+  const handleSelectiveToggle = (value: boolean) => {
+    setTtsSelective(value);
+    AsyncStorage.setItem(TTS_SELECTIVE_KEY, String(value));
+    if (ttsState === "speaking") {
+      Speech.stop();
+      setTimeout(() => startSpeaking(ttsRate, value), 120);
     }
   };
 
@@ -288,49 +311,79 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 
         {/* ── TTS Bar ── */}
         <View style={styles.ttsBar}>
-          {/* Stop + Play/Pause */}
-          <View style={styles.ttsControls}>
-            <TouchableOpacity
-              onPress={handleStop}
-              disabled={isStopped}
-              style={[styles.ttsIconBtn, isStopped && styles.ttsBtnDisabled]}
-              activeOpacity={0.7}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Ionicons
-                name="stop"
-                size={18}
-                color={isStopped ? colors.textHint : colors.textSecondary}
-              />
-            </TouchableOpacity>
+          {/* Selective toggle — only when lesson has <!-- tts --> markers */}
+          {hasMarkers && (
+            <View style={styles.ttsSelectRow}>
+              <Text style={styles.ttsSelectLabel}>Читать:</Text>
+              <View style={styles.selectChips}>
+                <TouchableOpacity
+                  onPress={() => handleSelectiveToggle(true)}
+                  style={[styles.selectChip, ttsSelective && styles.selectChipActive]}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.selectChipText, ttsSelective && styles.selectChipTextActive]}>
+                    Ключевое
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => handleSelectiveToggle(false)}
+                  style={[styles.selectChip, !ttsSelective && styles.selectChipActive]}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.selectChipText, !ttsSelective && styles.selectChipTextActive]}>
+                    Весь текст
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
-            <TouchableOpacity
-              onPress={handlePlayPause}
-              style={styles.ttsPlayBtn}
-              activeOpacity={0.7}
-            >
-              <Ionicons
-                name={ttsState === "speaking" ? "pause" : "play"}
-                size={22}
-                color={colors.onAccent}
-              />
-            </TouchableOpacity>
-          </View>
-
-          {/* Speed chips */}
-          <View style={styles.rateRow}>
-            {TTS_RATES.map((r) => (
+          {/* Main controls row */}
+          <View style={styles.ttsMainRow}>
+            {/* Stop + Play/Pause */}
+            <View style={styles.ttsControls}>
               <TouchableOpacity
-                key={r}
-                onPress={() => handleRateChange(r)}
-                style={[styles.rateChip, ttsRate === r && styles.rateChipActive]}
+                onPress={handleStop}
+                disabled={isStopped}
+                style={[styles.ttsIconBtn, isStopped && styles.ttsBtnDisabled]}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Ionicons
+                  name="stop"
+                  size={18}
+                  color={isStopped ? colors.textHint : colors.textSecondary}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={handlePlayPause}
+                style={styles.ttsPlayBtn}
                 activeOpacity={0.7}
               >
-                <Text style={[styles.rateText, ttsRate === r && styles.rateTextActive]}>
-                  {r}×
-                </Text>
+                <Ionicons
+                  name={ttsState === "speaking" ? "pause" : "play"}
+                  size={22}
+                  color={colors.onAccent}
+                />
               </TouchableOpacity>
-            ))}
+            </View>
+
+            {/* Speed chips */}
+            <View style={styles.rateRow}>
+              {TTS_RATES.map((r) => (
+                <TouchableOpacity
+                  key={r}
+                  onPress={() => handleRateChange(r)}
+                  style={[styles.rateChip, ttsRate === r && styles.rateChipActive]}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.rateText, ttsRate === r && styles.rateTextActive]}>
+                    {r}×
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
         </View>
       </SafeAreaView>
@@ -419,14 +472,52 @@ const styles = StyleSheet.create({
 
   // ── TTS Bar ──
   ttsBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    flexDirection: "column",
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingTop: 8,
+    paddingBottom: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.surface,
+    gap: 6,
+  },
+  ttsSelectRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  ttsSelectLabel: {
+    color: colors.textHint,
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  selectChips: {
+    flexDirection: "row",
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: "hidden",
+    padding: 2,
+    gap: 2,
+  },
+  selectChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: borderRadius.sm - 2,
+    alignItems: "center",
+  },
+  selectChipActive: { backgroundColor: colors.accent },
+  selectChipText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  selectChipTextActive: { color: colors.onAccent },
+  ttsMainRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     gap: spacing.sm,
   },
   ttsControls: {
