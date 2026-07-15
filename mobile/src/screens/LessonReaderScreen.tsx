@@ -8,19 +8,26 @@ import {
   Modal,
   ScrollView,
   Alert,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import Markdown from "react-native-markdown-display";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Speech from "expo-speech";
 import { colors, spacing, borderRadius, typography } from "../theme";
 import { Lesson } from "../lib/lessonApi";
+import { stripMarkdownToSpeakable, detectTtsLanguage } from "../lib/ttsText";
 
 const FONT_SCALE_KEY = "@lessons/font_scale";
+const TTS_RATE_KEY = "@lessons/tts_rate";
 const FONT_SCALE_MIN = 0.85;
 const FONT_SCALE_MAX = 1.6;
 const FONT_SCALE_STEP = 0.1;
 const FONT_SCALE_DEFAULT = 1.0;
+const TTS_RATES = [0.75, 1.0, 1.25, 1.5] as const;
+type TtsRate = (typeof TTS_RATES)[number];
+type TtsState = "idle" | "speaking" | "paused";
 
 interface Props {
   lesson: Lesson;
@@ -86,23 +93,46 @@ function buildMdStyles(scale: number) {
 
 export default function LessonReaderScreen({ lesson, onClose }: Props) {
   const [fontScale, setFontScale] = useState(FONT_SCALE_DEFAULT);
+  const [ttsState, setTtsState] = useState<TtsState>("idle");
+  const [ttsRate, setTtsRate] = useState<TtsRate>(1.0);
 
+  // Restore persisted font scale and TTS rate on mount
   useEffect(() => {
-    AsyncStorage.getItem(FONT_SCALE_KEY).then((val) => {
-      if (val) {
-        const n = parseFloat(val);
+    AsyncStorage.multiGet([FONT_SCALE_KEY, TTS_RATE_KEY]).then((pairs) => {
+      const fontVal = pairs[0][1];
+      const rateVal = pairs[1][1];
+      if (fontVal) {
+        const n = parseFloat(fontVal);
         if (!isNaN(n)) setFontScale(n);
+      }
+      if (rateVal) {
+        const r = parseFloat(rateVal) as TtsRate;
+        if ((TTS_RATES as readonly number[]).includes(r)) setTtsRate(r);
       }
     });
   }, []);
 
+  // Stop TTS whenever the Modal unmounts (close button, back gesture, navigation)
+  useEffect(() => {
+    return () => {
+      Speech.stop();
+    };
+  }, []);
+
+  // ── Font scale ───────────────────────────────────────────────
+
   const changeFontScale = (delta: number) => {
     setFontScale((prev) => {
-      const next = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, parseFloat((prev + delta).toFixed(2))));
+      const next = Math.min(
+        FONT_SCALE_MAX,
+        Math.max(FONT_SCALE_MIN, parseFloat((prev + delta).toFixed(2)))
+      );
       AsyncStorage.setItem(FONT_SCALE_KEY, String(next));
       return next;
     });
   };
+
+  // ── Share ────────────────────────────────────────────────────
 
   const handleShare = async () => {
     try {
@@ -115,21 +145,81 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
     }
   };
 
+  // ── Close (also stops TTS) ───────────────────────────────────
+
+  const handleClose = () => {
+    Speech.stop();
+    onClose();
+  };
+
+  // ── TTS ──────────────────────────────────────────────────────
+
+  const startSpeaking = (rate: TtsRate) => {
+    const cleanText = stripMarkdownToSpeakable(lesson.content);
+    const language = detectTtsLanguage(cleanText);
+    setTtsState("speaking");
+    Speech.speak(cleanText, {
+      language,
+      rate,
+      onStart: () => setTtsState("speaking"),
+      onDone: () => setTtsState("idle"),
+      onStopped: () => setTtsState("idle"),
+      onError: () => setTtsState("idle"),
+    });
+  };
+
+  const handlePlayPause = () => {
+    if (ttsState === "idle") {
+      startSpeaking(ttsRate);
+    } else if (ttsState === "speaking") {
+      if (Platform.OS === "ios") {
+        Speech.pause();
+        setTtsState("paused");
+      } else {
+        // Android doesn't support pause — stop and return to idle
+        Speech.stop();
+        setTtsState("idle");
+      }
+    } else {
+      // paused (iOS) → resume
+      Speech.resume();
+      setTtsState("speaking");
+    }
+  };
+
+  const handleStop = () => {
+    Speech.stop();
+    setTtsState("idle");
+  };
+
+  const handleRateChange = (rate: TtsRate) => {
+    setTtsRate(rate);
+    AsyncStorage.setItem(TTS_RATE_KEY, String(rate));
+    // Restart with new rate if already speaking
+    if (ttsState === "speaking") {
+      Speech.stop();
+      setTimeout(() => startSpeaking(rate), 120);
+    }
+  };
+
+  // ── Derived state ────────────────────────────────────────────
+
   const mdStyles = buildMdStyles(fontScale);
   const canDecrease = fontScale > FONT_SCALE_MIN + 0.001;
   const canIncrease = fontScale < FONT_SCALE_MAX - 0.001;
+  const isStopped = ttsState === "idle";
 
   return (
     <Modal
       visible
       animationType="slide"
       presentationStyle="pageSheet"
-      onRequestClose={onClose}
+      onRequestClose={handleClose}
     >
       <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-        {/* Toolbar */}
+        {/* ── Toolbar ── */}
         <View style={styles.toolbar}>
-          <TouchableOpacity onPress={onClose} style={styles.toolbarBtn} activeOpacity={0.7}>
+          <TouchableOpacity onPress={handleClose} style={styles.toolbarBtn} activeOpacity={0.7}>
             <Ionicons name="chevron-down" size={24} color={colors.textSecondary} />
           </TouchableOpacity>
 
@@ -164,12 +254,18 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
           </TouchableOpacity>
         </View>
 
+        {/* ── Content ── */}
         <ScrollView
           style={styles.scroll}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
-          <Text style={[styles.title, { fontSize: Math.round(22 * fontScale), lineHeight: Math.round(30 * fontScale) }]}>
+          <Text
+            style={[
+              styles.title,
+              { fontSize: Math.round(22 * fontScale), lineHeight: Math.round(30 * fontScale) },
+            ]}
+          >
             {lesson.title}
           </Text>
 
@@ -189,6 +285,54 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 
           <Markdown style={mdStyles}>{lesson.content}</Markdown>
         </ScrollView>
+
+        {/* ── TTS Bar ── */}
+        <View style={styles.ttsBar}>
+          {/* Stop + Play/Pause */}
+          <View style={styles.ttsControls}>
+            <TouchableOpacity
+              onPress={handleStop}
+              disabled={isStopped}
+              style={[styles.ttsIconBtn, isStopped && styles.ttsBtnDisabled]}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons
+                name="stop"
+                size={18}
+                color={isStopped ? colors.textHint : colors.textSecondary}
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={handlePlayPause}
+              style={styles.ttsPlayBtn}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name={ttsState === "speaking" ? "pause" : "play"}
+                size={22}
+                color={colors.onAccent}
+              />
+            </TouchableOpacity>
+          </View>
+
+          {/* Speed chips */}
+          <View style={styles.rateRow}>
+            {TTS_RATES.map((r) => (
+              <TouchableOpacity
+                key={r}
+                onPress={() => handleRateChange(r)}
+                style={[styles.rateChip, ttsRate === r && styles.rateChipActive]}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.rateText, ttsRate === r && styles.rateTextActive]}>
+                  {r}×
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -197,6 +341,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
 
+  // ── Toolbar ──
   toolbar: {
     flexDirection: "row",
     alignItems: "center",
@@ -220,7 +365,6 @@ const styles = StyleSheet.create({
     fontSize: typography.bodySmall.fontSize,
     textAlign: "center",
   },
-
   fontStepper: {
     flexDirection: "row",
     alignItems: "center",
@@ -247,13 +391,13 @@ const styles = StyleSheet.create({
   },
   fontBtnTextOff: { color: colors.textHint },
 
+  // ── Content ──
   scroll: { flex: 1 },
   scrollContent: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
     paddingBottom: spacing.xxl,
   },
-
   title: {
     color: colors.textPrimary,
     fontWeight: typography.h2.fontWeight,
@@ -272,4 +416,66 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   tagText: { color: colors.accent, fontSize: 12, fontWeight: "600" },
+
+  // ── TTS Bar ──
+  ttsBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
+    gap: spacing.sm,
+  },
+  ttsControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  ttsIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.inputBg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ttsBtnDisabled: { opacity: 0.4 },
+  ttsPlayBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  rateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: "hidden",
+    padding: 2,
+  },
+  rateChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: borderRadius.sm - 2,
+    minWidth: 42,
+    alignItems: "center",
+  },
+  rateChipActive: { backgroundColor: colors.accent },
+  rateText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  rateTextActive: { color: colors.onAccent },
 });
