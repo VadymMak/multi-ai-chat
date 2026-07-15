@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -23,6 +23,7 @@ import {
   detectTtsLanguage,
   hasTtsMarkers,
   extractSpeakable,
+  splitForTts,
 } from "../lib/ttsText";
 
 const FONT_SCALE_KEY = "@lessons/font_scale";
@@ -107,6 +108,11 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 
   const hasMarkers = hasTtsMarkers(lesson.content);
 
+  // Chunk-based playback refs (survive re-renders without stale closures)
+  const chunksRef = useRef<string[]>([]);
+  const chunkIdxRef = useRef(0);
+  const stoppedByUserRef = useRef(false); // true when stop/pause/rate-change triggered
+
   // Restore persisted font scale, TTS rate, and selective mode on mount
   useEffect(() => {
     AsyncStorage.multiGet([FONT_SCALE_KEY, TTS_RATE_KEY, TTS_SELECTIVE_KEY]).then((pairs) => {
@@ -128,6 +134,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   // Stop TTS whenever the Modal unmounts (close button, back gesture, navigation)
   useEffect(() => {
     return () => {
+      stoppedByUserRef.current = true;
       Speech.stop();
     };
   }, []);
@@ -161,27 +168,61 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   // ── Close (also stops TTS) ───────────────────────────────────
 
   const handleClose = () => {
+    stoppedByUserRef.current = true;
     Speech.stop();
     onClose();
   };
 
   // ── TTS ──────────────────────────────────────────────────────
 
-  const startSpeaking = (rate: TtsRate, selective = ttsSelective) => {
-    const cleanText =
-      selective && hasMarkers
-        ? extractSpeakable(lesson.content)
-        : stripMarkdownToSpeakable(lesson.content);
-    const language = detectTtsLanguage(cleanText);
-    setTtsState("speaking");
-    Speech.speak(cleanText, {
+  // Speaks a single chunk and chains to the next one via onDone.
+  // Uses refs so the closure is always up-to-date even across re-renders.
+  const speakChunk = (idx: number, rate: TtsRate, language: string) => {
+    const chunks = chunksRef.current;
+    if (idx >= chunks.length) {
+      setTtsState("idle");
+      chunkIdxRef.current = 0;
+      return;
+    }
+    chunkIdxRef.current = idx;
+    Speech.speak(chunks[idx], {
       language,
       rate,
       onStart: () => setTtsState("speaking"),
-      onDone: () => setTtsState("idle"),
-      onStopped: () => setTtsState("idle"),
-      onError: () => setTtsState("idle"),
+      onDone: () => {
+        if (!stoppedByUserRef.current) {
+          speakChunk(idx + 1, rate, language);
+        }
+      },
+      onStopped: () => {
+        if (!stoppedByUserRef.current) {
+          // Unexpected native stop — reset fully
+          setTtsState("idle");
+          chunkIdxRef.current = 0;
+        }
+        stoppedByUserRef.current = false;
+      },
+      onError: () => {
+        setTtsState("idle");
+        chunkIdxRef.current = 0;
+        stoppedByUserRef.current = false;
+      },
     });
+  };
+
+  const buildCleanText = (selective: boolean) =>
+    selective && hasMarkers
+      ? extractSpeakable(lesson.content)
+      : stripMarkdownToSpeakable(lesson.content);
+
+  const startSpeaking = (rate: TtsRate, selective = ttsSelective) => {
+    const cleanText = buildCleanText(selective);
+    const language = detectTtsLanguage(cleanText);
+    chunksRef.current = splitForTts(cleanText);
+    chunkIdxRef.current = 0;
+    stoppedByUserRef.current = false;
+    setTtsState("speaking");
+    speakChunk(0, rate, language);
   };
 
   const handlePlayPause = () => {
@@ -192,19 +233,31 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
         Speech.pause();
         setTtsState("paused");
       } else {
-        // Android doesn't support pause — stop and return to idle
+        // Android: no native pause — stop at current chunk boundary, remember position
+        stoppedByUserRef.current = true;
         Speech.stop();
-        setTtsState("idle");
+        setTtsState("paused");
       }
     } else {
-      // paused (iOS) → resume
-      Speech.resume();
+      // paused → resume
+      if (Platform.OS === "ios") {
+        Speech.resume();
+      } else {
+        // Android: restart from the chunk we paused at
+        const cleanText = buildCleanText(ttsSelective);
+        const language = detectTtsLanguage(cleanText);
+        stoppedByUserRef.current = false;
+        speakChunk(chunkIdxRef.current, ttsRate, language);
+      }
       setTtsState("speaking");
     }
   };
 
   const handleStop = () => {
+    stoppedByUserRef.current = true;
     Speech.stop();
+    chunkIdxRef.current = 0;
+    chunksRef.current = [];
     setTtsState("idle");
   };
 
@@ -212,6 +265,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
     setTtsRate(rate);
     AsyncStorage.setItem(TTS_RATE_KEY, String(rate));
     if (ttsState === "speaking") {
+      stoppedByUserRef.current = true;
       Speech.stop();
       setTimeout(() => startSpeaking(rate), 120);
     }
@@ -221,6 +275,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
     setTtsSelective(value);
     AsyncStorage.setItem(TTS_SELECTIVE_KEY, String(value));
     if (ttsState === "speaking") {
+      stoppedByUserRef.current = true;
       Speech.stop();
       setTimeout(() => startSpeaking(ttsRate, value), 120);
     }

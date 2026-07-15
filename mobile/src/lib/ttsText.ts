@@ -85,3 +85,45 @@ export function extractSpeakable(markdown: string): string {
   }
   return stripMarkdownToSpeakable(markdown);
 }
+
+/**
+ * Split speakable text into chunks ≤ maxLen characters so Android TTS
+ * (which rejects utterances > ~4000 chars) can handle long lessons.
+ *
+ * Breaks on the last sentence boundary (. ! ? or newline) found within
+ * the allowed window. If no boundary exists, falls back to the last space
+ * (never mid-word). Only if there is no space either does it hard-cut.
+ */
+export function splitForTts(text: string, maxLen = 3500): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    const slice = remaining.slice(0, maxLen);
+
+    // Prefer sentence-ending boundary
+    let breakAt = -1;
+    for (let i = slice.length - 1; i >= 0; i--) {
+      const ch = slice[i];
+      if (ch === "." || ch === "!" || ch === "?" || ch === "\n") {
+        breakAt = i + 1;
+        break;
+      }
+    }
+
+    // Fall back to last word boundary
+    if (breakAt < 0) {
+      const lastSpace = slice.lastIndexOf(" ");
+      breakAt = lastSpace > 0 ? lastSpace : maxLen;
+    }
+
+    const chunk = remaining.slice(0, breakAt).trim();
+    if (chunk) chunks.push(chunk);
+    remaining = remaining.slice(breakAt).trim();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
