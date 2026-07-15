@@ -1,3 +1,14 @@
+/**
+ * Remove HTML comments (<!-- ... -->) from markdown for clean rendering.
+ * The text BETWEEN <!-- tts --> / <!-- /tts --> markers stays intact; only
+ * the comment tags themselves are removed. Collapses leftover blank lines.
+ */
+export function stripTtsMarkers(md: string): string {
+  let text = md.replace(/<!--[\s\S]*?-->/g, "");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
 /** Strip markdown syntax so expo-speech doesn't read "hash star asterisk". */
 export function stripMarkdownToSpeakable(md: string): string {
   let text = md;

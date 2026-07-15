@@ -44,6 +44,7 @@ class LessonCreate(BaseModel):
     title: str
     content: str
     tags: Optional[str] = None
+    category: Optional[str] = None
     source: Optional[str] = None
 
 
@@ -51,6 +52,7 @@ class LessonUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     tags: Optional[str] = None
+    category: Optional[str] = None
     pinned: Optional[bool] = None
 
 
@@ -59,6 +61,7 @@ class LessonOut(BaseModel):
     title: str
     content: str
     tags: Optional[str]
+    category: Optional[str]
     source: Optional[str]
     pinned: bool
     created_at: datetime
@@ -113,6 +116,7 @@ def _docx_to_markdown(data: bytes) -> str:
 @router.post("/import", response_model=LessonOut, status_code=status.HTTP_201_CREATED)
 async def import_lesson_file(
     file: UploadFile = File(...),
+    category: Optional[str] = Query(None, description="Theme / category for this lesson"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -150,6 +154,7 @@ async def import_lesson_file(
         user_id=current_user.id,
         title=title,
         content=markdown,
+        category=category or "General",
         source="import",
     )
     db.add(lesson)
@@ -169,6 +174,7 @@ async def create_lesson(
         title=body.title.strip(),
         content=body.content,
         tags=body.tags,
+        category=body.category,
         source=body.source,
     )
     db.add(lesson)
@@ -181,6 +187,8 @@ async def create_lesson(
 async def list_lessons(
     q: Optional[str] = Query(None, description="Full-text search over title + content"),
     tag: Optional[str] = Query(None, description="Filter by tag (exact match in CSV)"),
+    category: Optional[str] = Query(None, description="Filter by theme/category (exact)"),
+    sort: Optional[str] = Query("newest", description="Sort order: newest | oldest"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -196,7 +204,11 @@ async def list_lessons(
         # tags stored as CSV — match as substring so "python" matches "ai,python,async"
         query = query.filter(Lesson.tags.ilike(f"%{tag}%"))
 
-    lessons = query.order_by(Lesson.pinned.desc(), Lesson.created_at.desc()).all()
+    if category:
+        query = query.filter(Lesson.category == category)
+
+    date_order = Lesson.created_at.asc() if sort == "oldest" else Lesson.created_at.desc()
+    lessons = query.order_by(Lesson.pinned.desc(), date_order).all()
     return lessons
 
 
@@ -223,6 +235,8 @@ async def update_lesson(
         lesson.content = body.content
     if body.tags is not None:
         lesson.tags = body.tags
+    if body.category is not None:
+        lesson.category = body.category
     if body.pinned is not None:
         lesson.pinned = body.pinned
     lesson.updated_at = datetime.utcnow()

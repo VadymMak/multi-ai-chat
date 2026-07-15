@@ -408,8 +408,9 @@ class Lesson(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)
-    tags = Column(String(500), nullable=True)   # CSV, e.g. "python,async"
-    source = Column(String(100), nullable=True)  # e.g. "chat"
+    tags = Column(String(500), nullable=True)      # CSV, e.g. "python,async"
+    category = Column(String(100), nullable=True)  # top-level theme/group
+    source = Column(String(100), nullable=True)    # e.g. "chat"
     pinned = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

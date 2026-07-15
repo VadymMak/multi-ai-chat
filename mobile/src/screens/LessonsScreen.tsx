@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View,
   Text,
@@ -16,12 +16,18 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as DocumentPicker from "expo-document-picker";
 import { colors, spacing, borderRadius, typography } from "../theme";
 import { Lesson, lessonApi } from "../lib/lessonApi";
 import { lessonsCache } from "../lib/lessonsCache";
 import { api } from "../lib/api";
 import LessonReaderScreen from "./LessonReaderScreen";
+
+const CATEGORY_KEY = "@lessons/category";
+const SORT_KEY = "@lessons/sort";
+
+type SortOrder = "newest" | "oldest";
 
 function formatDate(iso: string): string {
   try {
@@ -49,6 +55,8 @@ export default function LessonsScreen() {
   const [offline, setOffline] = useState(false);
   const [search, setSearch] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortOrder>("newest");
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
 
   // ── Manual add modal ───────────────────────────────────────
@@ -56,54 +64,106 @@ export default function LessonsScreen() {
   const [addTitle, setAddTitle] = useState("");
   const [addContent, setAddContent] = useState("");
   const [addTags, setAddTags] = useState("");
+  const [addCategory, setAddCategory] = useState("");
   const [addSaving, setAddSaving] = useState(false);
 
   // ── Import state ───────────────────────────────────────────
   const [importing, setImporting] = useState(false);
 
+  // Restore persisted category and sort on mount
+  useEffect(() => {
+    AsyncStorage.multiGet([CATEGORY_KEY, SORT_KEY]).then((pairs) => {
+      const cat = pairs[0][1];
+      const s = pairs[1][1];
+      if (cat !== null) setActiveCategory(cat || null);
+      if (s === "oldest") setSort("oldest");
+    });
+  }, []);
+
   const allTags = Array.from(
     new Set(lessons.flatMap((l) => parseTags(l.tags)))
   ).sort();
 
-  const fetchLessons = useCallback(async (q?: string, tag?: string) => {
-    setLoading(true);
-    setOffline(false);
-    try {
-      const { data } = await lessonApi.list({ q: q || undefined, tag: tag || undefined });
-      setLessons(data);
-      await lessonsCache.saveList(data);
-      data.forEach((l) => lessonsCache.saveBody(l.id, l.content));
-    } catch {
-      setOffline(true);
-      let cached = await lessonsCache.loadList();
-      if (q) {
-        const lq = q.toLowerCase();
-        cached = cached.filter(
-          (l) => l.title.toLowerCase().includes(lq) || l.content.toLowerCase().includes(lq)
-        );
+  const allCategories = Array.from(
+    new Set(lessons.map((l) => l.category).filter(Boolean) as string[])
+  ).sort();
+
+  const fetchLessons = useCallback(
+    async (
+      q?: string,
+      tag?: string,
+      category?: string | null,
+      sortOrder: SortOrder = "newest"
+    ) => {
+      setLoading(true);
+      setOffline(false);
+      try {
+        const { data } = await lessonApi.list({
+          q: q || undefined,
+          tag: tag || undefined,
+          category: category || undefined,
+          sort: sortOrder,
+        });
+        setLessons(data);
+        await lessonsCache.saveList(data);
+        data.forEach((l) => lessonsCache.saveBody(l.id, l.content));
+      } catch {
+        setOffline(true);
+        let cached = await lessonsCache.loadList();
+        if (q) {
+          const lq = q.toLowerCase();
+          cached = cached.filter(
+            (l) => l.title.toLowerCase().includes(lq) || l.content.toLowerCase().includes(lq)
+          );
+        }
+        if (tag) cached = cached.filter((l) => parseTags(l.tags).includes(tag));
+        if (category) cached = cached.filter((l) => l.category === category);
+        cached = [...cached].sort((a, b) => {
+          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+          const diff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          return sortOrder === "oldest" ? -diff : diff;
+        });
+        setLessons(cached);
+      } finally {
+        setLoading(false);
       }
-      if (tag) cached = cached.filter((l) => parseTags(l.tags).includes(tag));
-      setLessons(cached);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
-      fetchLessons(search, activeTag ?? undefined).then(() => {
+      fetchLessons(search, activeTag ?? undefined, activeCategory, sort).then(() => {
         if (!active) return;
       });
-      return () => { active = false; };
-    }, [fetchLessons, search, activeTag])
+      return () => {
+        active = false;
+      };
+    }, [fetchLessons, search, activeTag, activeCategory, sort])
   );
+
+  // ── Category ──────────────────────────────────────────────
+  const handleCategoryChange = (cat: string | null) => {
+    setActiveCategory(cat);
+    AsyncStorage.setItem(CATEGORY_KEY, cat ?? "");
+    fetchLessons(search, activeTag ?? undefined, cat, sort);
+  };
+
+  // ── Sort ──────────────────────────────────────────────────
+  const handleSortToggle = () => {
+    const next: SortOrder = sort === "newest" ? "oldest" : "newest";
+    setSort(next);
+    AsyncStorage.setItem(SORT_KEY, next);
+    fetchLessons(search, activeTag ?? undefined, activeCategory, next);
+  };
 
   // ── Manual add ────────────────────────────────────────────
   const openAddModal = () => {
     setAddTitle("");
     setAddContent("");
     setAddTags("");
+    setAddCategory("");
     setAddModal(true);
   };
 
@@ -115,11 +175,12 @@ export default function LessonsScreen() {
         title: addTitle.trim(),
         content: addContent.trim(),
         tags: addTags.trim() || undefined,
+        category: addCategory.trim() || undefined,
         source: "manual",
       });
       setAddModal(false);
       await lessonsCache.invalidate();
-      await fetchLessons(search, activeTag ?? undefined);
+      await fetchLessons(search, activeTag ?? undefined, activeCategory, sort);
     } catch {
       Alert.alert("Ошибка", "Не удалось сохранить урок.");
     } finally {
@@ -135,7 +196,7 @@ export default function LessonsScreen() {
           "text/plain",
           "text/markdown",
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "application/octet-stream", // fallback for .md on some Android
+          "application/octet-stream",
         ],
         copyToCacheDirectory: true,
       });
@@ -152,14 +213,18 @@ export default function LessonsScreen() {
         type: asset.mimeType ?? "application/octet-stream",
       } as unknown as Blob);
 
-      const { data } = await api.post<Lesson>("/api/app/lessons/import", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 30_000,
-      });
+      const { data } = await api.post<Lesson>(
+        "/api/app/lessons/import?category=General",
+        formData,
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: 30_000,
+        }
+      );
 
       await lessonsCache.invalidate();
       await lessonsCache.saveBody(data.id, data.content);
-      await fetchLessons(search, activeTag ?? undefined);
+      await fetchLessons(search, activeTag ?? undefined, activeCategory, sort);
       Alert.alert("Импортировано", `«${data.title}» добавлен в уроки.`);
     } catch (err: unknown) {
       const detail =
@@ -174,20 +239,19 @@ export default function LessonsScreen() {
   // ── Pin / unpin ───────────────────────────────────────────
   const handleTogglePin = async (item: Lesson) => {
     const next = !item.pinned;
-    // Optimistic update
     setLessons((prev) =>
       prev
         .map((l) => (l.id === item.id ? { ...l, pinned: next } : l))
         .sort((a, b) => {
           if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          const diff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          return sort === "oldest" ? -diff : diff;
         })
     );
     try {
       await lessonApi.update(item.id, { pinned: next });
       await lessonsCache.invalidate();
     } catch {
-      // Revert on error
       setLessons((prev) =>
         prev.map((l) => (l.id === item.id ? { ...l, pinned: item.pinned } : l))
       );
@@ -243,7 +307,13 @@ export default function LessonsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Category badge */}
+        {item.category ? (
+          <Text style={styles.cardCategory}>{item.category}</Text>
+        ) : null}
+
         <Text style={styles.cardDate}>{formatDate(item.created_at)}</Text>
+
         {tags.length > 0 && (
           <View style={styles.tagRow}>
             {tags.map((tag) => (
@@ -253,12 +323,14 @@ export default function LessonsScreen() {
                 onPress={() => {
                   const next = activeTag === tag ? null : tag;
                   setActiveTag(next);
-                  fetchLessons(search, next ?? undefined);
+                  fetchLessons(search, next ?? undefined, activeCategory, sort);
                 }}
                 activeOpacity={0.7}
                 hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
               >
-                <Text style={[styles.tagText, activeTag === tag && styles.tagTextActive]}>{tag}</Text>
+                <Text style={[styles.tagText, activeTag === tag && styles.tagTextActive]}>
+                  {tag}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -269,7 +341,7 @@ export default function LessonsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
-      {/* Header */}
+      {/* ── Header ── */}
       <View style={styles.header}>
         <Ionicons name="book-outline" size={22} color={colors.accent} />
         <Text style={styles.headerTitle}>Уроки</Text>
@@ -278,9 +350,23 @@ export default function LessonsScreen() {
             <Text style={styles.offlineText}>офлайн</Text>
           </View>
         )}
+
+        {/* Sort toggle */}
         <TouchableOpacity
           style={styles.headerBtn}
-          onPress={() => fetchLessons(search, activeTag ?? undefined)}
+          onPress={handleSortToggle}
+          activeOpacity={0.7}
+        >
+          <Ionicons
+            name={sort === "newest" ? "arrow-down" : "arrow-up"}
+            size={18}
+            color={colors.textSecondary}
+          />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.headerBtn}
+          onPress={() => fetchLessons(search, activeTag ?? undefined, activeCategory, sort)}
           activeOpacity={0.7}
         >
           <Ionicons name="refresh-outline" size={20} color={colors.textSecondary} />
@@ -310,7 +396,7 @@ export default function LessonsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Search */}
+      {/* ── Search ── */}
       <View style={styles.searchRow}>
         <Ionicons name="search-outline" size={16} color={colors.textHint} style={styles.searchIcon} />
         <TextInput
@@ -320,27 +406,60 @@ export default function LessonsScreen() {
           value={search}
           onChangeText={(t) => {
             setSearch(t);
-            fetchLessons(t, activeTag ?? undefined);
+            fetchLessons(t, activeTag ?? undefined, activeCategory, sort);
           }}
           clearButtonMode="while-editing"
         />
       </View>
 
-      {/* Tag filter chips */}
+      {/* ── Theme / Category selector ── */}
+      {allCategories.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.filterRow}
+          contentContainerStyle={styles.filterContent}
+        >
+          <TouchableOpacity
+            key="__cat_all__"
+            style={[styles.filterChip, activeCategory === null && styles.filterChipActive]}
+            onPress={() => handleCategoryChange(null)}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.filterChipText, activeCategory === null && styles.filterChipTextActive]}>
+              Все темы
+            </Text>
+          </TouchableOpacity>
+
+          {allCategories.map((cat) => (
+            <TouchableOpacity
+              key={cat}
+              style={[styles.filterChip, activeCategory === cat && styles.filterChipActive]}
+              onPress={() => handleCategoryChange(activeCategory === cat ? null : cat)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.filterChipText, activeCategory === cat && styles.filterChipTextActive]}>
+                {cat}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+
+      {/* ── Tag filter chips ── */}
       {allTags.length > 0 && (
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={styles.tagFilterRow}
-          contentContainerStyle={styles.tagFilterContent}
+          style={styles.filterRow}
+          contentContainerStyle={styles.filterContent}
         >
-          {/* "All" chip — clears filter */}
           <TouchableOpacity
-            key="__all__"
+            key="__tag_all__"
             style={[styles.filterChip, activeTag === null && styles.filterChipActive]}
             onPress={() => {
               setActiveTag(null);
-              fetchLessons(search, undefined);
+              fetchLessons(search, undefined, activeCategory, sort);
             }}
             activeOpacity={0.7}
           >
@@ -356,7 +475,7 @@ export default function LessonsScreen() {
               onPress={() => {
                 const next = activeTag === tag ? null : tag;
                 setActiveTag(next);
-                fetchLessons(search, next ?? undefined);
+                fetchLessons(search, next ?? undefined, activeCategory, sort);
               }}
               activeOpacity={0.7}
             >
@@ -368,7 +487,7 @@ export default function LessonsScreen() {
         </ScrollView>
       )}
 
-      {/* Lessons list */}
+      {/* ── Lessons list ── */}
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={colors.accent} size="large" />
@@ -390,7 +509,7 @@ export default function LessonsScreen() {
         />
       )}
 
-      {/* Reader */}
+      {/* ── Reader ── */}
       {selectedLesson && (
         <LessonReaderScreen
           lesson={selectedLesson}
@@ -398,7 +517,7 @@ export default function LessonsScreen() {
         />
       )}
 
-      {/* Manual add modal */}
+      {/* ── Manual add modal ── */}
       <Modal
         visible={addModal}
         animationType="slide"
@@ -430,6 +549,17 @@ export default function LessonsScreen() {
             </View>
 
             <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+              <Text style={styles.fieldLabel}>Тема (категория)</Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={addCategory}
+                onChangeText={setAddCategory}
+                placeholder="Интервью, Эзотерика, General..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="words"
+                maxLength={100}
+              />
+
               <Text style={styles.fieldLabel}>Название</Text>
               <TextInput
                 style={styles.fieldInput}
@@ -438,7 +568,6 @@ export default function LessonsScreen() {
                 placeholder="Название урока..."
                 placeholderTextColor={colors.textHint}
                 maxLength={120}
-                autoFocus
               />
 
               <Text style={styles.fieldLabel}>Содержимое (Markdown)</Text>
@@ -526,8 +655,8 @@ const styles = StyleSheet.create({
   searchIcon: { marginRight: 6 },
   searchInput: { flex: 1, color: colors.textPrimary, fontSize: 15 },
 
-  tagFilterRow: { marginTop: spacing.sm, maxHeight: 40 },
-  tagFilterContent: { paddingHorizontal: spacing.md, alignItems: "center" },
+  filterRow: { marginTop: spacing.sm, maxHeight: 40 },
+  filterContent: { paddingHorizontal: spacing.md, alignItems: "center" },
   filterChip: {
     paddingHorizontal: 12,
     paddingVertical: 5,
@@ -570,6 +699,13 @@ const styles = StyleSheet.create({
   pinBtn: {
     padding: 2,
     marginTop: 1,
+  },
+  cardCategory: {
+    color: colors.accentHi,
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
   },
   cardDate: { color: colors.textHint, fontSize: typography.caption.fontSize },
   tagRow: { flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: 2 },

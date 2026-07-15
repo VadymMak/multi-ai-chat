@@ -19,6 +19,7 @@ import { colors, spacing, borderRadius, typography } from "../theme";
 import { Lesson } from "../lib/lessonApi";
 import {
   stripMarkdownToSpeakable,
+  stripTtsMarkers,
   detectTtsLanguage,
   hasTtsMarkers,
   extractSpeakable,
@@ -149,7 +150,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   const handleShare = async () => {
     try {
       await Share.share({
-        message: `${lesson.title}\n\n${lesson.content}`,
+        message: `${lesson.title}\n\n${stripTtsMarkers(lesson.content)}`,
         title: lesson.title,
       });
     } catch {
@@ -306,7 +307,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
             </View>
           )}
 
-          <Markdown style={mdStyles}>{lesson.content}</Markdown>
+          <Markdown style={mdStyles}>{stripTtsMarkers(lesson.content)}</Markdown>
         </ScrollView>
 
         {/* ── TTS Bar ── */}
