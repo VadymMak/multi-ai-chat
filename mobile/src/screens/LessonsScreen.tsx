@@ -69,6 +69,13 @@ export default function LessonsScreen() {
 
   // ── Import state ───────────────────────────────────────────
   const [importing, setImporting] = useState(false);
+  const [importCatModal, setImportCatModal] = useState(false);
+  const [importCatValue, setImportCatValue] = useState("General");
+  const [importPendingAsset, setImportPendingAsset] = useState<{
+    uri: string;
+    name: string;
+    mimeType?: string | null;
+  } | null>(null);
 
   // Restore persisted category and sort on mount
   useEffect(() => {
@@ -204,8 +211,22 @@ export default function LessonsScreen() {
       if (result.canceled || !result.assets?.length) return;
 
       const asset = result.assets[0];
-      setImporting(true);
+      setImportPendingAsset({ uri: asset.uri, name: asset.name, mimeType: asset.mimeType });
+      setImportCatValue("General");
+      setImportCatModal(true);
+    } catch {
+      Alert.alert("Ошибка", "Не удалось выбрать файл.");
+    }
+  };
 
+  const handleImportConfirm = async () => {
+    if (!importPendingAsset) return;
+    const asset = importPendingAsset;
+    const category = importCatValue.trim() || "General";
+    setImportCatModal(false);
+    setImportPendingAsset(null);
+    setImporting(true);
+    try {
       const formData = new FormData();
       formData.append("file", {
         uri: asset.uri,
@@ -214,12 +235,9 @@ export default function LessonsScreen() {
       } as unknown as Blob);
 
       const { data } = await api.post<Lesson>(
-        "/api/app/lessons/import?category=General",
+        `/api/app/lessons/import?category=${encodeURIComponent(category)}`,
         formData,
-        {
-          headers: { "Content-Type": "multipart/form-data" },
-          timeout: 30_000,
-        }
+        { headers: { "Content-Type": "multipart/form-data" }, timeout: 30_000 }
       );
 
       await lessonsCache.invalidate();
@@ -235,6 +253,13 @@ export default function LessonsScreen() {
       setImporting(false);
     }
   };
+
+  // ── Lesson updated from reader ────────────────────────────
+  const handleLessonUpdate = useCallback((updated: Lesson) => {
+    setSelectedLesson(updated);
+    setLessons((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+    lessonsCache.invalidate();
+  }, []);
 
   // ── Pin / unpin ───────────────────────────────────────────
   const handleTogglePin = async (item: Lesson) => {
@@ -514,8 +539,58 @@ export default function LessonsScreen() {
         <LessonReaderScreen
           lesson={selectedLesson}
           onClose={() => setSelectedLesson(null)}
+          onUpdate={handleLessonUpdate}
         />
       )}
+
+      {/* ── Import category modal ── */}
+      <Modal
+        visible={importCatModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setImportCatModal(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalFlex}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <SafeAreaView style={styles.modalContainer} edges={["top", "bottom"]}>
+            <View style={styles.modalHeader}>
+              <TouchableOpacity
+                onPress={() => { setImportCatModal(false); setImportPendingAsset(null); }}
+                style={styles.headerBtn}
+              >
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+              <Text style={styles.modalTitle}>Тема импорта</Text>
+              <TouchableOpacity
+                style={styles.saveBtn}
+                onPress={handleImportConfirm}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.saveBtnText}>Импорт</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ padding: spacing.md }}>
+              <Text style={styles.fieldLabel}>Тема (категория)</Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={importCatValue}
+                onChangeText={setImportCatValue}
+                placeholder="General, Интервью, Эзотерика..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="words"
+                autoFocus
+                maxLength={100}
+              />
+              <Text style={{ color: colors.textHint, fontSize: 13, lineHeight: 18 }}>
+                Файл: {importPendingAsset?.name ?? ""}
+              </Text>
+            </View>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* ── Manual add modal ── */}
       <Modal

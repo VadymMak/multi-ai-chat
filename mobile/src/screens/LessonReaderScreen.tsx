@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   StyleSheet,
   Share,
@@ -9,6 +10,8 @@ import {
   ScrollView,
   Alert,
   Platform,
+  KeyboardAvoidingView,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -16,7 +19,7 @@ import Markdown from "react-native-markdown-display";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Speech from "expo-speech";
 import { colors, spacing, borderRadius, typography } from "../theme";
-import { Lesson } from "../lib/lessonApi";
+import { Lesson, lessonApi } from "../lib/lessonApi";
 import {
   stripMarkdownToSpeakable,
   stripTtsMarkers,
@@ -40,6 +43,7 @@ type TtsState = "idle" | "speaking" | "paused";
 interface Props {
   lesson: Lesson;
   onClose: () => void;
+  onUpdate?: (updated: Lesson) => void;
 }
 
 function buildMdStyles(scale: number) {
@@ -99,21 +103,28 @@ function buildMdStyles(scale: number) {
   };
 }
 
-export default function LessonReaderScreen({ lesson, onClose }: Props) {
+export default function LessonReaderScreen({ lesson, onClose, onUpdate }: Props) {
+  const [currentLesson, setCurrentLesson] = useState<Lesson>(lesson);
   const [fontScale, setFontScale] = useState(FONT_SCALE_DEFAULT);
   const [ttsState, setTtsState] = useState<TtsState>("idle");
   const [ttsRate, setTtsRate] = useState<TtsRate>(1.0);
-  // true = read only <!-- tts --> regions; false = read full text
   const [ttsSelective, setTtsSelective] = useState(true);
 
-  const hasMarkers = hasTtsMarkers(lesson.content);
+  // Edit modal state
+  const [editModal, setEditModal] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [editTags, setEditTags] = useState("");
+  const [editCategory, setEditCategory] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+
+  const hasMarkers = hasTtsMarkers(currentLesson.content);
 
   // Chunk-based playback refs (survive re-renders without stale closures)
   const chunksRef = useRef<string[]>([]);
   const chunkIdxRef = useRef(0);
-  const stoppedByUserRef = useRef(false); // true when stop/pause/rate-change triggered
+  const stoppedByUserRef = useRef(false);
 
-  // Restore persisted font scale, TTS rate, and selective mode on mount
   useEffect(() => {
     AsyncStorage.multiGet([FONT_SCALE_KEY, TTS_RATE_KEY, TTS_SELECTIVE_KEY]).then((pairs) => {
       const fontVal = pairs[0][1];
@@ -131,7 +142,6 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
     });
   }, []);
 
-  // Stop TTS whenever the Modal unmounts (close button, back gesture, navigation)
   useEffect(() => {
     return () => {
       stoppedByUserRef.current = true;
@@ -157,15 +167,15 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
   const handleShare = async () => {
     try {
       await Share.share({
-        message: `${lesson.title}\n\n${stripTtsMarkers(lesson.content)}`,
-        title: lesson.title,
+        message: `${currentLesson.title}\n\n${stripTtsMarkers(currentLesson.content)}`,
+        title: currentLesson.title,
       });
     } catch {
       Alert.alert("Ошибка", "Не удалось открыть шаринг.");
     }
   };
 
-  // ── Close (also stops TTS) ───────────────────────────────────
+  // ── Close ────────────────────────────────────────────────────
 
   const handleClose = () => {
     stoppedByUserRef.current = true;
@@ -173,10 +183,46 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
     onClose();
   };
 
+  // ── Edit ─────────────────────────────────────────────────────
+
+  const openEdit = () => {
+    setEditTitle(currentLesson.title);
+    setEditContent(currentLesson.content);
+    setEditTags(currentLesson.tags ?? "");
+    setEditCategory(currentLesson.category ?? "");
+    setEditModal(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editTitle.trim() || !editContent.trim()) return;
+    setEditSaving(true);
+    try {
+      // Stop TTS if running while editing
+      if (ttsState !== "idle") {
+        stoppedByUserRef.current = true;
+        Speech.stop();
+        chunksRef.current = [];
+        chunkIdxRef.current = 0;
+        setTtsState("idle");
+      }
+      const { data } = await lessonApi.update(currentLesson.id, {
+        title: editTitle.trim(),
+        content: editContent.trim(),
+        tags: editTags.trim() || undefined,
+        category: editCategory.trim() || undefined,
+      });
+      setCurrentLesson(data);
+      setEditModal(false);
+      onUpdate?.(data);
+    } catch {
+      Alert.alert("Ошибка", "Не удалось сохранить изменения.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   // ── TTS ──────────────────────────────────────────────────────
 
-  // Speaks a single chunk and chains to the next one via onDone.
-  // Uses refs so the closure is always up-to-date even across re-renders.
   const speakChunk = (idx: number, rate: TtsRate, language: string) => {
     const chunks = chunksRef.current;
     if (idx >= chunks.length) {
@@ -196,7 +242,6 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
       },
       onStopped: () => {
         if (!stoppedByUserRef.current) {
-          // Unexpected native stop — reset fully
           setTtsState("idle");
           chunkIdxRef.current = 0;
         }
@@ -212,8 +257,8 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
 
   const buildCleanText = (selective: boolean) =>
     selective && hasMarkers
-      ? extractSpeakable(lesson.content)
-      : stripMarkdownToSpeakable(lesson.content);
+      ? extractSpeakable(currentLesson.content)
+      : stripMarkdownToSpeakable(currentLesson.content);
 
   const startSpeaking = (rate: TtsRate, selective = ttsSelective) => {
     const cleanText = buildCleanText(selective);
@@ -233,17 +278,14 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
         Speech.pause();
         setTtsState("paused");
       } else {
-        // Android: no native pause — stop at current chunk boundary, remember position
         stoppedByUserRef.current = true;
         Speech.stop();
         setTtsState("paused");
       }
     } else {
-      // paused → resume
       if (Platform.OS === "ios") {
         Speech.resume();
       } else {
-        // Android: restart from the chunk we paused at
         const cleanText = buildCleanText(ttsSelective);
         const language = detectTtsLanguage(cleanText);
         stoppedByUserRef.current = false;
@@ -303,7 +345,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
           </TouchableOpacity>
 
           <Text style={styles.toolbarTitle} numberOfLines={1}>
-            {lesson.title}
+            {currentLesson.title}
           </Text>
 
           {/* A- / A+ font size stepper */}
@@ -328,6 +370,12 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
             </TouchableOpacity>
           </View>
 
+          {/* Edit */}
+          <TouchableOpacity onPress={openEdit} style={styles.toolbarBtn} activeOpacity={0.7}>
+            <Ionicons name="pencil-outline" size={20} color={colors.textSecondary} />
+          </TouchableOpacity>
+
+          {/* Share */}
           <TouchableOpacity onPress={handleShare} style={styles.toolbarBtn} activeOpacity={0.7}>
             <Ionicons name="share-outline" size={22} color={colors.accent} />
           </TouchableOpacity>
@@ -345,12 +393,12 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
               { fontSize: Math.round(22 * fontScale), lineHeight: Math.round(30 * fontScale) },
             ]}
           >
-            {lesson.title}
+            {currentLesson.title}
           </Text>
 
-          {lesson.tags && (
+          {currentLesson.tags && (
             <View style={styles.tagRow}>
-              {lesson.tags
+              {currentLesson.tags
                 .split(",")
                 .map((t) => t.trim())
                 .filter(Boolean)
@@ -362,12 +410,11 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
             </View>
           )}
 
-          <Markdown style={mdStyles}>{stripTtsMarkers(lesson.content)}</Markdown>
+          <Markdown style={mdStyles}>{stripTtsMarkers(currentLesson.content)}</Markdown>
         </ScrollView>
 
         {/* ── TTS Bar ── */}
         <View style={styles.ttsBar}>
-          {/* Selective toggle — only when lesson has <!-- tts --> markers */}
           {hasMarkers && (
             <View style={styles.ttsSelectRow}>
               <Text style={styles.ttsSelectLabel}>Читать:</Text>
@@ -394,9 +441,7 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
             </View>
           )}
 
-          {/* Main controls row */}
           <View style={styles.ttsMainRow}>
-            {/* Stop + Play/Pause */}
             <View style={styles.ttsControls}>
               <TouchableOpacity
                 onPress={handleStop}
@@ -425,7 +470,6 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
               </TouchableOpacity>
             </View>
 
-            {/* Speed chips */}
             <View style={styles.rateRow}>
               {TTS_RATES.map((r) => (
                 <TouchableOpacity
@@ -443,6 +487,92 @@ export default function LessonReaderScreen({ lesson, onClose }: Props) {
           </View>
         </View>
       </SafeAreaView>
+
+      {/* ── Edit Modal ── */}
+      <Modal
+        visible={editModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => !editSaving && setEditModal(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.editFlex}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <SafeAreaView style={styles.editContainer} edges={["top", "bottom"]}>
+            <View style={styles.editHeader}>
+              <TouchableOpacity
+                onPress={() => setEditModal(false)}
+                style={styles.editHeaderBtn}
+                disabled={editSaving}
+              >
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+              <Text style={styles.editHeaderTitle}>Редактировать</Text>
+              <TouchableOpacity
+                style={[
+                  styles.editSaveBtn,
+                  (!editTitle.trim() || !editContent.trim()) && styles.editSaveBtnOff,
+                ]}
+                onPress={handleSaveEdit}
+                disabled={!editTitle.trim() || !editContent.trim() || editSaving}
+                activeOpacity={0.8}
+              >
+                {editSaving ? (
+                  <ActivityIndicator color={colors.onAccent} size="small" />
+                ) : (
+                  <Text style={styles.editSaveBtnText}>Сохранить</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.editScroll} keyboardShouldPersistTaps="handled">
+              <Text style={styles.editFieldLabel}>Тема (категория)</Text>
+              <TextInput
+                style={styles.editFieldInput}
+                value={editCategory}
+                onChangeText={setEditCategory}
+                placeholder="Интервью, Эзотерика, General..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="words"
+                maxLength={100}
+              />
+
+              <Text style={styles.editFieldLabel}>Название</Text>
+              <TextInput
+                style={styles.editFieldInput}
+                value={editTitle}
+                onChangeText={setEditTitle}
+                placeholder="Название урока..."
+                placeholderTextColor={colors.textHint}
+                maxLength={120}
+              />
+
+              <Text style={styles.editFieldLabel}>Содержимое (Markdown)</Text>
+              <TextInput
+                style={[styles.editFieldInput, styles.editContentInput]}
+                value={editContent}
+                onChangeText={setEditContent}
+                placeholder={"# Заголовок\n\nТекст урока..."}
+                placeholderTextColor={colors.textHint}
+                multiline
+                textAlignVertical="top"
+              />
+
+              <Text style={styles.editFieldLabel}>Теги (через запятую)</Text>
+              <TextInput
+                style={styles.editFieldInput}
+                value={editTags}
+                onChangeText={setEditTags}
+                placeholder="python, async, sql..."
+                placeholderTextColor={colors.textHint}
+                autoCapitalize="none"
+                maxLength={200}
+              />
+            </ScrollView>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
     </Modal>
   );
 }
@@ -625,4 +755,67 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   rateTextActive: { color: colors.onAccent },
+
+  // ── Edit Modal ──
+  editFlex: { flex: 1 },
+  editContainer: { flex: 1, backgroundColor: colors.bg },
+  editHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: spacing.sm,
+  },
+  editHeaderBtn: {
+    padding: 8,
+    borderRadius: borderRadius.md,
+    minWidth: 36,
+    minHeight: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editHeaderTitle: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  editSaveBtn: {
+    backgroundColor: colors.accent,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: borderRadius.md,
+    minWidth: 90,
+    alignItems: "center",
+  },
+  editSaveBtnOff: { backgroundColor: colors.inputBg },
+  editSaveBtnText: { color: colors.onAccent, fontSize: 14, fontWeight: "600" },
+  editScroll: { flex: 1, padding: spacing.md },
+  editFieldLabel: {
+    color: colors.textHint,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  editFieldInput: {
+    backgroundColor: colors.inputBg,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    color: colors.textPrimary,
+    fontSize: 15,
+    marginBottom: spacing.md,
+  },
+  editContentInput: {
+    minHeight: 220,
+    lineHeight: 22,
+    paddingTop: 12,
+  },
 });
