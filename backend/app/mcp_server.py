@@ -2637,4 +2637,116 @@ async def create_video(
         return json.dumps({"error": str(exc), "job_id": ""}, ensure_ascii=False)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool: update_site_media (via vendshop.shop Brain API)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def update_site_media(
+    media_url: str,
+    section: str = "hero",
+    store_slug: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    media_type: str = "image",
+) -> str:
+    """
+    Place a generated image or video onto a vendshop.shop site.
+
+    Use this AFTER generate_image or create_video to complete the full pipeline:
+    generate image → animate to video → place on site.
+
+    The full pipeline in one conversation:
+    1. generate_image("barber shop interior") → image_url
+    2. create_video(prompt="zoom in slowly", image_url=image_url) → job_id
+    3. update_site_media(media_url=image_url, section="hero", store_slug="berlin-barber")
+
+    Args:
+        media_url: URL of the image or video to place on the site.
+                   Use the URL returned by generate_image or the video URL after it's ready.
+        section: Where to place the media:
+                 "hero" — main hero image/video on the homepage
+                 "logo" — store logo
+                 "gallery" — add to the gallery (keeps last 20)
+        store_slug: Slug of the store (e.g. "berlin-barber", "lumiere-nails").
+                    Use this for self-serve user stores.
+                    Find slug in the store URL: vendshop.shop/store/{slug}
+        lead_email: Email of the lead/client (e.g. "client@email.com").
+                    Use this for client sites managed via Lead model.
+                    One of store_slug or lead_email is required.
+        media_type: "image" (default) or "video".
+                    When section="hero" and media_type="video", stores as heroVideo.
+
+    Returns:
+        JSON with update confirmation or error.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({
+            "error": "VENDSHOP_BRAIN_API_KEY not configured",
+            "updated": False,
+        }, ensure_ascii=False)
+
+    if not store_slug and not lead_email:
+        return json.dumps({
+            "error": "Either store_slug or lead_email is required.",
+            "updated": False,
+        }, ensure_ascii=False)
+
+    try:
+        payload = {
+            "media_url": media_url,
+            "section": section,
+            "media_type": media_type,
+        }
+        if store_slug:
+            payload["store_slug"] = store_slug
+        if lead_email:
+            payload["lead_email"] = lead_email
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/update-site-media",
+                json=payload,
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({
+                    "error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY",
+                    "updated": False,
+                }, ensure_ascii=False)
+
+            if resp.status_code == 404:
+                target = store_slug or lead_email
+                return json.dumps({
+                    "error": f"Site not found: {target}. Check the slug or email.",
+                    "updated": False,
+                }, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            return json.dumps({
+                "updated": data.get("updated", False),
+                "target": data.get("target"),
+                "section": section,
+                "media_url": media_url,
+                "message": (
+                    f"✅ {section.capitalize()} updated on {store_slug or lead_email}! "
+                    f"Changes are live at vendshop.shop"
+                    if data.get("updated")
+                    else f"Update failed: {data.get('error', 'unknown')}"
+                ),
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({
+            "error": "Request timed out. Try again.",
+            "updated": False,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("update_site_media MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "updated": False}, ensure_ascii=False)
+
 __all__ = ["mcp"]
