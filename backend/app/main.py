@@ -205,6 +205,7 @@ from app.routers import (  # noqa: E402
     pattern_analyzer,
     memory,
     usage_analytics,
+    studio,
 )
 
 # Optional routers
@@ -252,6 +253,7 @@ app.include_router(prediction.router, prefix="/api")
 app.include_router(pattern_analyzer.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
 app.include_router(usage_analytics.router, prefix="/api")
+app.include_router(studio.router, prefix="/api")
 
 # Media processing
 from app.routers.mux_audio import router as mux_audio_router  # noqa: E402

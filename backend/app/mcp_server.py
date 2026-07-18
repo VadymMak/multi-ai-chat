@@ -2460,4 +2460,181 @@ async def save_skill(
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool: generate_image (via vendshop.shop Studio API)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def generate_image(
+    prompt: str,
+    provider: str = "flux",
+    quality: str = "fast",
+    aspect_ratio: str = "1:1",
+) -> str:
+    """
+    Generate an image using vendshop.shop AI Studio (Flux or Grok Aurora).
+
+    Use this when the user asks to create, draw, or generate any image.
+    Returns a public URL to the generated image.
+
+    Args:
+        prompt: Detailed image description in English. Be specific about:
+                style, lighting, composition, subject, background.
+                Example: "Professional barber shop interior, black leather chairs,
+                          neon signs, moody atmospheric lighting, photorealistic"
+        provider: "flux" (default, high quality, ~5-15s) or
+                  "grok" (xAI Aurora, creative, requires user's xAI key)
+        quality: "fast" (Flux Schnell, ~3-5s) or "good" (Flux Dev, ~15s, more detailed)
+        aspect_ratio: "1:1" (square), "16:9" (landscape), "9:16" (portrait/Reels),
+                      "4:3", "3:4"
+
+    Returns:
+        JSON with image URL. If url is empty string, generation failed.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps(
+            {
+                "error": "VENDSHOP_BRAIN_API_KEY not configured in Railway env vars",
+                "url": "",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/generate-image",
+                json={
+                    "prompt": prompt,
+                    "provider": provider,
+                    "aspect_ratio": aspect_ratio,
+                    "quality": quality,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps(
+                    {
+                        "error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY matches BRAIN_API_KEY in vendly-storefront",
+                        "url": "",
+                    },
+                    ensure_ascii=False,
+                )
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            image_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps(
+                {
+                    "url": image_url,
+                    "media_type": "image",
+                    "prompt": prompt,
+                    "provider": provider,
+                    "message": (
+                        f"Image generated: {image_url}"
+                        if image_url
+                        else "Generation failed — no URL returned"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+    except httpx.TimeoutException:
+        return json.dumps(
+            {
+                "error": "Image generation timed out (60s). Try a shorter prompt or 'fast' quality.",
+                "url": "",
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("generate_image MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool: create_video (via vendshop.shop Studio API — Kling)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def create_video(
+    prompt: str,
+    image_url: Optional[str] = None,
+    duration: int = 5,
+    aspect_ratio: str = "9:16",
+) -> str:
+    """
+    Generate a video using vendshop.shop AI Studio (Kling AI).
+
+    Can generate video from text prompt, or animate an existing image.
+    Returns a job_id — video takes 2-5 minutes to generate.
+
+    After calling this tool, tell the user:
+    "Video generation started! It will take 2-5 minutes.
+     You can check status at: vendshop.shop/studio"
+
+    Args:
+        prompt: Motion and scene description in English.
+                Example: "Slow cinematic zoom into the barber chair,
+                          warm golden lighting, hair falling in slow motion"
+        image_url: Optional. URL of an existing image to animate (image-to-video).
+                   If provided, Kling will animate this specific image.
+                   If None, Kling generates video from text only.
+        duration: 5 or 10 seconds.
+        aspect_ratio: "9:16" (vertical/Reels default), "16:9" (landscape), "1:1" (square)
+
+    Returns:
+        JSON with job_id for status polling, or error.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps(
+            {
+                "error": "VENDSHOP_BRAIN_API_KEY not configured",
+                "job_id": "",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/create-video",
+                json={
+                    "prompt": prompt,
+                    "image_url": image_url,
+                    "duration": duration,
+                    "aspect_ratio": aspect_ratio,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            job_id = data.get("jobId") or data.get("job_id", "")
+            return json.dumps(
+                {
+                    "job_id": job_id,
+                    "status": "started" if job_id else "failed",
+                    "message": (
+                        f"Video generation started! Job ID: {job_id}. "
+                        f"Takes ~2-5 minutes. Check status at vendshop.shop/studio"
+                        if job_id
+                        else f"Failed to start video: {data.get('error', 'unknown')}"
+                    ),
+                    "poll_url": f"{vendshop_url}/api/studio/job/{job_id}" if job_id else "",
+                },
+                ensure_ascii=False,
+            )
+
+    except Exception as exc:
+        logger.error("create_video MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "job_id": ""}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
