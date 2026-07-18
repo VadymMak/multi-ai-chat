@@ -2461,6 +2461,59 @@ async def save_skill(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Helper: enhance short prompt → Flux-optimized detailed prompt
+# ─────────────────────────────────────────────────────────────────
+async def _enhance_prompt_for_flux(user_prompt: str, aspect_ratio: str = "1:1") -> str:
+    """
+    Expand a short user description into a detailed, Flux-optimized image prompt.
+    Uses Claude Haiku — fast (~0.5s) and cheap.
+    Falls back to original prompt if Anthropic is unavailable.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return user_prompt
+
+    orientation_hint = {
+        "16:9": "wide landscape composition",
+        "9:16": "vertical portrait composition",
+        "4:3": "standard landscape",
+        "3:4": "portrait",
+        "1:1": "square composition",
+    }.get(aspect_ratio, "")
+
+    system = (
+        "You are an expert at writing image generation prompts for Flux (a photorealistic diffusion model). "
+        "Your prompts produce professional, commercial-quality photos. "
+        "Always write in English. Never include brand names or copyrighted terms. "
+        "Focus on lighting, materials, atmosphere, and composition."
+    )
+
+    user_msg = (
+        f"Expand this short description into a detailed Flux image prompt (80-120 words). "
+        f"Description: '{user_prompt}'. "
+        f"Style: photorealistic commercial photography. "
+        f"Composition: {orientation_hint}. "
+        f"Return ONLY the prompt text, no explanations or quotes."
+    )
+
+    try:
+        from anthropic import AsyncAnthropic
+        client = AsyncAnthropic(api_key=api_key)
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        enhanced = response.content[0].text.strip()
+        logger.info("Prompt enhanced: '%s' → '%s'", user_prompt[:50], enhanced[:80])
+        return enhanced
+    except Exception as exc:
+        logger.warning("Prompt enhancement failed (%s) — using original", exc)
+        return user_prompt
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool: generate_image (via vendshop.shop Studio API)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
@@ -2503,11 +2556,15 @@ async def generate_image(
         )
 
     try:
+        # Auto-enhance short prompts → detailed Flux-optimized prompts
+        enhanced_prompt = await _enhance_prompt_for_flux(prompt, aspect_ratio)
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{vendshop_url}/api/brain/generate-image",
                 json={
-                    "prompt": prompt,
+                    "prompt": enhanced_prompt,
+                    "original_prompt": prompt,
                     "provider": provider,
                     "aspect_ratio": aspect_ratio,
                     "quality": quality,
@@ -2532,7 +2589,8 @@ async def generate_image(
                 {
                     "url": image_url,
                     "media_type": "image",
-                    "prompt": prompt,
+                    "prompt": enhanced_prompt,
+                    "original_prompt": prompt,
                     "provider": provider,
                     "message": (
                         f"Image generated: {image_url}"
