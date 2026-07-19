@@ -3000,6 +3000,142 @@ async def upscale_image(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Tool: generate_voiceover (ElevenLabs — text-to-speech)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def generate_voiceover(
+    text: str,
+    voice_id: str = "adam",
+    language: str = "en",
+    elevenlabs_api_key: str = "",
+    stability: float = 0.5,
+    similarity_boost: float = 0.75,
+) -> str:
+    """
+    Generate a voiceover audio file from text using ElevenLabs AI voices.
+
+    Converts any text to natural-sounding speech in multiple languages.
+    Returns an mp3 URL that can be used directly in create_talking_avatar as audio_url.
+
+    BYOK (Bring Your Own Key):
+    - Pass elevenlabs_api_key if the user has their own ElevenLabs account
+    - If empty, uses the shared key configured in ELEVENLABS_API_KEY env var
+    - Free ElevenLabs tier: 10,000 characters/month (enough for ~50 voiceovers)
+
+    Perfect for:
+    - Creating voiceovers for business announcement videos
+    - Adding narration to hero section videos
+    - Generating spoken versions of captions/descriptions
+    - Full pipeline: text → voiceover → talking_avatar → hero video on site
+
+    Available voices (presets):
+    - "adam"    — male, deep, professional (default)
+    - "rachel"  — female, calm, conversational
+    - "arnold"  — male, strong, confident
+    - "elli"    — female, young, friendly
+    - "antonio" — male, warm, engaging
+    - Or pass any ElevenLabs voice ID directly (UUID format)
+
+    Supported languages:
+    - "en" — English (eleven_monolingual_v1, faster)
+    - "sk", "cs", "uk", "de" — and 25+ more (eleven_multilingual_v2)
+
+    Workflow example:
+    1. generate_voiceover(text="Vitajte v našom barber shope!", language="sk", voice_id="adam")
+       → { url: "https://blob/.../audio.mp3" }
+    2. generate_character_image(reference_image=<barber_photo>, prompt="professional barber portrait")
+       → { url: "https://blob/.../barber.webp" }
+    3. create_talking_avatar(face_image=<barber_url>, audio_url=<mp3_url>)
+       → { url: "https://blob/.../talking-barber.mp4" }
+    4. update_site_media(store_slug="my-barbershop", section="hero", media_url=<video_url>)
+
+    Args:
+        text: The text to convert to speech. Maximum 5000 characters.
+              Write naturally — ElevenLabs handles punctuation and pacing well.
+        voice_id: Voice to use. Preset names (adam/rachel/arnold/elli/antonio) or
+                  a full ElevenLabs voice ID (UUID). Default: "adam"
+        language: Language code for the text. Affects which TTS model is used.
+                  "en" uses the faster English-only model; others use multilingual.
+                  Default: "en"
+        elevenlabs_api_key: User's ElevenLabs API key (BYOK). If empty, uses shared key.
+                            Get from: https://elevenlabs.io → Profile → API Key
+        stability: Voice stability 0.0-1.0. Lower = more expressive, Higher = more consistent.
+                   Default: 0.5 (balanced)
+        similarity_boost: Voice similarity to reference 0.0-1.0. Higher = closer to voice model.
+                          Default: 0.75
+
+    Returns:
+        JSON with URL of the generated mp3 audio file.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({"error": "VENDSHOP_BRAIN_API_KEY not configured", "url": ""}, ensure_ascii=False)
+
+    if not text or not text.strip():
+        return json.dumps({"error": "text is required and cannot be empty", "url": ""}, ensure_ascii=False)
+
+    if len(text) > 5000:
+        return json.dumps({
+            "error": f"Text too long ({len(text)} chars). Maximum is 5000 characters.",
+            "url": "",
+        }, ensure_ascii=False)
+
+    try:
+        payload: dict = {
+            "text": text.strip(),
+            "voice_id": voice_id,
+            "language": language,
+            "stability": max(0.0, min(1.0, float(stability))),
+            "similarity_boost": max(0.0, min(1.0, float(similarity_boost))),
+        }
+        if elevenlabs_api_key:
+            payload["elevenlabs_api_key"] = elevenlabs_api_key
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/voiceover",
+                json=payload,
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({"error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY", "url": ""}, ensure_ascii=False)
+
+            if resp.status_code == 502:
+                data = resp.json()
+                return json.dumps({
+                    "error": data.get("error", "ElevenLabs API error"),
+                    "hint": "Check if ELEVENLABS_API_KEY is set or pass elevenlabs_api_key param",
+                    "url": "",
+                }, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            audio_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps({
+                "url": audio_url,
+                "media_type": "audio",
+                "voice_id": voice_id,
+                "language": language,
+                "characters": data.get("characters", len(text)),
+                "message": (
+                    f"Voiceover created ({data.get('characters', len(text))} chars): {audio_url}"
+                    if audio_url
+                    else "Failed — no URL returned"
+                ),
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({"error": "Voiceover timed out (30s). Try with shorter text.", "url": ""}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("generate_voiceover MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool: extend_video (Kling — video continuation from last frame)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
