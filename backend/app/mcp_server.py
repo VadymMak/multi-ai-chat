@@ -2846,6 +2846,159 @@ async def create_talking_avatar(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Tool: remove_background (rembg — background removal)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def remove_background(
+    image_url: str,
+) -> str:
+    """
+    Remove the background from an image, returning a PNG with a transparent background.
+
+    Perfect for:
+    - Product photos that need white/transparent background for e-commerce
+    - Extracting a person from a photo to place on a different background
+    - Creating logo variants without background
+    - Preparing images for composite scenes
+
+    Workflow example:
+    1. generate_image(prompt="barber holding scissors") → get image URL
+    2. remove_background(image_url=<url>) → PNG without background
+    3. Use the PNG in composite or place on colored background
+
+    Or for a site:
+    1. remove_background(image_url="https://store.com/product.jpg")
+    2. update_site_media(store_slug="...", section="gallery", media_url=<clean_url>)
+
+    Args:
+        image_url: URL of the image to process.
+                   Supports jpg, png, webp formats.
+                   Best results: image where subject is clearly distinguishable from background.
+
+    Returns:
+        JSON with URL of the PNG image with transparent background.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({"error": "VENDSHOP_BRAIN_API_KEY not configured", "url": ""}, ensure_ascii=False)
+
+    if not image_url:
+        return json.dumps({"error": "image_url is required", "url": ""}, ensure_ascii=False)
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/remove-bg",
+                json={"image_url": image_url},
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({"error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY", "url": ""}, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            result_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps({
+                "url": result_url,
+                "media_type": "image",
+                "original": image_url,
+                "message": f"Background removed: {result_url}" if result_url else "Failed — no URL returned",
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({"error": "Background removal timed out (60s). Try again.", "url": ""}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("remove_background MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool: upscale_image (Real-ESRGAN — 2x/4x upscaling)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def upscale_image(
+    image_url: str,
+    scale: int = 2,
+    face_enhance: bool = False,
+) -> str:
+    """
+    Upscale an image 2x or 4x using Real-ESRGAN AI upscaling.
+
+    Converts a low-resolution image to high resolution while preserving detail.
+    Perfect for:
+    - Improving quality of AI-generated images before using on site
+    - Making small product photos larger for hero sections
+    - Preparing images for print or large displays
+    - Enhancing portrait photos (use face_enhance=True)
+
+    Workflow example:
+    1. generate_image(prompt="...", aspect_ratio="16:9") → 1024x576px image
+    2. upscale_image(image_url=<url>, scale=2) → 2048x1152px image
+    3. update_site_media(store_slug="...", section="hero", media_url=<upscaled_url>)
+
+    Args:
+        image_url: URL of the image to upscale.
+                   Supports jpg, png, webp formats.
+                   Note: very large images (>2MP) may be auto-resized before upscaling.
+        scale: Upscaling factor. Either 2 (2x, ~1-2 seconds) or 4 (4x, ~3-5 seconds).
+               Default: 2. Recommended: 2 for most uses, 4 only when needed.
+        face_enhance: If True, applies additional GFPGAN face enhancement.
+                      Recommended for portrait photos or character images.
+                      Default: False
+
+    Returns:
+        JSON with URL of the upscaled image.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({"error": "VENDSHOP_BRAIN_API_KEY not configured", "url": ""}, ensure_ascii=False)
+
+    if not image_url:
+        return json.dumps({"error": "image_url is required", "url": ""}, ensure_ascii=False)
+
+    safe_scale = max(2, min(int(scale), 4))
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/upscale",
+                json={
+                    "image_url": image_url,
+                    "scale": safe_scale,
+                    "face_enhance": face_enhance,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({"error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY", "url": ""}, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            result_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps({
+                "url": result_url,
+                "media_type": "image",
+                "scale": safe_scale,
+                "original": image_url,
+                "message": f"Image upscaled {safe_scale}x: {result_url}" if result_url else "Failed — no URL returned",
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({"error": f"Upscaling timed out (120s). Try scale=2 or a smaller image.", "url": ""}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("upscale_image MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool: create_video (via vendshop.shop Studio API — Kling)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
