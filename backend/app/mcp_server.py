@@ -2615,6 +2615,119 @@ async def generate_image(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Tool: generate_character_image (InstantID — face consistency)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def generate_character_image(
+    prompt: str,
+    reference_image: str,
+    style: str = "photorealistic",
+    aspect_ratio: str = "1:1",
+) -> str:
+    """
+    Generate an image with a CONSISTENT character/face across different scenes.
+
+    Uses InstantID to preserve the person's face identity while placing them
+    in any scene, style, or setting you describe.
+
+    Perfect for:
+    - Creating a series of images with the same person (YouTube thumbnails, ads)
+    - Placing a real person's face into AI-generated scenes
+    - Creating consistent brand characters across multiple images
+    - Making cartoon/anime versions of a real person
+
+    Workflow example:
+    1. User provides photo of a barber: reference_image="https://..."
+    2. generate_character_image(
+         prompt="professional barber standing in modern shop, confident pose",
+         reference_image="https://...",
+         style="photorealistic"
+       ) → consistent face in new scene
+    3. generate_character_image(
+         prompt="same barber giving a haircut, smiling",
+         reference_image="https://...",
+         style="photorealistic"
+       ) → same face, new action
+
+    Args:
+        prompt: Scene description. Describe WHERE the person is and WHAT they're doing.
+                The face comes from reference_image — focus on scene, pose, lighting.
+                Example: "professional chef in modern kitchen, confident smile, studio lighting"
+        reference_image: URL of the reference face photo.
+                         Best results: clear frontal face photo, good lighting, no sunglasses.
+                         Can be any publicly accessible image URL.
+        style: Visual style for the output:
+               "photorealistic" — professional photo quality (default)
+               "anime"          — anime/manga illustration style
+               "cartoon"        — 3D Pixar-like cartoon
+               "watercolor"     — artistic watercolor painting
+        aspect_ratio: "1:1" (square, default), "16:9" (landscape), "9:16" (portrait/Reels)
+
+    Returns:
+        JSON with image URL maintaining the reference face identity.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({
+            "error": "VENDSHOP_BRAIN_API_KEY not configured",
+            "url": "",
+        }, ensure_ascii=False)
+
+    if not reference_image:
+        return json.dumps({
+            "error": "reference_image URL is required. Provide a clear face photo URL.",
+            "url": "",
+        }, ensure_ascii=False)
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:  # InstantID takes longer
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/generate-character",
+                json={
+                    "prompt": prompt,
+                    "reference_image": reference_image,
+                    "style": style,
+                    "aspect_ratio": aspect_ratio,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({
+                    "error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY",
+                    "url": "",
+                }, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            image_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps({
+                "url": image_url,
+                "media_type": "image",
+                "style": style,
+                "prompt": prompt,
+                "reference_image": reference_image,
+                "message": (
+                    f"Character image generated with consistent face: {image_url}"
+                    if image_url
+                    else "Generation failed — no URL returned"
+                ),
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({
+            "error": "InstantID timed out (120s). Try again or use a different reference image.",
+            "url": "",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("generate_character_image MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool: create_video (via vendshop.shop Studio API — Kling)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
