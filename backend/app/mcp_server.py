@@ -2728,6 +2728,124 @@ async def generate_character_image(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Tool: create_talking_avatar (SadTalker — lip sync / talking head)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def create_talking_avatar(
+    face_image: str,
+    audio_url: str,
+    still_mode: bool = True,
+    use_enhancer: bool = True,
+) -> str:
+    """
+    Create a talking head video: static face photo + audio → video where the person speaks.
+
+    Uses SadTalker to animate a face image in sync with an audio track.
+    Perfect for:
+    - Creating spokesperson videos for businesses
+    - Animating product mascots or characters
+    - Making testimonials or announcements with a specific face
+    - Creating multilingual versions of the same face speaking different languages
+
+    Workflow example:
+    1. User provides face photo: face_image="https://photo.jpg"
+    2. User provides audio: audio_url="https://speech.mp3"
+    3. create_talking_avatar(
+         face_image="https://photo.jpg",
+         audio_url="https://speech.mp3"
+       ) → video where that face speaks in sync with audio
+    4. update_site_media(
+         store_slug="...",
+         section="hero",
+         media_url=<video_url>,
+         media_type="video"
+       ) → place talking video on site hero
+
+    Args:
+        face_image: URL of the face/portrait photo.
+                    Best results: clear frontal face photo, good lighting, no sunglasses.
+                    Can use any publicly accessible image URL.
+        audio_url: URL of the audio file (mp3 or wav format).
+                   The face will lip-sync to this audio.
+                   Duration should be under 60 seconds for best results.
+        still_mode: If True, reduces head movement — better for professional/product content.
+                    If False, more natural head movement — better for casual content.
+                    Default: True
+        use_enhancer: If True, applies GFPGAN face enhancement for higher quality output.
+                      Adds a few seconds but significantly improves result quality.
+                      Default: True
+
+    Returns:
+        JSON with video URL of the talking avatar.
+        The video shows the face speaking in sync with the provided audio.
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({
+            "error": "VENDSHOP_BRAIN_API_KEY not configured",
+            "url": "",
+        }, ensure_ascii=False)
+
+    if not face_image:
+        return json.dumps({
+            "error": "face_image URL is required. Provide a clear face photo URL.",
+            "url": "",
+        }, ensure_ascii=False)
+
+    if not audio_url:
+        return json.dumps({
+            "error": "audio_url is required. Provide a URL to an mp3 or wav file.",
+            "url": "",
+        }, ensure_ascii=False)
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:  # SadTalker takes 1-2 min
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/lip-sync",
+                json={
+                    "face_image": face_image,
+                    "audio_url": audio_url,
+                    "still_mode": still_mode,
+                    "use_enhancer": use_enhancer,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({
+                    "error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY",
+                    "url": "",
+                }, ensure_ascii=False)
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            video_url = data.get("url") or data.get("media", {}).get("url", "")
+            return json.dumps({
+                "url": video_url,
+                "media_type": "video",
+                "face_image": face_image,
+                "audio_url": audio_url,
+                "message": (
+                    f"Talking avatar video created: {video_url}"
+                    if video_url
+                    else "Generation failed — no URL returned"
+                ),
+            }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({
+            "error": "SadTalker timed out (180s). Try with a shorter audio clip or smaller image.",
+            "url": "",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("create_talking_avatar MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool: create_video (via vendshop.shop Studio API — Kling)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
