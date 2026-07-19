@@ -31,6 +31,40 @@ from app.utils.tracking import bump_access_bg
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────
+# Style Presets — expand a short keyword into a full style description
+# Used by generate_image and generate_character_image
+# ─────────────────────────────────────────────────────────────────
+STYLE_PRESETS: dict = {
+    # Photo-realistic
+    "photorealistic": "photorealistic, professional DSLR photography, sharp focus, natural lighting, high detail",
+    "cinematic":      "cinematic photography, movie still, dramatic lighting, shallow depth of field, film grain, anamorphic lens",
+    "portrait":       "professional portrait photography, studio lighting, bokeh background, sharp face focus",
+    "product":        "commercial product photography, clean white background, studio lighting, high detail",
+    # Artistic
+    "anime":          "anime illustration style, vibrant saturated colors, clean line art, manga influence, detailed eyes",
+    "cartoon":        "3D cartoon animation style, Pixar/Disney quality, soft rim lighting, expressive features, smooth textures",
+    "watercolor":     "watercolor painting, soft wet edges, paper texture visible, artistic brush strokes, pastel tones",
+    "oil_painting":   "oil painting on canvas, thick impasto brushwork, rich saturated colors, classical art style",
+    "sketch":         "pencil sketch illustration, detailed line work, cross-hatching shading, clean white background",
+    "flat":           "flat design illustration, minimal style, bold geometric shapes, clean colors, no shadows",
+    # Special
+    "neon":           "neon cyberpunk style, glowing neon lights, dark background, purple and cyan tones, rain-soaked streets",
+    "vintage":        "vintage retro photography, film grain, faded colors, warm tones, 1970s aesthetic",
+    "minimalist":     "minimalist photography, negative space, simple composition, neutral tones, clean aesthetic",
+    "dramatic":       "dramatic photography, high contrast, deep shadows, moody atmosphere, chiaroscuro lighting",
+}
+
+
+def apply_style_preset(prompt: str, style: str) -> str:
+    """Appends the style description to the prompt if a known preset is given."""
+    style_key = style.lower().replace(" ", "_").replace("-", "_")
+    style_desc = STYLE_PRESETS.get(style_key)
+    if style_desc:
+        return f"{prompt}, {style_desc}"
+    return f"{prompt}, {style}"
+
+
+# ─────────────────────────────────────────────────────────────────
 # MCP Server instance
 # ─────────────────────────────────────────────────────────────────
 mcp = FastMCP(
@@ -2484,15 +2518,18 @@ async def _enhance_prompt_for_flux(user_prompt: str, aspect_ratio: str = "1:1") 
 
     system = (
         "You are an expert at writing image generation prompts for Flux (a photorealistic diffusion model). "
-        "Your prompts produce professional, commercial-quality photos. "
+        "Your prompts produce professional, commercial-quality visuals. "
         "Always write in English. Never include brand names or copyrighted terms. "
-        "Focus on lighting, materials, atmosphere, and composition."
+        "Focus on lighting, materials, atmosphere, and composition. "
+        "IMPORTANT: If the prompt already contains style keywords (cinematic, cartoon, anime, watercolor, "
+        "oil painting, neon, vintage, sketch, etc.), preserve and enhance those style descriptors — "
+        "do NOT change the intended visual style. Only add subject detail, lighting quality, "
+        "composition, and technical quality terms that match the stated style."
     )
 
     user_msg = (
-        f"Expand this short description into a detailed Flux image prompt (80-120 words). "
+        f"Expand this description into a detailed Flux image prompt (80-120 words). "
         f"Description: '{user_prompt}'. "
-        f"Style: photorealistic commercial photography. "
         f"Composition: {orientation_hint}. "
         f"Return ONLY the prompt text, no explanations or quotes."
     )
@@ -2523,6 +2560,7 @@ async def generate_image(
     provider: str = "flux",
     quality: str = "fast",
     aspect_ratio: str = "1:1",
+    style: str = "",
 ) -> str:
     """
     Generate an image using vendshop.shop AI Studio (Flux or Grok Aurora).
@@ -2540,6 +2578,13 @@ async def generate_image(
         quality: "fast" (Flux Schnell, ~3-5s) or "good" (Flux Dev, ~15s, more detailed)
         aspect_ratio: "1:1" (square), "16:9" (landscape), "9:16" (portrait/Reels),
                       "4:3", "3:4"
+        style: Visual style preset or custom description.
+               Presets: photorealistic, cinematic, portrait, product,
+               anime, cartoon, watercolor, oil_painting, sketch, flat,
+               neon, vintage, minimalist, dramatic
+               Example: style="cinematic" → auto-expands to full cinematic description.
+               Or pass custom: style="soft pastel, dreamy atmosphere"
+               Leave empty to let Haiku choose style based on the prompt.
 
     Returns:
         JSON with image URL. If url is empty string, generation failed.
@@ -2557,8 +2602,9 @@ async def generate_image(
         )
 
     try:
-        # Auto-enhance short prompts → detailed Flux-optimized prompts
-        enhanced_prompt = await _enhance_prompt_for_flux(prompt, aspect_ratio)
+        # Apply style preset BEFORE Haiku enhancement so Haiku knows the intended style
+        effective_prompt = apply_style_preset(prompt, style) if style else prompt
+        enhanced_prompt = await _enhance_prompt_for_flux(effective_prompt, aspect_ratio)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
@@ -2683,11 +2729,13 @@ async def generate_character_image(
         }, ensure_ascii=False)
 
     try:
+        enhanced_prompt = apply_style_preset(prompt, style if style else "photorealistic")
+
         async with httpx.AsyncClient(timeout=120.0) as client:  # InstantID takes longer
             resp = await client.post(
                 f"{vendshop_url}/api/brain/generate-character",
                 json={
-                    "prompt": prompt,
+                    "prompt": enhanced_prompt,
                     "reference_image": reference_image,
                     "style": style,
                     "aspect_ratio": aspect_ratio,
