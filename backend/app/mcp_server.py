@@ -9,6 +9,7 @@ Client endpoint: https://ion.up.railway.app/mcp
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -2995,6 +2996,142 @@ async def upscale_image(
         return json.dumps({"error": f"Upscaling timed out (120s). Try scale=2 or a smaller image.", "url": ""}, ensure_ascii=False)
     except Exception as exc:
         logger.error("upscale_image MCP tool error: %s", exc)
+        return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool: extend_video (Kling — video continuation from last frame)
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def extend_video(
+    last_frame_url: str,
+    prompt: str = "Smooth continuous motion, same scene and lighting",
+    duration: int = 5,
+    mode: str = "standard",
+) -> str:
+    """
+    Extend a video by generating a continuation clip starting from a specific frame.
+
+    Uses Kling to create a new video segment that seamlessly continues from the
+    provided frame image. This is the "last frame continuation" technique:
+    give Kling the last frame of your existing video → it generates 5-10 more seconds
+    that flow naturally from that exact moment.
+
+    Perfect for:
+    - Making a 5-second clip into 10-15 seconds
+    - Creating looping videos (use last frame of clip)
+    - Building longer sequences (chain multiple extensions)
+    - Adding more action to existing hero video on a site
+
+    Workflow example:
+    1. create_video(prompt="barber cutting hair") → video + save last frame
+    2. extend_video(
+         last_frame_url=<last_frame>,
+         prompt="barber smiles, client looks satisfied, camera pulls back",
+         duration=5
+       ) → continuation clip
+    3. update_site_media(store_slug="...", section="hero", media_url=<extended_url>)
+
+    How to get last_frame_url:
+    - If the original video was generated: take a screenshot of the last second
+    - Or ask the user to extract and upload the last frame
+    - Or use a still image that matches the video's final composition
+
+    Args:
+        last_frame_url: URL of the image to continue FROM.
+                        Should be the last frame of your existing video, or any image
+                        that represents where you want the new video to begin.
+                        Best results: same style/lighting as the original video.
+        prompt: Description of what should happen in the continuation.
+                Focus on ACTION and MOVEMENT, not appearance (that comes from the frame).
+                Example: "camera slowly pulls back, person waves goodbye, warm lighting"
+        duration: Video length in seconds. Either 5 or 10. Default: 5.
+                  5s is faster and cheaper; 10s for longer sequences.
+        mode: Generation mode. "standard" (faster) or "pro" (higher quality). Default: "standard"
+
+    Returns:
+        JSON with video URL of the continuation clip.
+        Note: This tool waits for Kling to finish (up to 3 minutes).
+    """
+    vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
+    api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
+
+    if not api_key:
+        return json.dumps({"error": "VENDSHOP_BRAIN_API_KEY not configured", "url": ""}, ensure_ascii=False)
+
+    if not last_frame_url:
+        return json.dumps({
+            "error": "last_frame_url is required. Provide the URL of the last frame of your video.",
+            "url": "",
+        }, ensure_ascii=False)
+
+    safe_duration = duration if duration in (5, 10) else 5
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{vendshop_url}/api/brain/extend-video",
+                json={
+                    "last_frame_url": last_frame_url,
+                    "prompt": prompt,
+                    "duration": safe_duration,
+                    "mode": mode,
+                },
+                headers={"x-brain-api-key": api_key},
+            )
+
+            if resp.status_code == 401:
+                return json.dumps({"error": "Unauthorized — check VENDSHOP_BRAIN_API_KEY", "url": ""}, ensure_ascii=False)
+
+            resp.raise_for_status()
+            job_data = resp.json()
+            job_id = job_data.get("jobId")
+
+            if not job_id:
+                return json.dumps({"error": "No jobId returned", "url": ""}, ensure_ascii=False)
+
+        poll_url = f"{vendshop_url}/api/brain/extend-video/poll?id={job_id}"
+        max_polls = 36  # 36 × 5s = 3 minutes max
+
+        for attempt in range(max_polls):
+            await asyncio.sleep(5)
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                poll_resp = await client.get(
+                    poll_url,
+                    headers={"x-brain-api-key": api_key},
+                )
+                poll_resp.raise_for_status()
+                poll_data = poll_resp.json()
+
+                status = poll_data.get("status")
+
+                if status == "succeeded":
+                    video_url = poll_data.get("url") or poll_data.get("media", {}).get("url", "")
+                    return json.dumps({
+                        "url": video_url,
+                        "media_type": "video",
+                        "duration": safe_duration,
+                        "last_frame_url": last_frame_url,
+                        "message": f"Video extended by {safe_duration}s: {video_url}" if video_url else "No URL returned",
+                    }, ensure_ascii=False)
+
+                if status == "failed":
+                    error = poll_data.get("error", "Unknown error")
+                    return json.dumps({"error": f"Kling failed: {error}", "url": ""}, ensure_ascii=False)
+
+                logger.info("extend_video poll %d/%d: status=%s", attempt + 1, max_polls, status)
+
+        return json.dumps({
+            "error": "Timed out after 3 minutes. Job may still be processing — try checking manually.",
+            "jobId": job_id,
+            "url": "",
+        }, ensure_ascii=False)
+
+    except httpx.TimeoutException:
+        return json.dumps({"error": "Request timed out", "url": ""}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("extend_video MCP tool error: %s", exc)
         return json.dumps({"error": str(exc), "url": ""}, ensure_ascii=False)
 
 
