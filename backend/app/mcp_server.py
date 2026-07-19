@@ -2623,6 +2623,8 @@ async def create_video(
     image_url: Optional[str] = None,
     duration: int = 5,
     aspect_ratio: str = "9:16",
+    camera_type: Optional[str] = None,
+    camera_value: int = 5,
 ) -> str:
     """
     Generate a video using vendshop.shop AI Studio (Kling AI).
@@ -2631,18 +2633,30 @@ async def create_video(
     Returns a job_id — video takes 2-5 minutes to generate.
 
     After calling this tool, tell the user:
-    "Video generation started! It will take 2-5 minutes.
-     You can check status at: vendshop.shop/studio"
+    "Video generation started! It will take 2-5 minutes."
 
     Args:
         prompt: Motion and scene description in English.
-                Example: "Slow cinematic zoom into the barber chair,
-                          warm golden lighting, hair falling in slow motion"
+                Example: "Slow cinematic zoom into the barber chair, warm golden lighting"
+                TIP: Use simple motion words. Camera movement is controlled by camera_type,
+                not by the prompt text — so don't write "camera rotates 180 degrees" in prompt.
         image_url: Optional. URL of an existing image to animate (image-to-video).
                    If provided, Kling will animate this specific image.
-                   If None, Kling generates video from text only.
         duration: 5 or 10 seconds.
         aspect_ratio: "9:16" (vertical/Reels default), "16:9" (landscape), "1:1" (square)
+        camera_type: Precise camera movement control. Options:
+                     "zoom_in"     — camera moves toward subject
+                     "zoom_out"    — camera pulls away from subject
+                     "pan_left"    — camera slides left
+                     "pan_right"   — camera slides right
+                     "tilt_up"     — camera tilts upward (crane up effect)
+                     "tilt_down"   — camera tilts downward
+                     "orbit_left"  — camera orbits/circles left around subject
+                     "orbit_right" — camera orbits/circles right around subject
+                     "none"        — no camera movement (Kling decides)
+                     None          — let Kling interpret motion from prompt text (default)
+        camera_value: Movement intensity, 0-10. Default 5 (medium).
+                      Use 3-4 for subtle, 7-8 for dramatic.
 
     Returns:
         JSON with job_id for status polling, or error.
@@ -2661,14 +2675,19 @@ async def create_video(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            payload: dict = {
+                "prompt": prompt,
+                "image_url": image_url,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
+            if camera_type is not None:
+                payload["camera_type"] = camera_type
+                payload["camera_value"] = max(0, min(10, camera_value))
+
             resp = await client.post(
                 f"{vendshop_url}/api/brain/create-video",
-                json={
-                    "prompt": prompt,
-                    "image_url": image_url,
-                    "duration": duration,
-                    "aspect_ratio": aspect_ratio,
-                },
+                json=payload,
                 headers={"x-brain-api-key": api_key},
             )
             resp.raise_for_status()
