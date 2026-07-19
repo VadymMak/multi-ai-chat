@@ -2777,56 +2777,55 @@ async def generate_character_image(
 
 
 # ─────────────────────────────────────────────────────────────────
-# Tool: create_talking_avatar (SadTalker — lip sync / talking head)
+# Tool: create_talking_avatar v2 — sync/lipsync-2 (Path A) + p-video-avatar (Path B)
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
 async def create_talking_avatar(
-    face_image: str,
     audio_url: str,
-    still_mode: bool = True,
-    use_enhancer: bool = True,
+    face_image: str = "",
+    video_url: str = "",
 ) -> str:
     """
-    Create a talking head video: static face photo + audio → video where the person speaks.
+    Create a talking head video — two quality paths depending on inputs:
 
-    Uses SadTalker to animate a face image in sync with an audio track.
-    Perfect for:
-    - Creating spokesperson videos for businesses
-    - Animating product mascots or characters
-    - Making testimonials or announcements with a specific face
-    - Creating multilingual versions of the same face speaking different languages
+    PATH A (studio quality, recommended):
+      video_url + audio_url → sync/lipsync-2 → professional lip sync
+      Requires: an animated video of the face (from create_video with Kling)
+      Best for: final product, site hero, marketing content
 
-    Workflow example:
-    1. User provides face photo: face_image="https://photo.jpg"
-    2. User provides audio: audio_url="https://speech.mp3"
-    3. create_talking_avatar(
-         face_image="https://photo.jpg",
-         audio_url="https://speech.mp3"
-       ) → video where that face speaks in sync with audio
-    4. update_site_media(
-         store_slug="...",
-         section="hero",
-         media_url=<video_url>,
-         media_type="video"
-       ) → place talking video on site hero
+    PATH B (quick fallback):
+      face_image + audio_url → prunaai/p-video-avatar → talking photo
+      Requires: only a portrait image
+      Best for: quick previews or when Kling video isn't available yet
+
+    Recommended full workflow (Path A):
+      1. generate_image("portrait barber, front-facing, professional lighting")
+         → face image URL
+      2. create_video(
+           image_url=<face_url>,
+           prompt="Portrait, person speaking to camera, natural head movement, subtle facial expressions",
+           duration=5, aspect_ratio="1:1"
+         ) → start poll → wait for Kling → get video URL
+      3. generate_voiceover(text="Welcome to our barbershop!", voice_id="adam")
+         → audio URL
+      4. create_talking_avatar(video_url=<video_url>, audio_url=<audio_url>)
+         → final talking head video ✅
+
+    Quick workflow (Path B):
+      1. generate_image(...)  → face image URL
+      2. generate_voiceover(text="...", voice_id="adam") → audio URL
+      3. create_talking_avatar(face_image=<image_url>, audio_url=<audio_url>)
+         → talking photo video (less natural movement)
 
     Args:
-        face_image: URL of the face/portrait photo.
-                    Best results: clear frontal face photo, good lighting, no sunglasses.
-                    Can use any publicly accessible image URL.
-        audio_url: URL of the audio file (mp3 or wav format).
-                   The face will lip-sync to this audio.
-                   Duration should be under 60 seconds for best results.
-        still_mode: If True, reduces head movement — better for professional/product content.
-                    If False, more natural head movement — better for casual content.
-                    Default: True
-        use_enhancer: If True, applies GFPGAN face enhancement for higher quality output.
-                      Adds a few seconds but significantly improves result quality.
-                      Default: True
+        audio_url: URL of the mp3 audio file (required). Use generate_voiceover to create one.
+        face_image: URL of the portrait photo (Path B fallback). Ignored if video_url is provided.
+        video_url: URL of an animated video of the face (Path A preferred).
+                   Creates studio-grade lip sync via sync/lipsync-2.
+                   Best results: 5-second Kling video of face with natural movement.
 
     Returns:
         JSON with video URL of the talking avatar.
-        The video shows the face speaking in sync with the provided audio.
     """
     vendshop_url = os.getenv("VENDSHOP_API_URL", "https://vendshop.shop")
     api_key = os.getenv("VENDSHOP_BRAIN_API_KEY", "")
@@ -2837,28 +2836,32 @@ async def create_talking_avatar(
             "url": "",
         }, ensure_ascii=False)
 
-    if not face_image:
-        return json.dumps({
-            "error": "face_image URL is required. Provide a clear face photo URL.",
-            "url": "",
-        }, ensure_ascii=False)
-
     if not audio_url:
         return json.dumps({
-            "error": "audio_url is required. Provide a URL to an mp3 or wav file.",
+            "error": "audio_url is required. Use generate_voiceover to create one first.",
             "url": "",
         }, ensure_ascii=False)
 
+    if not video_url and not face_image:
+        return json.dumps({
+            "error": "Provide video_url (preferred, Path A) or face_image (fallback, Path B).",
+            "url": "",
+        }, ensure_ascii=False)
+
+    # Path A: video + audio → sync/lipsync-2 (studio grade)
+    # Path B: image + audio → p-video-avatar (quick fallback)
+    if video_url:
+        body = {"video_url": video_url, "audio_url": audio_url}
+        mode = "sync/lipsync-2 (studio grade)"
+    else:
+        body = {"face_image": face_image, "audio_url": audio_url}
+        mode = "p-video-avatar (talking photo)"
+
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:  # SadTalker takes 1-2 min
+        async with httpx.AsyncClient(timeout=180.0) as client:
             resp = await client.post(
                 f"{vendshop_url}/api/brain/lip-sync",
-                json={
-                    "face_image": face_image,
-                    "audio_url": audio_url,
-                    "still_mode": still_mode,
-                    "use_enhancer": use_enhancer,
-                },
+                json=body,
                 headers={"x-brain-api-key": api_key},
             )
 
@@ -2871,22 +2874,22 @@ async def create_talking_avatar(
             resp.raise_for_status()
             data = resp.json()
 
-            video_url = data.get("url") or data.get("media", {}).get("url", "")
+            video_result_url = data.get("url") or data.get("media", {}).get("url", "")
             return json.dumps({
-                "url": video_url,
+                "url": video_result_url,
                 "media_type": "video",
-                "face_image": face_image,
+                "mode": mode,
                 "audio_url": audio_url,
                 "message": (
-                    f"Talking avatar video created: {video_url}"
-                    if video_url
+                    f"Talking avatar ready ({mode}): {video_result_url}"
+                    if video_result_url
                     else "Generation failed — no URL returned"
                 ),
             }, ensure_ascii=False)
 
     except httpx.TimeoutException:
         return json.dumps({
-            "error": "SadTalker timed out (180s). Try with a shorter audio clip or smaller image.",
+            "error": "Lip sync timed out (180s). Try with a shorter audio clip.",
             "url": "",
         }, ensure_ascii=False)
     except Exception as exc:
