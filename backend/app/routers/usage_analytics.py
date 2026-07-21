@@ -417,6 +417,31 @@ def sync_usage_logs(
                 raw_jsonl_path=r.raw_jsonl_path or "",
             ))
 
+        # ── Permanently block the retired Windows "eto" machine ──────────────
+        # Its Claude Code logs carry Windows-style paths (backslashes / "C:\"),
+        # while the active Mac uses POSIX "/Users/..." paths. Drop any
+        # Windows-path records so that machine can never pollute usage stats
+        # again — independent of the DISABLE_USAGE_SYNC kill-switch.
+        def _is_windows_path(*paths: str) -> bool:
+            for p in paths:
+                if not p:
+                    continue
+                if "\\" in p or (len(p) >= 2 and p[1] == ":"):
+                    return True
+            return False
+
+        _before = len(records)
+        records = [
+            rec for rec in records
+            if not _is_windows_path(rec.raw_jsonl_path, rec.project_path)
+        ]
+        _blocked = _before - len(records)
+        if _blocked:
+            logger.info(
+                "[usage/sync] blocked %d record(s) from retired Windows machine",
+                _blocked,
+            )
+
         logger.info(
             "POST /usage/sync received %d records (first model=%s, ts=%s)",
             len(records),
