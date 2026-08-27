@@ -3790,4 +3790,41 @@ async def extract_knowledge_for_project(
         return json.dumps({"error": str(exc)})
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool — distill_skills
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def distill_skills(
+    project_id: Optional[int] = None,
+    since_days: int = 30,
+    dry_run: bool = False,
+) -> str:
+    """
+    Auto-distill reusable brain_skills from resolved errors and session summaries.
+
+    Reads two sources:
+      1. learned_errors where resolved_count > 0 (grouped by error_type)
+      2. Recent SESSION_SUMMARY canon_items
+
+    For each cluster, calls GPT-4o-mini to produce a concise skill (name,
+    category, numbered steps). Auto-generated skills are marked with "[auto]"
+    in their description and will be updated on the next run. Manual skills
+    (no "[auto]" prefix) are never overwritten.
+
+    Cap: at most 5 new skills per run (updates are unlimited).
+
+    Args:
+        project_id: Limit sources to one project (omit for cross-project).
+        since_days: Look back this many days (default 30).
+        dry_run:    If true, return proposals without saving to DB.
+    """
+    try:
+        from app.services.skill_distiller import distill
+        result = distill(project_id=project_id, since_days=since_days, dry_run=dry_run)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.error("distill_skills error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
