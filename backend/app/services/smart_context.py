@@ -240,6 +240,91 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] 0. Skills/lessons lookup failed: {e}")
 
     # ============================================================
+    # 0.5. KNOWLEDGE GRAPH (START - architecture map)
+    # Source: knowledge_entities + knowledge_relationships
+    # Top 5 query-relevant entities + up to 6 key relationships.
+    # Hard cap: ~800 chars to stay cache-friendly.
+    # Skip silently if no graph exists for this project.
+    # ============================================================
+    try:
+        kg_total = db.execute(
+            text("SELECT COUNT(*) FROM knowledge_entities WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).scalar() or 0
+
+        if kg_total > 0:
+            kg_embedding = vector_service.create_embedding(query)
+
+            kg_rows = db.execute(
+                text("""
+                    SELECT id, name, entity_type, description
+                    FROM knowledge_entities
+                    WHERE project_id = :pid
+                      AND embedding IS NOT NULL
+                    ORDER BY embedding <=> CAST(:emb AS vector)
+                    LIMIT 5
+                """),
+                {"pid": project_id, "emb": kg_embedding},
+            ).fetchall()
+
+            # Fallback: recency if embeddings not yet populated
+            if not kg_rows:
+                kg_rows = db.execute(
+                    text("""
+                        SELECT id, name, entity_type, description
+                        FROM knowledge_entities
+                        WHERE project_id = :pid
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                    """),
+                    {"pid": project_id},
+                ).fetchall()
+
+            if kg_rows:
+                entity_ids = [r.id for r in kg_rows]
+                id_csv = ",".join(str(i) for i in entity_ids)
+
+                rel_rows = db.execute(
+                    text(f"""
+                        SELECT kf.name AS fn, kt.name AS tn, kr.relationship_type
+                        FROM knowledge_relationships kr
+                        JOIN knowledge_entities kf ON kf.id = kr.from_entity_id
+                        JOIN knowledge_entities kt ON kt.id = kr.to_entity_id
+                        WHERE kr.project_id = :pid
+                          AND (kr.from_entity_id IN ({id_csv})
+                               OR kr.to_entity_id IN ({id_csv}))
+                        ORDER BY kr.strength DESC
+                        LIMIT 6
+                    """),
+                    {"pid": project_id},
+                ).fetchall()
+
+                kg_lines = []
+                for r in kg_rows:
+                    desc = (r.description or "")[:80].strip()
+                    kg_lines.append(f"• {r.name} [{r.entity_type}]" + (f" — {desc}" if desc else ""))
+                for rel in rel_rows:
+                    kg_lines.append(f"  {rel.fn} --{rel.relationship_type}--> {rel.tn}")
+
+                kg_text = "\n".join(kg_lines)
+                if len(kg_text) > 800:
+                    kg_text = kg_text[:797] + "..."
+
+                parts.append(
+                    "🕸 KNOWLEDGE GRAPH (how this project's pieces connect):\n" + kg_text
+                )
+                print(
+                    f"✅ [Smart Context] 0.5. Knowledge graph: "
+                    f"{len(kg_rows)} entities + {len(rel_rows)} relationships"
+                )
+            else:
+                print("ℹ️ [Smart Context] 0.5. No entity rows returned")
+        else:
+            print("ℹ️ [Smart Context] 0.5. No knowledge graph for this project")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 0.5. Knowledge graph failed: {e}")
+
+    # ============================================================
     # 1. PROJECT TREE (START - high attention!)
     # Source: file_embeddings (NOT Git!)
     # This tells AI "where things are" in the project

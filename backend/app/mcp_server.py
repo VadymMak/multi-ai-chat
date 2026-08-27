@@ -3534,4 +3534,220 @@ async def update_site_media(
         logger.error("update_site_media MCP tool error: %s", exc)
         return json.dumps({"error": str(exc), "updated": False}, ensure_ascii=False)
 
+@mcp.tool()
+async def query_knowledge_graph(
+    query: str,
+    project_id: Optional[int] = None,
+    folder_identifier: Optional[str] = None,
+    limit: int = 8,
+) -> str:
+    """
+    Query the project knowledge graph for entities and relationships relevant to a query.
+
+    Returns frameworks, libraries, patterns, components and how they connect —
+    extracted from the indexed codebase by KnowledgeExtractor.
+
+    Use this BEFORE making architectural changes to understand how the project's
+    pieces fit together.
+
+    Args:
+        query: What you want to understand (e.g. "how does auth work",
+               "React state management", "database layer")
+        project_id: Numeric project ID
+        folder_identifier: VSCode folder name (alternative to project_id)
+        limit: Max entities to return (default 8)
+
+    Returns:
+        JSON: { entities:[{name,type,description,source_file}],
+                relationships:[{from,to,type,strength}] }
+        or an error with a hint if no graph exists yet.
+    """
+    if project_id is None and not folder_identifier:
+        return json.dumps({"error": "provide project_id or folder_identifier"})
+
+    db = _open_db()
+    try:
+        pid: Optional[int] = project_id
+        if pid is None and folder_identifier:
+            pid = _resolve_project_id(db, folder_identifier)
+            if pid is None:
+                return json.dumps(
+                    {"error": f"no project matched folder_identifier={folder_identifier!r}"}
+                )
+
+        # Check graph exists
+        total = db.execute(
+            text("SELECT COUNT(*) FROM knowledge_entities WHERE project_id = :pid"),
+            {"pid": pid},
+        ).scalar() or 0
+
+        if total == 0:
+            return json.dumps({
+                "error": "no knowledge graph for this project",
+                "hint": (
+                    f"Build it first: call extract_knowledge_for_project(project_id={pid}) "
+                    f"or POST /api/index/extract-knowledge/{pid}"
+                ),
+            })
+
+        # Semantic match: generate embedding and find closest entities
+        from app.services.vector_service import create_embedding
+        embedding = create_embedding(query)
+
+        rows = db.execute(
+            text("""
+                SELECT id, name, entity_type, description, source_file,
+                       1 - (embedding <=> CAST(:emb AS vector)) AS score
+                FROM knowledge_entities
+                WHERE project_id = :pid
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:emb AS vector)
+                LIMIT :lim
+            """),
+            {"pid": pid, "emb": embedding, "lim": limit},
+        ).fetchall()
+
+        # Fallback: recency sort if no embeddings exist yet
+        if not rows:
+            rows = db.execute(
+                text("""
+                    SELECT id, name, entity_type, description, source_file, 0.5 AS score
+                    FROM knowledge_entities
+                    WHERE project_id = :pid
+                    ORDER BY created_at DESC
+                    LIMIT :lim
+                """),
+                {"pid": pid, "lim": limit},
+            ).fetchall()
+
+        entities = [
+            {
+                "name": r.name,
+                "type": r.entity_type,
+                "description": (r.description or "")[:120],
+                "source_file": r.source_file or "",
+                "score": round(float(r.score), 3),
+            }
+            for r in rows
+        ]
+
+        # Relationships: 1-hop from/to matched entities
+        relationships: list = []
+        if rows:
+            matched_ids = [r.id for r in rows]
+            # Safe: matched_ids are ints from DB
+            id_csv = ",".join(str(i) for i in matched_ids)
+            rel_rows = db.execute(
+                text(f"""
+                    SELECT kf.name AS from_name, kt.name AS to_name,
+                           kr.relationship_type, kr.strength
+                    FROM knowledge_relationships kr
+                    JOIN knowledge_entities kf ON kf.id = kr.from_entity_id
+                    JOIN knowledge_entities kt ON kt.id = kr.to_entity_id
+                    WHERE kr.project_id = :pid
+                      AND (kr.from_entity_id IN ({id_csv})
+                           OR kr.to_entity_id IN ({id_csv}))
+                    ORDER BY kr.strength DESC
+                    LIMIT 20
+                """),
+                {"pid": pid},
+            ).fetchall()
+            relationships = [
+                {
+                    "from": r.from_name,
+                    "to": r.to_name,
+                    "type": r.relationship_type,
+                    "strength": round(float(r.strength), 2),
+                }
+                for r in rel_rows
+            ]
+
+        return json.dumps(
+            {
+                "project_id": pid,
+                "query": query,
+                "entities_in_graph": total,
+                "entities": entities,
+                "relationships": relationships,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    except Exception as exc:
+        logger.error("query_knowledge_graph error: %s", exc)
+        return json.dumps({"error": str(exc)})
+    finally:
+        db.close()
+
+
+@mcp.tool()
+async def extract_knowledge_for_project(
+    project_id: int,
+    limit: int = 50,
+) -> str:
+    """
+    Extract architectural knowledge from a project's indexed files into the
+    knowledge graph (knowledge_entities + knowledge_relationships tables).
+
+    Calls GPT-4o-mini on each file to identify frameworks, libraries, patterns,
+    components and their relationships. Runs synchronously — may take 1-3 minutes
+    for large projects. Call once per project; re-run after major refactors.
+
+    Requires the project to be indexed first (index_local_project or
+    ensure_project_indexed). After this call, query_knowledge_graph will
+    return results for the project.
+
+    Args:
+        project_id: Numeric project ID.
+        limit: Max files to process (default 50; increase for large projects).
+
+    Returns:
+        JSON with files_processed, entities_added, relationships_added.
+    """
+    db = _open_db()
+    try:
+        # Verify project exists
+        row = db.execute(
+            text("SELECT id, name FROM projects WHERE id = :pid LIMIT 1"),
+            {"pid": project_id},
+        ).fetchone()
+        if row is None:
+            return json.dumps({"error": f"project {project_id} not found"})
+
+        file_count = db.execute(
+            text("SELECT COUNT(*) FROM file_embeddings WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).scalar() or 0
+
+        if file_count == 0:
+            return json.dumps({
+                "error": "no indexed files for this project",
+                "hint": "Run index_local_project or ensure_project_indexed first",
+            })
+
+    finally:
+        db.close()
+
+    try:
+        from app.services.knowledge_extractor import KnowledgeExtractor
+        extractor = KnowledgeExtractor()
+        result = extractor.extract_from_project(project_id=project_id, limit=limit)
+        return json.dumps(
+            {
+                "project_id": project_id,
+                "project_name": row.name,
+                "files_processed": result["files_processed"],
+                "entities_added": result["entities_added"],
+                "relationships_added": result["relationships_added"],
+                "next_step": "Call query_knowledge_graph to use the graph",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception as exc:
+        logger.error("extract_knowledge_for_project error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 __all__ = ["mcp"]
