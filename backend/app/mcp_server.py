@@ -2496,6 +2496,103 @@ async def save_skill(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Tool 30 — delete_skill
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def delete_skill(name: str) -> str:
+    """
+    Permanently delete a skill from the brain_skills library by name.
+
+    Args:
+        name: Exact skill name to delete (e.g. "auto-skill-distillation").
+    """
+    db = _open_db()
+    try:
+        result = db.execute(
+            text("DELETE FROM brain_skills WHERE name = :name RETURNING id, name"),
+            {"name": name},
+        ).fetchone()
+        db.commit()
+        if result:
+            return json.dumps(
+                {"deleted": True, "skill_id": result[0], "name": result[1]},
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"deleted": False, "reason": f"skill '{name}' not found"},
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error("delete_skill error: %s", exc)
+        return json.dumps({"error": str(exc), "deleted": False}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool 31 — query_pitfalls
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def query_pitfalls(query: str, project_id: Optional[int] = None) -> str:
+    """
+    Return known pitfalls (past errors) relevant to the query.
+
+    Searches learned_errors for THIS project PLUS cross-project matches
+    (same error_type / semantic match on error_pattern from OTHER projects).
+
+    Args:
+        query:      Free-text query describing what you're about to do.
+        project_id: Project to check own errors for (omit for cross-project only).
+    """
+    db = _open_db()
+    try:
+        from app.services.auto_learning import AutoLearningService
+        from app.services.pattern_analyzer import PatternAnalyzer
+
+        lines: List[str] = []
+
+        # ── Own project errors ──
+        if project_id is not None:
+            svc = AutoLearningService(db)
+            warnings = svc.get_warnings_for_prompt(project_id=project_id, limit=5)
+            for w in warnings:
+                resolution = f" → {w['solution_pattern']}" if w.get("solution_pattern") else ""
+                lines.append(
+                    f"• {w['error_type']}: {(w['error_pattern'] or '')[:80]}"
+                    f"{resolution} [project {project_id}, seen {w['occurrence_count']}x]"
+                )
+
+        # ── Cross-project search using query as the error pattern ──
+        analyzer = PatternAnalyzer(db)
+        cross = analyzer.cross_project_search(
+            error_pattern=query,
+            exclude_project_id=project_id if project_id is not None else -1,
+        )
+        for c in cross:
+            resolution = f" → {c['solution_pattern']}" if c.get("solution_pattern") else ""
+            proj_name = c.get("project_name") or f"project {c['project_id']}"
+            lines.append(
+                f"• {(c['error_pattern'] or '')[:80]}"
+                f"{resolution} [seen in {proj_name}]"
+            )
+
+        if not lines:
+            return json.dumps({"pitfalls": [], "text": ""}, ensure_ascii=False)
+
+        text_out = "⚠️ KNOWN PITFALLS (avoid these — from past errors):\n" + "\n".join(lines)
+        return json.dumps(
+            {"pitfalls": lines, "text": text_out},
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.error("query_pitfalls error: %s", exc)
+        return json.dumps({"error": str(exc), "pitfalls": []}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
 # Helper: enhance short prompt → Flux-optimized detailed prompt
 # ─────────────────────────────────────────────────────────────────
 async def _enhance_prompt_for_flux(user_prompt: str, aspect_ratio: str = "1:1") -> str:

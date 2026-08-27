@@ -325,6 +325,55 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] 0.5. Knowledge graph failed: {e}")
 
     # ============================================================
+    # 0.7. KNOWN PITFALLS (START — right after knowledge graph)
+    # Source: learned_errors (own project) + cross-project PatternAnalyzer.
+    # Compact bullet format, hard cap ~800 chars. Skip silently if none.
+    # ============================================================
+    try:
+        from app.services.auto_learning import AutoLearningService
+        from app.services.pattern_analyzer import PatternAnalyzer
+
+        pitfall_lines: List[str] = []
+
+        # Own-project errors — top 5 by occurrence, no threshold (even 1 occurrence)
+        al_svc = AutoLearningService(db)
+        own_warnings = al_svc.get_warnings_for_prompt(project_id=project_id, limit=5)
+        for w in own_warnings:
+            resolution = f" → {w['solution_pattern']}" if w.get("solution_pattern") else ""
+            pitfall_lines.append(
+                f"• {w.get('error_type', '?')}: {(w.get('error_pattern') or '')[:80]}"
+                f"{resolution} [this project, ×{w['occurrence_count']}]"
+            )
+
+        # Cross-project: use query as error_pattern probe
+        analyzer = PatternAnalyzer(db)
+        cross = analyzer.cross_project_search(
+            error_pattern=query,
+            exclude_project_id=project_id,
+        )
+        for c in cross:
+            resolution = f" → {c['solution_pattern']}" if c.get("solution_pattern") else ""
+            proj_label = c.get("project_name") or f"project {c['project_id']}"
+            pitfall_lines.append(
+                f"• {(c.get('error_pattern') or '')[:80]}"
+                f"{resolution} [seen in {proj_label}]"
+            )
+
+        if pitfall_lines:
+            block = "⚠️ KNOWN PITFALLS (avoid these — from past errors):\n" + "\n".join(pitfall_lines)
+            if len(block) > 800:
+                block = block[:797] + "..."
+            parts.append(block)
+            print(
+                f"✅ [Smart Context] 0.7. Injected {len(pitfall_lines)} pitfalls "
+                f"({len(own_warnings)} own + {len(cross)} cross-project)"
+            )
+        else:
+            print("ℹ️ [Smart Context] 0.7. No known pitfalls for this query")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 0.7. Pitfalls lookup failed: {e}")
+
+    # ============================================================
     # 1. PROJECT TREE (START - high attention!)
     # Source: file_embeddings (NOT Git!)
     # This tells AI "where things are" in the project
