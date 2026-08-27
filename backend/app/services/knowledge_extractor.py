@@ -188,9 +188,13 @@ class KnowledgeExtractor:
         self,
         project_id: int,
         limit: int = 50,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Run extraction over the top `limit` indexed files for the project.
+        Run extraction over `limit` indexed files starting at `offset`.
+
+        Priority order: backend/app/** first, then backend/**, then rest.
+        Use offset for pagination over large projects.
 
         Returns:
             {"files_processed": int, "entities_added": int, "relationships_added": int}
@@ -203,10 +207,16 @@ class KnowledgeExtractor:
                     FROM file_embeddings
                     WHERE project_id = :project_id
                       AND content IS NOT NULL
-                    ORDER BY indexed_at DESC
-                    LIMIT :limit
+                    ORDER BY
+                      CASE
+                        WHEN file_path LIKE 'backend/app/%' THEN 0
+                        WHEN file_path LIKE 'backend/%'     THEN 1
+                        ELSE 2
+                      END,
+                      indexed_at DESC
+                    LIMIT :limit OFFSET :offset
                 """),
-                {"project_id": project_id, "limit": limit},
+                {"project_id": project_id, "limit": limit, "offset": offset},
             ).fetchall()
         finally:
             db.close()

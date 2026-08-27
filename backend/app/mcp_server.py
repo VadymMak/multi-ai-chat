@@ -3684,30 +3684,30 @@ async def query_knowledge_graph(
 @mcp.tool()
 async def extract_knowledge_for_project(
     project_id: int,
-    limit: int = 50,
+    max_files: int = 300,
+    batch_size: int = 50,
 ) -> str:
     """
-    Extract architectural knowledge from a project's indexed files into the
+    Extract architectural knowledge from ALL indexed files of a project into the
     knowledge graph (knowledge_entities + knowledge_relationships tables).
 
-    Calls GPT-4o-mini on each file to identify frameworks, libraries, patterns,
-    components and their relationships. Runs synchronously — may take 1-3 minutes
-    for large projects. Call once per project; re-run after major refactors.
+    Processes files in priority order: backend/app/** first, then backend/**,
+    then the rest. Runs in batches of `batch_size` to avoid memory pressure.
+    Safe to re-run — entities are upserted (no duplicates).
 
     Requires the project to be indexed first (index_local_project or
-    ensure_project_indexed). After this call, query_knowledge_graph will
-    return results for the project.
+    ensure_project_indexed). After this call, query_knowledge_graph returns results.
 
     Args:
         project_id: Numeric project ID.
-        limit: Max files to process (default 50; increase for large projects).
+        max_files: Total files to process across all batches (default 300).
+        batch_size: Files per batch / OpenAI call group (default 50).
 
     Returns:
-        JSON with files_processed, entities_added, relationships_added.
+        JSON with batches_run, files_processed, entities_added, relationships_added.
     """
     db = _open_db()
     try:
-        # Verify project exists
         row = db.execute(
             text("SELECT id, name FROM projects WHERE id = :pid LIMIT 1"),
             {"pid": project_id},
@@ -3725,21 +3725,61 @@ async def extract_knowledge_for_project(
                 "error": "no indexed files for this project",
                 "hint": "Run index_local_project or ensure_project_indexed first",
             })
-
+        project_name = row.name
     finally:
         db.close()
 
     try:
         from app.services.knowledge_extractor import KnowledgeExtractor
         extractor = KnowledgeExtractor()
-        result = extractor.extract_from_project(project_id=project_id, limit=limit)
+
+        total_files = 0
+        total_entities = 0
+        total_relationships = 0
+        batches_run = 0
+        offset = 0
+
+        while offset < max_files:
+            batch = min(batch_size, max_files - offset)
+            result = extractor.extract_from_project(
+                project_id=project_id,
+                limit=batch,
+                offset=offset,
+            )
+            batches_run += 1
+            total_files += result["files_processed"]
+            total_entities += result["entities_added"]
+            total_relationships += result["relationships_added"]
+            logger.info(
+                "extract_knowledge_for_project: project=%d batch=%d offset=%d "
+                "files=%d entities=%d",
+                project_id, batches_run, offset,
+                result["files_processed"], result["entities_added"],
+            )
+            # Stop when the batch returned fewer rows than requested
+            if result["files_processed"] < batch:
+                break
+            offset += batch
+
+        # Final graph size
+        db2 = _open_db()
+        try:
+            entity_total = db2.execute(
+                text("SELECT COUNT(*) FROM knowledge_entities WHERE project_id = :pid"),
+                {"pid": project_id},
+            ).scalar() or 0
+        finally:
+            db2.close()
+
         return json.dumps(
             {
                 "project_id": project_id,
-                "project_name": row.name,
-                "files_processed": result["files_processed"],
-                "entities_added": result["entities_added"],
-                "relationships_added": result["relationships_added"],
+                "project_name": project_name,
+                "batches_run": batches_run,
+                "files_processed": total_files,
+                "entities_added_this_run": total_entities,
+                "relationships_added_this_run": total_relationships,
+                "entities_in_graph_now": entity_total,
                 "next_step": "Call query_knowledge_graph to use the graph",
             },
             ensure_ascii=False,

@@ -105,9 +105,9 @@ async def index_project(
 
 
 async def _index_project_background(project_id: int, force_reindex: bool):
-    """Background task to index project"""
+    """Background task to index project, then auto-extract knowledge graph."""
     from app.memory.db import SessionLocal
-    
+
     db = SessionLocal()
     try:
         indexer = FileIndexer(db)
@@ -115,8 +115,22 @@ async def _index_project_background(project_id: int, force_reindex: bool):
         logger.info(f"✅ Background indexing complete for project {project_id}: {stats}")
     except Exception as e:
         logger.exception(f"❌ Background indexing failed for project {project_id}: {e}")
+        return
     finally:
         db.close()
+
+    # Auto-extract knowledge graph after successful indexing
+    try:
+        from app.services.knowledge_extractor import KnowledgeExtractor
+        extractor = KnowledgeExtractor()
+        kg_result = extractor.extract_from_project(project_id=project_id, limit=200, offset=0)
+        logger.info(
+            "✅ Knowledge extraction after index: project=%d files=%d entities=%d rels=%d",
+            project_id, kg_result["files_processed"],
+            kg_result["entities_added"], kg_result["relationships_added"],
+        )
+    except Exception as e:
+        logger.warning("⚠️ Knowledge extraction failed after indexing project %d: %s", project_id, e)
 
 
 @router.post("/index-sync/{project_id}", response_model=IndexProjectResponse)
@@ -449,18 +463,44 @@ async def get_file_dependents(
 # LOCAL FILES INDEXING (for VS Code Extension) - UPDATED WITH DEPENDENCIES
 # ====================================================================
 
+async def _extract_changed_files_background(
+    project_id: int, changed_files: list
+) -> None:
+    """Extract knowledge for a specific list of (path, content, language) tuples."""
+    try:
+        from app.services.knowledge_extractor import KnowledgeExtractor
+        extractor = KnowledgeExtractor()
+        total_e = total_r = 0
+        for file_path, content, language in changed_files:
+            result = extractor.extract_from_file(
+                project_id=project_id,
+                file_path=file_path,
+                content=content,
+                language=language,
+            )
+            total_e += result["entities_added"]
+            total_r += result["relationships_added"]
+        logger.info(
+            "✅ Knowledge extraction for %d changed files: project=%d +%d entities +%d rels",
+            len(changed_files), project_id, total_e, total_r,
+        )
+    except Exception as e:
+        logger.warning("⚠️ Knowledge extraction for changed files failed (project %d): %s", project_id, e)
+
+
 @router.post("/index-local", response_model=IndexLocalFilesResponse)
 async def index_local_files(
     request: IndexLocalFilesRequest,
+    background_tasks: BackgroundTasks,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Index files from local filesystem (sent by VS Code Extension).
-    
+
     This endpoint does NOT require git_url - files are sent directly.
-    NOW ALSO SAVES FILE DEPENDENCIES!
-    
+    NOW ALSO SAVES FILE DEPENDENCIES + auto-extracts knowledge for changed files!
+
     Args:
         project_id: Project ID
         files: List of files with path and content
@@ -478,7 +518,9 @@ async def index_local_files(
     
     # Index files
     stats = {"indexed": 0, "skipped": 0, "errors": 0, "dependencies_saved": 0}
-    
+    # Collect (path, content, language) for files that actually changed
+    changed_for_kg: list = []
+
     for file_data in request.files:
         try:
             # Get language from extension
@@ -563,7 +605,7 @@ Imports: {', '.join(metadata.get('imports', []))}
             })
             
             # ============================================================
-            # NEW: SAVE FILE DEPENDENCIES
+            # SAVE FILE DEPENDENCIES
             # ============================================================
             if metadata.get("imports"):
                 deps_count = save_file_dependencies(
@@ -575,10 +617,11 @@ Imports: {', '.join(metadata.get('imports', []))}
                 )
                 stats["dependencies_saved"] += deps_count
             # ============================================================
-            
+
             db.commit()
-            
+
             stats["indexed"] += 1
+            changed_for_kg.append((file_data.path, file_data.content, language))
             logger.debug(f"  ✅ {file_data.path}")
             
         except Exception as e:
@@ -607,7 +650,16 @@ Imports: {', '.join(metadata.get('imports', []))}
         })
         db.commit()
         logger.info(f"  📊 Updated project status: {total_files} files, {stats['dependencies_saved']} deps")
-    
+
+    # Auto-extract knowledge for changed files in background (non-blocking)
+    if changed_for_kg:
+        background_tasks.add_task(
+            _extract_changed_files_background,
+            request.project_id,
+            changed_for_kg,
+        )
+        logger.info(f"  🧠 Scheduled knowledge extraction for {len(changed_for_kg)} changed files")
+
     return IndexLocalFilesResponse(
         success=True,
         project_id=request.project_id,

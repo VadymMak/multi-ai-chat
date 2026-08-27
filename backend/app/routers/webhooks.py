@@ -72,7 +72,7 @@ def _collect_changed_files(payload: Dict[str, Any]) -> tuple[list[str], list[str
 
 
 async def _full_reindex_background(project_id: int) -> None:
-    """Full project reindex — runs in background so webhook returns 200 immediately."""
+    """Full project reindex then auto knowledge extraction."""
     db: Session = SessionLocal()
     try:
         token = getattr(settings, "GITHUB_TOKEN", None)
@@ -81,8 +81,19 @@ async def _full_reindex_background(project_id: int) -> None:
         logger.info(f"[webhook] Full reindex done for project {project_id}: {result}")
     except Exception as exc:
         logger.error(f"[webhook] Full reindex failed for project {project_id}: {exc}")
+        return
     finally:
         db.close()
+
+    try:
+        extractor = KnowledgeExtractor()
+        kg = extractor.extract_from_project(project_id=project_id, limit=200, offset=0)
+        logger.info(
+            "[webhook] Knowledge extraction after reindex: project=%d files=%d entities=%d",
+            project_id, kg["files_processed"], kg["entities_added"],
+        )
+    except Exception as exc:
+        logger.warning("[webhook] Knowledge extraction failed after reindex (project %d): %s", project_id, exc)
 
 
 @router.post("/github")
