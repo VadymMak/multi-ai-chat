@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.deps import get_current_active_user, get_db
 from app.memory.models import User
-from app.services.brain_effectiveness import compute_summary
+from app.services.brain_effectiveness import backfill_from_usage_logs, compute_summary
 
 logger = logging.getLogger(__name__)
 
@@ -338,10 +338,22 @@ def get_cost_summary(
 @router.get("/brain-effectiveness")
 def get_brain_effectiveness(
     project_id: Optional[int] = None,
+    days: int = Query(30, ge=1, le=3650),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    return compute_summary(db, project_id=project_id)
+    return compute_summary(db, project_id=project_id, days=days)
+
+
+@router.post("/brain-effectiveness/backfill")
+def run_brain_effectiveness_backfill(
+    project_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Manually trigger incremental backfill of brain_effectiveness from claude_usage_logs."""
+    inserted = backfill_from_usage_logs(db, project_id=project_id)
+    return {"inserted": inserted, "project_id": project_id}
 
 
 def _load_usage_parser():
@@ -551,6 +563,12 @@ def sync_usage_logs(
         daily_rows = mod.aggregate_daily(db)
         total_cost = sum(float(r.cost_usd or 0.0) for r in payload.records)
 
+        if inserted > 0:
+            try:
+                backfill_from_usage_logs(db)
+            except Exception:
+                logger.exception("[usage/sync] brain_effectiveness backfill failed")
+
         return SyncResponse(
             files_scanned=0,
             records_parsed=len(records),
@@ -569,5 +587,11 @@ def sync_usage_logs(
         cost_sql += " WHERE timestamp >= :s"
         cost_params["s"] = since_d
     total_cost = float(db.execute(text(cost_sql), cost_params).scalar() or 0.0)
+
+    if result.get("inserted", 0) > 0:
+        try:
+            backfill_from_usage_logs(db)
+        except Exception:
+            logger.exception("[usage/sync] brain_effectiveness backfill failed")
 
     return SyncResponse(**result, total_cost_usd=total_cost)

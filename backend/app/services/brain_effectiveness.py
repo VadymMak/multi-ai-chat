@@ -92,24 +92,17 @@ def record_request(
 
 def backfill_from_usage_logs(db: Session, project_id: Optional[int] = None) -> int:
     """
-    Backfill brain_effectiveness rows from claude_usage_logs.
-    One row per usage log; safe to call repeatedly (clears existing rows for the
-    given project scope first).
+    Incrementally sync brain_effectiveness rows from claude_usage_logs.
+    Only inserts rows whose usage_log_id is not yet in brain_effectiveness.
+    Safe to call repeatedly — never deletes existing rows.
+    Returns the number of newly inserted rows.
     """
-    if project_id is None:
-        db.execute(text("DELETE FROM brain_effectiveness"))
-    else:
-        db.execute(
-            text("DELETE FROM brain_effectiveness WHERE project_id = :pid"),
-            {"pid": project_id},
-        )
-
-    where = "WHERE project_id = :pid" if project_id is not None else ""
+    project_filter = "AND c.project_id = :pid" if project_id is not None else ""
     params: Dict[str, Any] = {"pid": project_id} if project_id is not None else {}
 
     dialect = db.bind.dialect.name if db.bind else "postgresql"
     if dialect == "postgresql":
-        db.execute(
+        result = db.execute(
             text(f"""
                 INSERT INTO brain_effectiveness (
                     project_id, usage_log_id, used_brain,
@@ -117,17 +110,21 @@ def backfill_from_usage_logs(db: Session, project_id: Optional[int] = None) -> i
                     brain_tools_called
                 )
                 SELECT
-                    project_id, id, used_brain_context,
-                    total_tokens, cost_usd,
-                    CASE WHEN had_retry THEN 1 ELSE 0 END,
-                    brain_tools_called
-                FROM claude_usage_logs
-                {where}
+                    c.project_id, c.id, c.used_brain_context,
+                    c.total_tokens, c.cost_usd,
+                    CASE WHEN c.had_retry THEN 1 ELSE 0 END,
+                    c.brain_tools_called
+                FROM claude_usage_logs c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM brain_effectiveness b WHERE b.usage_log_id = c.id
+                )
+                {project_filter}
             """),
             params,
         )
+        inserted = result.rowcount
     else:
-        db.execute(
+        result = db.execute(
             text(f"""
                 INSERT INTO brain_effectiveness (
                     project_id, usage_log_id, used_brain,
@@ -135,43 +132,58 @@ def backfill_from_usage_logs(db: Session, project_id: Optional[int] = None) -> i
                     brain_tools_called
                 )
                 SELECT
-                    project_id, id, used_brain_context,
-                    total_tokens, cost_usd,
-                    had_retry,
-                    brain_tools_called
-                FROM claude_usage_logs
-                {where}
+                    c.project_id, c.id, c.used_brain_context,
+                    c.total_tokens, c.cost_usd,
+                    c.had_retry,
+                    c.brain_tools_called
+                FROM claude_usage_logs c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM brain_effectiveness b WHERE b.usage_log_id = c.id
+                )
+                {project_filter}
             """),
             params,
         )
+        inserted = result.rowcount
 
-    count = db.execute(
-        text(f"SELECT COUNT(*) FROM brain_effectiveness {where}"), params
-    ).scalar()
     db.commit()
-    return int(count or 0)
+    return int(inserted or 0)
 
 
-def compute_summary(db: Session, project_id: Optional[int] = None) -> Dict[str, Any]:
+def compute_summary(
+    db: Session,
+    project_id: Optional[int] = None,
+    days: Optional[int] = None,
+) -> Dict[str, Any]:
     """Compare with-Brain vs without-Brain requests."""
-    where = "WHERE project_id = :pid" if project_id is not None else ""
-    params: Dict[str, Any] = {"pid": project_id} if project_id is not None else {}
-    dialect = db.bind.dialect.name if db.bind else "postgresql"
+    from datetime import datetime, timedelta
 
-    used_expr = "used_brain" if dialect == "postgresql" else "used_brain"
+    conditions: List[str] = []
+    params: Dict[str, Any] = {}
+
+    if project_id is not None:
+        conditions.append("b.project_id = :pid")
+        params["pid"] = project_id
+    if days and days > 0:
+        since = datetime.utcnow() - timedelta(days=int(days))
+        conditions.append("b.created_at >= :since")
+        params["since"] = since
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    dialect = db.bind.dialect.name if db.bind else "postgresql"
 
     rows = db.execute(
         text(f"""
             SELECT
-                {used_expr} AS used_brain,
+                b.used_brain AS used_brain,
                 COUNT(*)                AS request_count,
-                COALESCE(AVG(tokens_used), 0)  AS avg_tokens,
-                COALESCE(AVG(cost_usd), 0)     AS avg_cost,
-                COALESCE(SUM(cost_usd), 0)     AS total_cost,
-                COALESCE(SUM(retries), 0)      AS total_retries
-            FROM brain_effectiveness
+                COALESCE(AVG(b.tokens_used), 0)  AS avg_tokens,
+                COALESCE(AVG(b.cost_usd), 0)     AS avg_cost,
+                COALESCE(SUM(b.cost_usd), 0)     AS total_cost,
+                COALESCE(SUM(b.retries), 0)      AS total_retries
+            FROM brain_effectiveness b
             {where}
-            GROUP BY {used_expr}
+            GROUP BY b.used_brain
         """),
         params,
     ).fetchall()
@@ -208,6 +220,7 @@ def compute_summary(db: Session, project_id: Optional[int] = None) -> Dict[str, 
 
     return {
         "project_id": project_id,
+        "days": days,
         "with_brain": with_brain,
         "without_brain": without_brain,
         "token_savings_pct": token_savings_pct,

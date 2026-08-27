@@ -3924,4 +3924,64 @@ async def distill_skills(
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
+@mcp.tool()
+async def run_effectiveness_backfill(project_id: Optional[int] = None) -> str:
+    """
+    Populate brain_effectiveness from claude_usage_logs (incremental).
+
+    Inserts one row per usage log that doesn't yet have a brain_effectiveness
+    entry. Safe to call repeatedly — never deletes existing rows.
+
+    Args:
+        project_id: Limit to one project (omit for all projects).
+
+    Returns JSON: {"inserted": <int>, "project_id": <int|null>}
+    """
+    try:
+        from app.services.brain_effectiveness import backfill_from_usage_logs
+        db = _open_db()
+        try:
+            inserted = backfill_from_usage_logs(db, project_id=project_id)
+        finally:
+            db.close()
+        return json.dumps({"inserted": inserted, "project_id": project_id})
+    except Exception as exc:
+        logger.error("run_effectiveness_backfill error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def get_brain_effectiveness(
+    project_id: Optional[int] = None,
+    days: int = 30,
+) -> str:
+    """
+    Brain-context ROI summary: with-Brain vs without-Brain requests.
+
+    Compares average token usage, cost (USD), and retry rate between
+    requests that included Brain context and those that did not.
+    Requires brain_effectiveness to be populated first (run
+    run_effectiveness_backfill if the table is empty).
+
+    Args:
+        project_id: Limit to one project (omit for all projects).
+        days: Look-back window in days (default 30, max 3650).
+
+    Returns JSON with `with_brain` / `without_brain` buckets plus
+    token_savings_pct, cost_savings_pct, and retry rates.
+    """
+    try:
+        from app.services.brain_effectiveness import compute_summary
+        days = max(1, min(int(days), 3650))
+        db = _open_db()
+        try:
+            summary = compute_summary(db, project_id=project_id, days=days)
+        finally:
+            db.close()
+        return json.dumps(summary, ensure_ascii=False, default=str)
+    except Exception as exc:
+        logger.error("get_brain_effectiveness error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 __all__ = ["mcp"]
