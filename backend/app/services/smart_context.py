@@ -152,9 +152,93 @@ async def build_smart_context(
     """
     
     print(f"🎯 [Smart Context] Building for project={project_id}, role={role_id}, query={query[:50]}...")
-    
+
     parts = []
-    
+
+    # ============================================================
+    # 0. RELEVANT SKILLS/LESSONS (START - highest attention, FIRST!)
+    # FTS match on the query → top 3 skills + 2 bug-fix lessons.
+    # Placed before project tree so it sits in the "primacy" zone
+    # that transformer attention models weight most heavily.
+    # Cap: ~500 chars per skill, ~400 per lesson — stays cache-friendly.
+    # ============================================================
+    try:
+        fts_q = query[:200]  # websearch_to_tsquery handles natural language
+
+        skill_rows = db.execute(text("""
+            SELECT name, description, content, category
+            FROM brain_skills
+            WHERE to_tsvector('english',
+                      coalesce(name,'') || ' ' ||
+                      coalesce(description,'') || ' ' ||
+                      coalesce(content,'')
+                  ) @@ websearch_to_tsquery('english', :q)
+            ORDER BY ts_rank(
+                to_tsvector('english',
+                    coalesce(name,'') || ' ' ||
+                    coalesce(description,'') || ' ' ||
+                    coalesce(content,'')
+                ),
+                websearch_to_tsquery('english', :q)
+            ) DESC
+            LIMIT 3
+        """), {"q": fts_q}).fetchall()
+
+        lesson_rows = db.execute(text("""
+            SELECT title, body, created_at
+            FROM canon_items
+            WHERE project_id = :project_id
+              AND is_active   = TRUE
+              AND (
+                  type = 'LESSON'
+                  OR (
+                      type = 'SESSION_SUMMARY'
+                      AND (
+                          body ILIKE '%lesson learned%'
+                          OR body ILIKE '%BUG FIX%'
+                          OR body ILIKE '%Root cause%'
+                      )
+                  )
+              )
+              AND to_tsvector('english',
+                      coalesce(title,'') || ' ' || coalesce(body,'')
+                  ) @@ websearch_to_tsquery('english', :q)
+            ORDER BY created_at DESC
+            LIMIT 2
+        """), {"project_id": str(project_id), "q": fts_q}).fetchall()
+
+        if skill_rows or lesson_rows:
+            skill_lines = []
+
+            for row in skill_rows:
+                content_preview = (row.content or "")[:500]
+                skill_lines.append(
+                    f"### SKILL [{row.category}]: {row.name}\n"
+                    f"_{row.description}_\n\n{content_preview}"
+                )
+
+            for row in lesson_rows:
+                date = row.created_at.strftime("%Y-%m-%d") if row.created_at else ""
+                body_preview = (row.body or "")[:400]
+                skill_lines.append(
+                    f"### LESSON ({date}): {row.title}\n{body_preview}"
+                )
+
+            parts.append(
+                "📌 RELEVANT SKILLS/LESSONS "
+                "(follow these before using general knowledge):\n"
+                + "\n\n---\n\n".join(skill_lines)
+            )
+            print(
+                f"✅ [Smart Context] 0. Injected {len(skill_rows)} skills "
+                f"+ {len(lesson_rows)} lessons at START"
+            )
+        else:
+            print("ℹ️ [Smart Context] 0. No matching skills/lessons for this query")
+
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 0. Skills/lessons lookup failed: {e}")
+
     # ============================================================
     # 1. PROJECT TREE (START - high attention!)
     # Source: file_embeddings (NOT Git!)
@@ -427,7 +511,7 @@ async def build_smart_context(
     
     print(f"""
 ✅ [Smart Context] Built context with {len(parts)} components:
-   Order: Tree(START) → Summaries → Messages → Semantic → Code(END)
+   Order: Skills(START) → Tree(START) → Summaries → Messages → Semantic → Code(END)
    Total chars: {len(result)}
    Estimated tokens: ~{len(result) // 4}
 """)
