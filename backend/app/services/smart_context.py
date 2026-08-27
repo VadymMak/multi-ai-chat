@@ -374,6 +374,49 @@ async def build_smart_context(
         print(f"⚠️ [Smart Context] 0.7. Pitfalls lookup failed: {e}")
 
     # ============================================================
+    # 0.8. IMPACT PREVIEW for the currently open file (optional)
+    # Queries vscode_activity for the most recently active file in this
+    # project, runs a lightweight impact check, and injects a single line
+    # so Claude sees blast-radius before touching risky files.
+    # Skipped silently if: no active file, empty dep graph, or any error.
+    # ============================================================
+    try:
+        act = db.execute(
+            text("""
+                SELECT file_path
+                FROM vscode_activity
+                WHERE project_id = :pid
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """),
+            {"project_id": project_id},
+        ).fetchone()
+        if act and act.file_path:
+            open_file = act.file_path
+            dep_count = db.execute(
+                text("SELECT COUNT(*) FROM file_dependencies WHERE project_id = :pid"),
+                {"project_id": project_id},
+            ).scalar()
+            if dep_count:
+                from app.services.prediction_service import PredictionService
+                svc = PredictionService(db)
+                impact = svc.predict_impact(project_id, [open_file])
+                risk_score = impact["risk_score"]
+                if risk_score > 0:
+                    direct = impact["directly_affected"][:4]
+                    affected_str = ", ".join(direct)
+                    if len(impact["directly_affected"]) > 4:
+                        affected_str += f" (+{len(impact['directly_affected']) - 4} more)"
+                    impact_line = (
+                        f"⚡ IMPACT IF YOU EDIT {open_file}: "
+                        f"risk {risk_score}/100 — affects: {affected_str}"
+                    )[:300]
+                    parts.append(impact_line)
+                    print(f"✅ [Smart Context] 0.8. Impact preview: risk={risk_score}, direct={len(impact['directly_affected'])}")
+    except Exception as e:
+        print(f"⚠️ [Smart Context] 0.8. Impact preview failed: {e}")
+
+    # ============================================================
     # 1. PROJECT TREE (START - high attention!)
     # Source: file_embeddings (NOT Git!)
     # This tells AI "where things are" in the project

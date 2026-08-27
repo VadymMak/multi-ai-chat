@@ -3925,6 +3925,81 @@ async def distill_skills(
 
 
 @mcp.tool()
+async def predict_impact(
+    changed_files: List[str],
+    project_id: Optional[int] = None,
+    folder_identifier: Optional[str] = None,
+) -> str:
+    """
+    Predict structural blast-radius of changing one or more files.
+
+    Uses the dependency graph to find which files will be directly or
+    transitively affected. Call this BEFORE editing a risky file so you
+    know the downstream impact.
+
+    Args:
+        changed_files: List of file paths being changed (repo-relative).
+        project_id: Numeric project id (optional if folder_identifier given).
+        folder_identifier: VSCode workspace folder name (e.g. "multi-ai-chat").
+
+    Returns compact JSON:
+        {risk_score, directly_affected, transitively_affected,
+         suggestions, circular_warnings}
+
+    risk_score 0-100: 0-33 LOW, 34-66 MEDIUM, 67-100 HIGH.
+    If the dependency graph is empty, returns a warning to run
+    index_local_project first.
+    """
+    try:
+        from app.services.prediction_service import PredictionService
+        db = _open_db()
+        try:
+            pid = project_id
+            if pid is None and folder_identifier:
+                pid = _resolve_project_id(db, folder_identifier)
+            if pid is None:
+                return json.dumps({"error": "project_id or folder_identifier is required"})
+            pid = int(pid)
+
+            dep_count = db.execute(
+                text("SELECT COUNT(*) FROM file_dependencies WHERE project_id = :pid"),
+                {"pid": pid},
+            ).scalar()
+            if not dep_count:
+                return json.dumps({
+                    "project_id": pid,
+                    "warning": "Dependency graph is empty — run index_local_project first",
+                    "risk_score": 0,
+                    "directly_affected": [],
+                    "transitively_affected": [],
+                    "suggestions": [],
+                    "circular_warnings": [],
+                })
+
+            svc = PredictionService(db)
+            result = svc.predict_impact(pid, changed_files)
+        finally:
+            db.close()
+
+        risk_score = result["risk_score"]
+        risk_level = "HIGH" if risk_score >= 67 else ("MEDIUM" if risk_score >= 34 else "LOW")
+
+        return json.dumps({
+            "project_id": pid,
+            "changed_files": changed_files,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "directly_affected": result["directly_affected"],
+            "transitively_affected": result["transitively_affected"],
+            "suggestions": result["suggestions"],
+            "circular_warnings": result["circular_warnings"],
+        }, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("predict_impact error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
 async def run_effectiveness_backfill(project_id: Optional[int] = None) -> str:
     """
     Populate brain_effectiveness from claude_usage_logs (incremental).
