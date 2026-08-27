@@ -4059,4 +4059,275 @@ async def get_brain_effectiveness(
         return json.dumps({"error": str(exc)})
 
 
+# ─────────────────────────────────────────────────────────────────
+# Project Registry helpers
+# ─────────────────────────────────────────────────────────────────
+
+def _resolve_registry_user_id(db, user_id: Optional[int] = None) -> int:
+    """Return user_id to use for registry ops. Defaults to the first superuser."""
+    if user_id is not None:
+        return user_id
+    row = db.execute(
+        text("SELECT id FROM users WHERE is_superuser = TRUE ORDER BY id ASC LIMIT 1")
+    ).fetchone()
+    if row:
+        return row[0]
+    row = db.execute(text("SELECT id FROM users ORDER BY id ASC LIMIT 1")).fetchone()
+    if row:
+        return row[0]
+    raise ValueError("No users found in database")
+
+
+# ─────────────────────────────────────────────────────────────────
+# registry_upsert
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def registry_upsert(
+    name: str,
+    git_url: Optional[str] = None,
+    vercel_url: Optional[str] = None,
+    neon_url: Optional[str] = None,
+    railway_url: Optional[str] = None,
+    demo_url: Optional[str] = None,
+    prod_url: Optional[str] = None,
+    category: Optional[str] = None,
+    priority: Optional[int] = None,
+    status: Optional[str] = None,
+    tags: Optional[str] = None,
+    notes: Optional[str] = None,
+    vault_ref: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> str:
+    """
+    Create or update a project registry entry identified by name.
+
+    Args:
+        name:        Project name (unique per user). Used as the lookup key.
+        git_url:     GitHub / GitLab repo URL.
+        vercel_url:  Vercel deployment URL.
+        neon_url:    Neon Postgres connection string (pointer — store secret in vault).
+        railway_url: Railway service URL.
+        demo_url:    Public demo URL.
+        prod_url:    Production URL.
+        category:    Grouping label (e.g. "client", "internal", "template").
+        priority:    Integer priority — higher = more important (default 0).
+        status:      One of: active | archived | idea (default active).
+        tags:        Comma-separated tags.
+        notes:       Free-form notes (Text).
+        vault_ref:   Pointer to secret in vault — NEVER the secret itself.
+        user_id:     Owner user id (defaults to first superuser).
+    """
+    db = _open_db()
+    try:
+        uid = _resolve_registry_user_id(db, user_id)
+        from app.memory.models import ProjectRegistry
+        from datetime import datetime as _dt
+
+        entry = db.query(ProjectRegistry).filter(
+            ProjectRegistry.user_id == uid,
+            ProjectRegistry.name == name,
+        ).first()
+
+        if entry is None:
+            entry = ProjectRegistry(
+                user_id=uid,
+                name=name,
+                priority=priority if priority is not None else 0,
+                status=status or "active",
+            )
+            db.add(entry)
+            action = "created"
+        else:
+            action = "updated"
+
+        if git_url is not None:
+            entry.git_url = git_url
+        if vercel_url is not None:
+            entry.vercel_url = vercel_url
+        if neon_url is not None:
+            entry.neon_url = neon_url
+        if railway_url is not None:
+            entry.railway_url = railway_url
+        if demo_url is not None:
+            entry.demo_url = demo_url
+        if prod_url is not None:
+            entry.prod_url = prod_url
+        if category is not None:
+            entry.category = category
+        if priority is not None:
+            entry.priority = priority
+        if status is not None:
+            entry.status = status
+        if tags is not None:
+            entry.tags = tags
+        if notes is not None:
+            entry.notes = notes
+        if vault_ref is not None:
+            entry.vault_ref = vault_ref
+
+        entry.updated_at = _dt.utcnow()
+        db.commit()
+        db.refresh(entry)
+
+        return json.dumps({
+            "action": action,
+            "id": entry.id,
+            "name": entry.name,
+            "status": entry.status,
+            "priority": entry.priority,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        db.rollback()
+        logger.error("registry_upsert error: %s", exc)
+        return json.dumps({"error": str(exc)})
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# registry_list
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def registry_list(
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> str:
+    """
+    List project registry entries ordered by priority DESC, name ASC.
+
+    Args:
+        category: Filter by category label (omit for all).
+        status:   Filter by status (omit for all; typical values: active, archived, idea).
+        user_id:  Owner user id (defaults to first superuser).
+    """
+    db = _open_db()
+    try:
+        uid = _resolve_registry_user_id(db, user_id)
+        from app.memory.models import ProjectRegistry
+        from sqlalchemy import asc, desc
+
+        q = db.query(ProjectRegistry).filter(ProjectRegistry.user_id == uid)
+        if category:
+            q = q.filter(ProjectRegistry.category == category)
+        if status:
+            q = q.filter(ProjectRegistry.status == status)
+        q = q.order_by(desc(ProjectRegistry.priority), asc(ProjectRegistry.name))
+        entries = q.all()
+
+        result = [
+            {
+                "id": e.id,
+                "name": e.name,
+                "category": e.category,
+                "priority": e.priority,
+                "status": e.status,
+                "git_url": e.git_url,
+                "vercel_url": e.vercel_url,
+                "neon_url": e.neon_url,
+                "railway_url": e.railway_url,
+                "demo_url": e.demo_url,
+                "prod_url": e.prod_url,
+                "tags": e.tags,
+                "notes": e.notes,
+                "vault_ref": e.vault_ref,
+                "created_at": str(e.created_at),
+                "updated_at": str(e.updated_at),
+            }
+            for e in entries
+        ]
+        return json.dumps({"count": len(result), "entries": result}, ensure_ascii=False, default=str)
+    except Exception as exc:
+        logger.error("registry_list error: %s", exc)
+        return json.dumps({"error": str(exc)})
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# registry_get
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def registry_get(name: str, user_id: Optional[int] = None) -> str:
+    """
+    Get a single project registry entry by name.
+
+    Args:
+        name:    Project name.
+        user_id: Owner user id (defaults to first superuser).
+    """
+    db = _open_db()
+    try:
+        uid = _resolve_registry_user_id(db, user_id)
+        from app.memory.models import ProjectRegistry
+
+        entry = db.query(ProjectRegistry).filter(
+            ProjectRegistry.user_id == uid,
+            ProjectRegistry.name == name,
+        ).first()
+
+        if entry is None:
+            return json.dumps({"error": f"No registry entry found for name={name!r}"})
+
+        return json.dumps({
+            "id": entry.id,
+            "name": entry.name,
+            "category": entry.category,
+            "priority": entry.priority,
+            "status": entry.status,
+            "git_url": entry.git_url,
+            "vercel_url": entry.vercel_url,
+            "neon_url": entry.neon_url,
+            "railway_url": entry.railway_url,
+            "demo_url": entry.demo_url,
+            "prod_url": entry.prod_url,
+            "tags": entry.tags,
+            "notes": entry.notes,
+            "vault_ref": entry.vault_ref,
+            "created_at": str(entry.created_at),
+            "updated_at": str(entry.updated_at),
+        }, ensure_ascii=False, default=str)
+    except Exception as exc:
+        logger.error("registry_get error: %s", exc)
+        return json.dumps({"error": str(exc)})
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# registry_delete
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def registry_delete(name: str, user_id: Optional[int] = None) -> str:
+    """
+    Delete a project registry entry by name.
+
+    Args:
+        name:    Project name to delete.
+        user_id: Owner user id (defaults to first superuser).
+    """
+    db = _open_db()
+    try:
+        uid = _resolve_registry_user_id(db, user_id)
+        from app.memory.models import ProjectRegistry
+
+        entry = db.query(ProjectRegistry).filter(
+            ProjectRegistry.user_id == uid,
+            ProjectRegistry.name == name,
+        ).first()
+
+        if entry is None:
+            return json.dumps({"error": f"No registry entry found for name={name!r}"})
+
+        db.delete(entry)
+        db.commit()
+        return json.dumps({"deleted": name})
+    except Exception as exc:
+        db.rollback()
+        logger.error("registry_delete error: %s", exc)
+        return json.dumps({"error": str(exc)})
+    finally:
+        db.close()
+
+
 __all__ = ["mcp"]
