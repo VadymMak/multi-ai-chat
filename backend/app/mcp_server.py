@@ -3924,6 +3924,269 @@ async def distill_skills(
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
+def _resolve_registry_user_id(db, user_email: Optional[str] = None) -> Optional[int]:
+    """Return user_id for registry ops: by email, first superuser, or first user."""
+    if user_email:
+        row = db.execute(
+            text("SELECT id FROM users WHERE email = :e LIMIT 1"), {"e": user_email}
+        ).fetchone()
+        return int(row[0]) if row else None
+    row = db.execute(
+        text("SELECT id FROM users WHERE is_superuser = true ORDER BY id LIMIT 1")
+    ).fetchone()
+    if row:
+        return int(row[0])
+    row = db.execute(text("SELECT id FROM users ORDER BY id LIMIT 1")).fetchone()
+    return int(row[0]) if row else None
+
+
+def _registry_row_to_dict(r) -> Dict[str, Any]:
+    return {
+        "id": r.id,
+        "name": r.name,
+        "category": r.category,
+        "priority": r.priority,
+        "status": r.status,
+        "git_url": r.git_url,
+        "vercel_url": r.vercel_url,
+        "neon_url": r.neon_url,
+        "railway_url": r.railway_url,
+        "demo_url": r.demo_url,
+        "prod_url": r.prod_url,
+        "tags": r.tags,
+        "notes": r.notes,
+        "vault_ref": r.vault_ref,
+        "created_at": str(r.created_at),
+        "updated_at": str(r.updated_at),
+    }
+
+
+@mcp.tool()
+async def registry_upsert(
+    name: str,
+    git_url: Optional[str] = None,
+    vercel_url: Optional[str] = None,
+    neon_url: Optional[str] = None,
+    railway_url: Optional[str] = None,
+    demo_url: Optional[str] = None,
+    prod_url: Optional[str] = None,
+    category: Optional[str] = None,
+    priority: int = 0,
+    status: str = "active",
+    tags: Optional[str] = None,
+    notes: Optional[str] = None,
+    vault_ref: Optional[str] = None,
+    user_email: Optional[str] = None,
+) -> str:
+    """
+    Create or update a project in the registry (upsert by name).
+
+    Matched by (user_id, name). All link/metadata fields are optional —
+    only supplied non-None values are written. vault_ref must be a pointer
+    to a secret vault, NEVER a raw secret/token.
+
+    Args:
+        name: Project name (unique per user).
+        git_url: GitHub/GitLab repo URL.
+        vercel_url: Vercel project URL.
+        neon_url: Neon DB dashboard URL.
+        railway_url: Railway project URL.
+        demo_url: Demo / staging URL.
+        prod_url: Production URL.
+        category: Free-form category (e.g. "client", "internal", "saas").
+        priority: Sort order — higher = more important (default 0).
+        status: one of "active", "archived", "idea" (default "active").
+        tags: Comma-separated tags (e.g. "nextjs,stripe,postgres").
+        notes: Free-form notes.
+        vault_ref: Vault pointer (e.g. "op://Brain/multi-ai-chat/railway-token").
+        user_email: Owner email (defaults to primary superuser).
+    """
+    try:
+        db = _open_db()
+        try:
+            uid = _resolve_registry_user_id(db, user_email)
+            if uid is None:
+                return json.dumps({"error": "no user found"})
+
+            existing = db.execute(
+                text("SELECT id FROM project_registry WHERE user_id=:uid AND name=:name"),
+                {"uid": uid, "name": name},
+            ).fetchone()
+
+            now_ts = "NOW()" if (db.bind and db.bind.dialect.name == "postgresql") else "CURRENT_TIMESTAMP"
+
+            if existing:
+                # Build dynamic SET clause for non-None fields only
+                updates: Dict[str, Any] = {"uid": uid, "name": name}
+                set_parts = [f"updated_at = {now_ts}"]
+                for col, val in [
+                    ("git_url", git_url), ("vercel_url", vercel_url),
+                    ("neon_url", neon_url), ("railway_url", railway_url),
+                    ("demo_url", demo_url), ("prod_url", prod_url),
+                    ("category", category), ("priority", priority),
+                    ("status", status), ("tags", tags),
+                    ("notes", notes), ("vault_ref", vault_ref),
+                ]:
+                    if val is not None:
+                        set_parts.append(f"{col} = :{col}")
+                        updates[col] = val
+                db.execute(
+                    text(f"UPDATE project_registry SET {', '.join(set_parts)} "
+                         f"WHERE user_id=:uid AND name=:name"),
+                    updates,
+                )
+                db.commit()
+                action = "updated"
+            else:
+                fields = ["user_id", "name", "status", "priority", "updated_at", "created_at"]
+                vals = [":uid", ":name", ":status", ":priority", now_ts, now_ts]
+                params: Dict[str, Any] = {
+                    "uid": uid, "name": name,
+                    "status": status, "priority": priority,
+                }
+                for col, val in [
+                    ("git_url", git_url), ("vercel_url", vercel_url),
+                    ("neon_url", neon_url), ("railway_url", railway_url),
+                    ("demo_url", demo_url), ("prod_url", prod_url),
+                    ("category", category), ("tags", tags),
+                    ("notes", notes), ("vault_ref", vault_ref),
+                ]:
+                    if val is not None:
+                        fields.append(col)
+                        vals.append(f":{col}")
+                        params[col] = val
+                db.execute(
+                    text(f"INSERT INTO project_registry ({', '.join(fields)}) "
+                         f"VALUES ({', '.join(vals)})"),
+                    params,
+                )
+                db.commit()
+                action = "created"
+
+            row = db.execute(
+                text("SELECT * FROM project_registry WHERE user_id=:uid AND name=:name"),
+                {"uid": uid, "name": name},
+            ).fetchone()
+        finally:
+            db.close()
+
+        return json.dumps({"action": action, "entry": _registry_row_to_dict(row)},
+                          ensure_ascii=False, default=str)
+    except Exception as exc:
+        logger.error("registry_upsert error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def registry_list(
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+    user_email: Optional[str] = None,
+) -> str:
+    """
+    List all projects in the registry, ordered by priority DESC then name.
+
+    Args:
+        category: Filter by category (exact match, case-insensitive).
+        status: Filter by status ("active", "archived", "idea").
+        user_email: Owner email (defaults to primary superuser).
+
+    Returns JSON array of registry entries.
+    """
+    try:
+        db = _open_db()
+        try:
+            uid = _resolve_registry_user_id(db, user_email)
+            if uid is None:
+                return json.dumps({"error": "no user found"})
+
+            conditions = ["user_id = :uid"]
+            params: Dict[str, Any] = {"uid": uid}
+            if category:
+                conditions.append("LOWER(category) = LOWER(:cat)")
+                params["cat"] = category
+            if status:
+                conditions.append("status = :status")
+                params["status"] = status
+
+            where = " AND ".join(conditions)
+            rows = db.execute(
+                text(f"SELECT * FROM project_registry WHERE {where} "
+                     f"ORDER BY priority DESC, name ASC"),
+                params,
+            ).fetchall()
+        finally:
+            db.close()
+
+        return json.dumps(
+            {"count": len(rows), "entries": [_registry_row_to_dict(r) for r in rows]},
+            ensure_ascii=False, default=str,
+        )
+    except Exception as exc:
+        logger.error("registry_list error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def registry_get(name: str, user_email: Optional[str] = None) -> str:
+    """
+    Get a single project from the registry by name.
+
+    Args:
+        name: Exact project name.
+        user_email: Owner email (defaults to primary superuser).
+    """
+    try:
+        db = _open_db()
+        try:
+            uid = _resolve_registry_user_id(db, user_email)
+            if uid is None:
+                return json.dumps({"error": "no user found"})
+            row = db.execute(
+                text("SELECT * FROM project_registry WHERE user_id=:uid AND name=:name"),
+                {"uid": uid, "name": name},
+            ).fetchone()
+        finally:
+            db.close()
+
+        if not row:
+            return json.dumps({"error": f"no registry entry found for name={name!r}"})
+        return json.dumps(_registry_row_to_dict(row), ensure_ascii=False, default=str)
+    except Exception as exc:
+        logger.error("registry_get error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+async def registry_delete(name: str, user_email: Optional[str] = None) -> str:
+    """
+    Delete a project from the registry by name.
+
+    Args:
+        name: Exact project name to delete.
+        user_email: Owner email (defaults to primary superuser).
+    """
+    try:
+        db = _open_db()
+        try:
+            uid = _resolve_registry_user_id(db, user_email)
+            if uid is None:
+                return json.dumps({"error": "no user found"})
+            result = db.execute(
+                text("DELETE FROM project_registry WHERE user_id=:uid AND name=:name"),
+                {"uid": uid, "name": name},
+            )
+            db.commit()
+            deleted = result.rowcount > 0
+        finally:
+            db.close()
+
+        return json.dumps({"deleted": deleted, "name": name})
+    except Exception as exc:
+        logger.error("registry_delete error: %s", exc)
+        return json.dumps({"error": str(exc)})
+
+
 @mcp.tool()
 async def predict_impact(
     changed_files: List[str],

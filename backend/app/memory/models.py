@@ -28,6 +28,7 @@ __all__ = [
     "UserAPIKey",
     "FileVersion",
     "Lesson",
+    "ProjectRegistry",
 ]
 
 # ✅ Role table
@@ -327,6 +328,7 @@ class User(Base):
     api_keys = relationship("UserAPIKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
     lessons = relationship("Lesson", back_populates="user", cascade="all, delete-orphan")
+    registry_entries = relationship("ProjectRegistry", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username!r} status={self.status}>"
@@ -424,3 +426,39 @@ class Lesson(Base):
 
     def __repr__(self) -> str:
         return f"<Lesson id={self.id} user_id={self.user_id} title={self.title!r}>"
+
+
+# ✅ Project Registry — command-center data layer
+class ProjectRegistry(Base):
+    __tablename__ = "project_registry"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    category = Column(String(100), nullable=True)
+    priority = Column(Integer, default=0, nullable=False)
+    status = Column(String(20), default="active", nullable=False)  # active | archived | idea
+
+    git_url = Column(String(500), nullable=True)
+    vercel_url = Column(String(500), nullable=True)
+    neon_url = Column(String(500), nullable=True)
+    railway_url = Column(String(500), nullable=True)
+    demo_url = Column(String(500), nullable=True)
+    prod_url = Column(String(500), nullable=True)
+
+    tags = Column(String(500), nullable=True)   # CSV e.g. "nextjs,typescript"
+    notes = Column(Text, nullable=True)
+    # Pointer to a secret vault entry — NEVER a raw secret value
+    vault_ref = Column(String(500), nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="registry_entries")
+
+    __table_args__ = (
+        Index("ix_registry_user_name", "user_id", "name", unique=True),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProjectRegistry id={self.id} user_id={self.user_id} name={self.name!r}>"
