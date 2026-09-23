@@ -23,12 +23,15 @@ Design notes carried from the spec / VesselManualBot prior art:
 
 from __future__ import annotations
 
+import html as _html
 import json
 import logging
 import re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from app.providers.factory import ask_model
 from app.config.verify_prompts import EXTRACT_CLAIMS_PROMPT
@@ -195,24 +198,130 @@ def _resolve_source(source: str) -> Optional[Dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────
-# STEPS 3–4 — fetch source text / verify quote.
-# TODO(phase 3): fetch via httpx; failures → unchecked with reason.
+# STEP 3 — fetch source text.
+# ─────────────────────────────────────────────────────────────────
+_FETCH_TEXT_CAP = 200_000          # max chars to keep from a fetched document
+_FETCH_TIMEOUT  = 20.0             # seconds per attempt
+_FETCH_RETRIES  = 1                # one retry after the first attempt
+
+# HTTP status → typed failure reason.
+_STATUS_REASON: Dict[int, str] = {
+    401: "robots_denied",
+    402: "paywall",
+    403: "robots_denied",
+    404: "http_404",
+}
+
+# Fetch failure reasons (subset of unchecked reasons that count as fetch_failures).
+_FETCH_FAILURE_REASONS = frozenset({
+    "http_404", "timeout", "paywall", "robots_denied", "pdf_unparseable", "fetch_error",
+})
+
+_FETCH_UA = "Mozilla/5.0 (compatible; VerifyBot/1.0)"
+
+
+def _extract_html_text(content: bytes, encoding: str = "utf-8") -> str:
+    """Strip HTML tags/scripts/styles; return plain text capped at _FETCH_TEXT_CAP."""
+    try:
+        text = content.decode(encoding, errors="replace")
+    except Exception:
+        text = content.decode("latin-1", errors="replace")
+    text = re.sub(r"<(script|style)[^>]*>.*?</(script|style)>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:_FETCH_TEXT_CAP]
+
+
+def _extract_pdf_text(content: bytes) -> Optional[str]:
+    """Extract plain text from PDF bytes via PyMuPDF (already a dependency)."""
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+        doc = fitz.open(stream=content, filetype="pdf")
+        parts = [page.get_text() for page in doc]
+        text = "\n".join(parts).strip()
+        return text[:_FETCH_TEXT_CAP] if text else None
+    except Exception as exc:
+        logger.debug("_extract_pdf_text failed: %s", exc)
+        return None
+
+
+def _fetch_text(url: str) -> Dict[str, Any]:
+    """Fetch `url` and return extracted plain text or a typed failure reason.
+
+    Returns {"ok": True, "text": <str>} or {"ok": False, "reason": <str>}.
+    Failure reasons: "http_404", "timeout", "paywall", "robots_denied",
+                     "pdf_unparseable", "fetch_error".
+    One retry on network errors. Text capped at _FETCH_TEXT_CAP chars.
+    Never infers content — no text means no verification.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_FETCH_RETRIES + 1):
+        try:
+            with httpx.Client(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
+                resp = client.get(url, headers={"User-Agent": _FETCH_UA})
+
+            if resp.status_code in _STATUS_REASON:
+                return {"ok": False, "reason": _STATUS_REASON[resp.status_code]}
+            if resp.status_code != 200:
+                return {"ok": False, "reason": "fetch_error"}
+
+            content_type = resp.headers.get("content-type", "").lower()
+            is_pdf = "pdf" in content_type or url.lower().split("?")[0].endswith(".pdf")
+
+            if is_pdf:
+                text = _extract_pdf_text(resp.content)
+                if text is None:
+                    return {"ok": False, "reason": "pdf_unparseable"}
+                return {"ok": True, "text": text}
+
+            text = _extract_html_text(resp.content, resp.encoding or "utf-8")
+            if not text.strip():
+                return {"ok": False, "reason": "fetch_error"}
+            return {"ok": True, "text": text}
+
+        except httpx.TimeoutException as exc:
+            last_exc = exc
+            logger.debug("_fetch_text timeout attempt %d for %s", attempt + 1, url)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("_fetch_text error attempt %d for %s: %s", attempt + 1, url, exc)
+
+    if isinstance(last_exc, httpx.TimeoutException):
+        return {"ok": False, "reason": "timeout"}
+    return {"ok": False, "reason": "fetch_error"}
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 4 — quote gate (Phase 4, not yet implemented).
 # TODO(phase 4): VERIFY_QUOTE_PROMPT on retrieval-narrowed text,
 #   then quote_supported() against the FULL document (mechanical gate).
-# Until phase 3 is implemented, a resolved claim stays in `unchecked`
-# — nothing is ever falsely `verified` before the gate exists.
 # ─────────────────────────────────────────────────────────────────
-def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Optional[Dict[str, Any]]:
-    """Phase 2: resolve source. Phases 3-4 not yet implemented.
+def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Dict[str, Any]:
+    """Phase 3: resolve source + fetch text. Phase 4 (quote gate) not yet implemented.
 
-    Returns a result dict (never None) so the orchestrator can read the
-    reason. A resolved-but-unfetched claim always lands in `unchecked`.
+    Returns a result dict. Fetch failures carry "_is_fetch_failure": True so
+    the orchestrator can count them separately.
+    A successfully fetched claim stays in `unchecked` until Phase 4 adds the gate.
     """
     resolved = _resolve_source(source)
     if resolved is None:
         return {"bucket": "unchecked", "reason": "source_unresolvable"}
-    # Phase 3 (fetch) not yet implemented.
-    return {"bucket": "unchecked", "reason": "fetch_not_implemented", "resolved_url": resolved["url"]}
+
+    fetch_result = _fetch_text(resolved["url"])
+    if not fetch_result["ok"]:
+        return {
+            "bucket": "unchecked",
+            "reason": fetch_result["reason"],
+            "_is_fetch_failure": True,
+        }
+
+    # Phase 4 (quote gate) not yet implemented — stash text for the next phase.
+    return {
+        "bucket": "unchecked",
+        "reason": "quote_check_not_implemented",
+        "_fetched_text": fetch_result["text"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -248,14 +357,15 @@ def run_verify(
 ) -> Dict[str, Any]:
     """Verify factual claims in `text`. Returns a VerifyReport dict.
 
-    PHASE 2: extraction (step 1) + source resolution (step 2) are live.
-    Fetch/quote-gate (steps 3–4) not yet implemented — sourced claims land
-    in `unchecked` with reason "fetch_not_implemented" or
-    "source_unresolvable". No claim is ever falsely `verified`.
-      * no stated source             → reason "no_source_given"
-      * fetch disabled (fetch=False) → reason "fetch_disabled"
-      * source unresolvable          → reason "source_unresolvable"
-      * resolved but unfetched       → reason "fetch_not_implemented"
+    PHASE 3: extraction (step 1) + source resolution (step 2) + fetch (step 3)
+    are live. Quote gate (step 4) not yet implemented — successfully fetched
+    claims land in `unchecked/quote_check_not_implemented`. No claim is ever
+    falsely `verified`.
+      * no stated source              → unchecked/no_source_given
+      * fetch disabled (fetch=False)  → unchecked/fetch_disabled
+      * source unresolvable           → unchecked/source_unresolvable
+      * fetch failure                 → unchecked/<fetch reason>; fetch_failures++
+      * fetched, gate not impl.       → unchecked/quote_check_not_implemented
     """
     t0 = time.perf_counter()
     text = (text or "").strip()
@@ -271,6 +381,7 @@ def run_verify(
     if len(facts) > max_claims:
         facts = facts[:max_claims]
 
+    fetch_failures = 0
     for c in facts:
         claim, source = c["claim"], c["source"]
 
@@ -292,6 +403,8 @@ def run_verify(
                     "claim": claim, "source": source,
                     "reason": result.get("reason", "unchecked"),
                 })
+                if result.get("_is_fetch_failure"):
+                    fetch_failures += 1
         elif source and not fetch:
             report["unchecked"].append({
                 "claim": claim, "source": source, "reason": "fetch_disabled",
@@ -307,7 +420,7 @@ def run_verify(
         "refuted": len(report["refuted"]),
         "unchecked": len(report["unchecked"]),
         "opinions_skipped": len(opinions),
-        "fetch_failures": 0,     # populated once step 3 exists
+        "fetch_failures": fetch_failures,
     }
     report["elapsed_s"] = round(time.perf_counter() - t0, 3)
     return report
