@@ -144,20 +144,75 @@ def extract_claims(text: str, model_key: str = VERIFY_EXTRACT_MODEL) -> List[Dic
 
 
 # ─────────────────────────────────────────────────────────────────
-# STEPS 2–4 — resolve source / fetch / verify quote.
-# TODO(phase 2-4): implement per spec.
-#   • step 2: deterministic arXiv/DOI resolvers; arXiv → ar5iv full text (NOT
-#     /abs/); search (max 2 engines) only when no stated source; divergent
-#     search results → unchecked (ambiguous), never confirmation-shop.
-#   • step 3: fetch via web_search_service; failures → unchecked with reason.
-#   • step 4: VERIFY_QUOTE_PROMPT on retrieval-narrowed text, then
-#     quote_supported() against the FULL document (mechanical gate).
-# Until implemented, this returns None so the orchestrator routes the claim to
-# `unchecked` — nothing is ever falsely `verified` before the gate exists.
+# STEP 2 — deterministic source resolution (no model, no network).
+# ─────────────────────────────────────────────────────────────────
+# arXiv: YYMM.NNNN[N][vN], with optional "arXiv:" / "arxiv " prefix.
+_ARXIV_RE = re.compile(
+    r"^(?:arxiv[:\s/]+)?(\d{4}\.\d{4,5}(?:v\d+)?)$",
+    re.IGNORECASE,
+)
+# DOI: starts with "10." followed by registrant / suffix.
+_DOI_RE = re.compile(r"^10\.\d{4,9}/.+$", re.IGNORECASE)
+# Bare http(s) URL.
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _resolve_source(source: str) -> Optional[Dict[str, Any]]:
+    """Turn a stated source into a fetchable URL deterministically.
+
+    Returns {"url": <url>, "origin": "stated"} or None when the source
+    cannot be resolved to a URL (caller must mark the claim unchecked,
+    reason "source_unresolvable").
+
+    Rules:
+    - We verify against the STATED source only. We never search for a
+      "better" one (no confirmation-shopping). Searched URLs are tagged
+      origin="search" — but that is a Phase 2b concern; here origin is
+      always "stated".
+    - arXiv → ar5iv HTML (full text), NOT arxiv.org/abs (abstract only).
+    - No model call; fully deterministic.
+    """
+    s = (source or "").strip()
+    if not s:
+        return None
+
+    # Bare http(s) URL — use as-is.
+    if _URL_RE.match(s):
+        return {"url": s, "origin": "stated"}
+
+    # arXiv id: "2209.07663", "arXiv:2209.07663", "arxiv: 2209.07663", …
+    m = _ARXIV_RE.match(s)
+    if m:
+        arxiv_id = m.group(1)
+        return {"url": f"https://ar5iv.org/abs/{arxiv_id}", "origin": "stated"}
+
+    # DOI: "10.1145/3123456.789"
+    if _DOI_RE.match(s):
+        return {"url": f"https://doi.org/{s}", "origin": "stated"}
+
+    # Bare paper title or anything else → unresolvable (Phase 2b optional).
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEPS 3–4 — fetch source text / verify quote.
+# TODO(phase 3): fetch via httpx; failures → unchecked with reason.
+# TODO(phase 4): VERIFY_QUOTE_PROMPT on retrieval-narrowed text,
+#   then quote_supported() against the FULL document (mechanical gate).
+# Until phase 3 is implemented, a resolved claim stays in `unchecked`
+# — nothing is ever falsely `verified` before the gate exists.
 # ─────────────────────────────────────────────────────────────────
 def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Optional[Dict[str, Any]]:
-    """Not implemented in phase 1. Returns None (→ unchecked)."""
-    return None
+    """Phase 2: resolve source. Phases 3-4 not yet implemented.
+
+    Returns a result dict (never None) so the orchestrator can read the
+    reason. A resolved-but-unfetched claim always lands in `unchecked`.
+    """
+    resolved = _resolve_source(source)
+    if resolved is None:
+        return {"bucket": "unchecked", "reason": "source_unresolvable"}
+    # Phase 3 (fetch) not yet implemented.
+    return {"bucket": "unchecked", "reason": "fetch_not_implemented", "resolved_url": resolved["url"]}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -193,12 +248,14 @@ def run_verify(
 ) -> Dict[str, Any]:
     """Verify factual claims in `text`. Returns a VerifyReport dict.
 
-    PHASE 1: extraction (step 1) and aggregation (step 5) are live. Because the
-    fetch/verify pipeline (steps 2–4) is not implemented yet, every fact claim
-    lands in `unchecked`:
-      * no stated source            → reason "no_source_given"
-      * fetch disabled (fetch=False)→ reason "fetch_disabled"
-      * otherwise                   → reason "fetch_pipeline_not_implemented"
+    PHASE 2: extraction (step 1) + source resolution (step 2) are live.
+    Fetch/quote-gate (steps 3–4) not yet implemented — sourced claims land
+    in `unchecked` with reason "fetch_not_implemented" or
+    "source_unresolvable". No claim is ever falsely `verified`.
+      * no stated source             → reason "no_source_given"
+      * fetch disabled (fetch=False) → reason "fetch_disabled"
+      * source unresolvable          → reason "source_unresolvable"
+      * resolved but unfetched       → reason "fetch_not_implemented"
     """
     t0 = time.perf_counter()
     text = (text or "").strip()
@@ -219,12 +276,7 @@ def run_verify(
 
         if source and fetch:
             result = _verify_sourced_claim(claim, source, high_assurance=high_assurance)
-            if result is None:
-                report["unchecked"].append({
-                    "claim": claim, "source": source,
-                    "reason": "fetch_pipeline_not_implemented",
-                })
-            elif result["bucket"] == "verified":
+            if result["bucket"] == "verified":
                 report["verified"].append({
                     "claim": claim, "source": source,
                     "quote": result["quote"],

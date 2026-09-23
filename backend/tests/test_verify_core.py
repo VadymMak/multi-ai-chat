@@ -1,7 +1,7 @@
 """
-Unit tests for verify_manager.normalize() and quote_supported().
+Unit tests for verify_manager: normalize(), quote_supported(), _resolve_source().
 
-Phase 1 acceptance criteria:
+Phase 1 acceptance criteria (normalize / quote_supported):
   1.  Hyphen line-break join: "prop-\ner" → "proper"
   2.  NBSP / narrow-NBSP inside numbers: "1 000" == "1 000"
   3.  En-dash → hyphen in a numeric range: "100–200" → "100-200"
@@ -11,6 +11,13 @@ Phase 1 acceptance criteria:
   7.  Fabricated quote NOT present in a short text → quote_supported returns False
   8.  Real verbatim quote IS present → quote_supported returns True
   9.  Quote shorter than 8 chars → quote_supported returns False regardless
+
+Phase 2 acceptance criteria (_resolve_source):
+  10. Bare arXiv id "2209.07663" → ar5iv URL
+  11. Prefixed "arXiv:2209.07663" → ar5iv URL
+  12. DOI "10.1145/3600100.3600101" → doi.org URL
+  13. Plain https URL → used as-is, origin "stated"
+  14. Bare paper title → None (unresolvable)
 """
 import sys
 import os
@@ -19,7 +26,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from app.services.verify_manager import normalize, quote_supported
+from app.services.verify_manager import normalize, quote_supported, _resolve_source
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -85,3 +92,43 @@ def test_short_quote_rejected():
     assert quote_supported("table", _DOCUMENT) is False
     assert quote_supported("", _DOCUMENT) is False
     assert quote_supported(None, _DOCUMENT) is False
+
+
+# ─────────────────────────────────────────────────────────────────
+# _resolve_source() tests (Phase 2)
+# ─────────────────────────────────────────────────────────────────
+
+def test_resolve_arxiv_bare_id():
+    r = _resolve_source("2209.07663")
+    assert r is not None
+    assert r["url"] == "https://ar5iv.org/abs/2209.07663"
+    assert r["origin"] == "stated"
+
+
+def test_resolve_arxiv_prefixed():
+    r = _resolve_source("arXiv:2209.07663")
+    assert r is not None
+    assert r["url"] == "https://ar5iv.org/abs/2209.07663"
+    assert r["origin"] == "stated"
+
+
+def test_resolve_doi():
+    r = _resolve_source("10.1145/3600100.3600101")
+    assert r is not None
+    assert r["url"] == "https://doi.org/10.1145/3600100.3600101"
+    assert r["origin"] == "stated"
+
+
+def test_resolve_plain_url():
+    url = "https://example.com/paper.html"
+    r = _resolve_source(url)
+    assert r is not None
+    assert r["url"] == url
+    assert r["origin"] == "stated"
+
+
+def test_resolve_title_is_none():
+    # Bare paper title cannot be resolved deterministically → None
+    assert _resolve_source("Attention Is All You Need") is None
+    assert _resolve_source("") is None
+    assert _resolve_source(None) is None
