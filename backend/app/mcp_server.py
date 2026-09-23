@@ -4340,10 +4340,10 @@ async def verify_claims(
     """
     Verify Mode — fact-check the factual claims in a text against their sources.
 
-    Extracts atomic claims, then (in later phases) resolves + fetches each stated
-    source and confirms a VERBATIM quote by exact substring match. A claim is
-    `verified` ONLY when such a quote is found — the model cannot argue a claim
-    into being verified. Results come back in three buckets that never collapse:
+    Extracts atomic claims, resolves + fetches each stated source, then confirms
+    a VERBATIM quote by exact substring match. A claim is `verified` ONLY when
+    such a quote is found — the model cannot argue a claim into being verified.
+    Results come back in three buckets that never collapse:
       • verified  — source opened, supporting verbatim quote found
       • refuted   — source opened, no supporting quote ("not found in THIS source",
                     NOT "the claim is false")
@@ -4352,15 +4352,20 @@ async def verify_claims(
     Every aggregate carries a denominator. Manual, cost-bearing call — do NOT run
     it automatically on every answer; use it for claims you will cite publicly.
 
-    NOTE (phase 1): the fetch/verify pipeline (steps 2-4) is not implemented yet,
-    so sourced claims currently return in `unchecked`. Extraction and the
-    three-bucket report shape are live.
+    high_assurance=True (dual-model cross-check, ~2× step-4 cost):
+      The quote-finding step runs on TWO independent models from different
+      provider families (gpt-4o-mini + claude-3-haiku). Disagreement is surfaced
+      to the human via bucket="unchecked", reason="models_disagree" with both
+      candidate quotes included — it never silently picks one. Only when BOTH
+      models return a gated quote AND those quotes overlap is the claim marked
+      `verified` (with assurance="both_models_agree"). This catches cases where
+      a single model hallucinates a plausible-sounding but absent quote.
 
     Args:
         text:           The text whose factual claims should be checked.
         max_claims:     Cost guard — cap on how many fact claims to process.
         fetch:          False = extract and label only, no network.
-        high_assurance: (later phase) run the quote check on two models.
+        high_assurance: Run quote check on two models; require both to agree.
     """
     try:
         from app.services.verify_manager import run_verify

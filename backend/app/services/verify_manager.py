@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 # Cheap, strong workhorse for the narrow steps (1 and, later, 4). Temp 0.
 VERIFY_EXTRACT_MODEL = "gpt-4o-mini"
 
+# Second independent model for high_assurance dual cross-check.
+# Must be a different provider family than VERIFY_EXTRACT_MODEL so failures
+# are uncorrelated. claude-3-haiku (Anthropic) is cheap, fast, and in
+# MODEL_REGISTRY under the "anthropic" provider.
+VERIFY_SECOND_MODEL = "claude-3-haiku"
+
 # ─────────────────────────────────────────────────────────────────
 # The ONE normalizer — reuse for source text, claim, and quote check.
 # ─────────────────────────────────────────────────────────────────
@@ -361,7 +367,7 @@ def _narrow_to_relevant(document: str, claim: str) -> tuple:
     return narrowed, True
 
 
-def _find_quote(claim: str, document: str) -> Optional[str]:
+def _find_quote(claim: str, document: str, model_key: str = VERIFY_EXTRACT_MODEL) -> Optional[str]:
     """Find a verbatim quote supporting `claim` in `document`.
 
     Steps:
@@ -371,6 +377,7 @@ def _find_quote(claim: str, document: str) -> Optional[str]:
        is True — where `document` is the FULL fetched text, never the narrowed
        passages. A model cannot pass this gate by hallucinating.
 
+    `model_key` lets high_assurance mode call this twice with different models.
     Returns the verbatim quote string or None.
     """
     context, _ = _narrow_to_relevant(document, claim)
@@ -378,7 +385,7 @@ def _find_quote(claim: str, document: str) -> Optional[str]:
     prompt = VERIFY_QUOTE_PROMPT.format(claim=claim, document=context)
     raw = ask_model(
         messages=[{"role": "user", "content": prompt}],
-        model_key="gpt-4o-mini",
+        model_key=model_key,
         system_prompt=None,
         temperature=0.0,
         max_tokens=500,
@@ -387,7 +394,7 @@ def _find_quote(claim: str, document: str) -> Optional[str]:
     try:
         data = _loads_lenient(raw)
     except Exception as exc:
-        logger.error("_find_quote: JSON parse failed: %s | raw=%s", exc, str(raw)[:300])
+        logger.error("_find_quote: JSON parse failed (%s): %s | raw=%s", model_key, exc, str(raw)[:300])
         return None
 
     verdict = str(data.get("verdict", "")).strip()
@@ -399,11 +406,23 @@ def _find_quote(claim: str, document: str) -> Optional[str]:
     return None
 
 
+def _quotes_overlap(q1: str, q2: str) -> bool:
+    """True iff the normalized quotes overlap (one is a substring of the other)."""
+    n1, n2 = normalize(q1), normalize(q2)
+    return n1 in n2 or n2 in n1
+
+
 def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Dict[str, Any]:
     """All phases active: resolve → fetch → quote gate.
 
     Fetch failures carry "_is_fetch_failure": True for stats counting.
     A claim is `verified` only when the mechanical gate passes.
+
+    high_assurance=True: run _find_quote on TWO independent models and
+    cross-check. Disagreement is surfaced to the human — it never silently
+    picks one. Agreement means BOTH returned a gated quote AND the quotes
+    overlap (one is a substring of the other). This roughly doubles step-4
+    cost but catches cases where a single model hallucinates a plausible quote.
     """
     resolved = _resolve_source(source)
     if resolved is None:
@@ -420,15 +439,44 @@ def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False)
     full_text = fetch_result["text"]
     used_narrowing = len(full_text) > _SMALL_DOC_CHARS
 
+    if high_assurance:
+        quote_a = _find_quote(claim, full_text, model_key=VERIFY_EXTRACT_MODEL)
+        quote_b = _find_quote(claim, full_text, model_key=VERIFY_SECOND_MODEL)
+
+        if quote_a is not None and quote_b is not None:
+            if _quotes_overlap(quote_a, quote_b):
+                longer = quote_a if len(quote_a) >= len(quote_b) else quote_b
+                return {
+                    "bucket": "verified",
+                    "quote": longer,
+                    "source_origin": resolved["origin"],
+                    "assurance": "both_models_agree",
+                }
+            # Both found a quote but they disagree on which passage — surface to human.
+            return {
+                "bucket": "unchecked",
+                "reason": "models_disagree",
+                "quote_a": quote_a,
+                "quote_b": quote_b,
+            }
+        elif quote_a is not None or quote_b is not None:
+            # Exactly one model found a gated quote — insufficient for high_assurance.
+            return {
+                "bucket": "unchecked",
+                "reason": "models_disagree",
+                "quote_a": quote_a,
+                "quote_b": quote_b,
+            }
+        else:
+            return {"bucket": "refuted", "reason": "not_found_in_text"}
+
+    # ── Standard single-model path (high_assurance=False) ────────────────
     quote = _find_quote(claim, full_text)
 
     if quote is not None:
         return {"bucket": "verified", "quote": quote, "source_origin": resolved["origin"]}
 
     # Fallback: keyword scan validates the refutation when narrowing was used.
-    # If none of the claim's salient terms appear in the FULL text at all,
-    # the refutation is definitive; if they do appear, we still refute because
-    # the quote gate failed — but the scan gives confidence the refusal is sound.
     if used_narrowing:
         salient = _salient_words(claim)
         full_norm = normalize(full_text)
@@ -502,21 +550,28 @@ def run_verify(
         if source and fetch:
             result = _verify_sourced_claim(claim, source, high_assurance=high_assurance)
             if result["bucket"] == "verified":
-                report["verified"].append({
+                entry: Dict[str, Any] = {
                     "claim": claim, "source": source,
                     "quote": result["quote"],
                     "source_origin": result.get("source_origin", "stated"),
-                })
+                }
+                if "assurance" in result:
+                    entry["assurance"] = result["assurance"]
+                report["verified"].append(entry)
             elif result["bucket"] == "refuted":
                 report["refuted"].append({
                     "claim": claim, "source": source,
                     "reason": "not_found_in_text",
                 })
             else:
-                report["unchecked"].append({
+                uc_entry: Dict[str, Any] = {
                     "claim": claim, "source": source,
                     "reason": result.get("reason", "unchecked"),
-                })
+                }
+                if "quote_a" in result or "quote_b" in result:
+                    uc_entry["quote_a"] = result.get("quote_a")
+                    uc_entry["quote_b"] = result.get("quote_b")
+                report["unchecked"].append(uc_entry)
                 if result.get("_is_fetch_failure"):
                     fetch_failures += 1
         elif source and not fetch:

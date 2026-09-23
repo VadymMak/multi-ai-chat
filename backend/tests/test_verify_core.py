@@ -362,6 +362,82 @@ def test_find_quote_not_found_returns_none():
     assert result is None
 
 
+# ═════════════════════════════════════════════════════════════════
+# Phase 5 — HIGH ASSURANCE tests (dual-model cross-check, fully mocked)
+# ═════════════════════════════════════════════════════════════════
+
+from app.services.verify_manager import VERIFY_EXTRACT_MODEL, VERIFY_SECOND_MODEL
+
+
+def _make_ask_model_side_effect(model_responses: dict):
+    """Return a side_effect function that returns different responses per model_key."""
+    def side_effect(messages, model_key, system_prompt=None, temperature=0.0, max_tokens=500):
+        return model_responses.get(model_key, '{"verdict": "not_found", "quote": ""}')
+    return side_effect
+
+
+# HA-1: both models return the same real quote → verified + assurance="both_models_agree"
+def test_high_assurance_both_agree():
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model",
+                   side_effect=_make_ask_model_side_effect({
+                       VERIFY_EXTRACT_MODEL: f'{{"verdict": "supported", "quote": "{_REAL_QUOTE}"}}',
+                       VERIFY_SECOND_MODEL:  f'{{"verdict": "supported", "quote": "{_REAL_QUOTE}"}}',
+                   })):
+            result = _verify_sourced_claim(
+                "Monolith uses a collisionless embedding table", "2209.07663",
+                high_assurance=True,
+            )
+    assert result["bucket"] == "verified", f"Expected verified, got {result}"
+    assert result["assurance"] == "both_models_agree"
+    assert _REAL_QUOTE in result["quote"]
+
+
+# HA-2: model A finds gated quote, model B says not_found → unchecked/models_disagree
+def test_high_assurance_disagree():
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model",
+                   side_effect=_make_ask_model_side_effect({
+                       VERIFY_EXTRACT_MODEL: f'{{"verdict": "supported", "quote": "{_REAL_QUOTE}"}}',
+                       VERIFY_SECOND_MODEL:  '{"verdict": "not_found", "quote": ""}',
+                   })):
+            result = _verify_sourced_claim(
+                "Monolith uses a collisionless embedding table", "2209.07663",
+                high_assurance=True,
+            )
+    assert result["bucket"] == "unchecked", f"Expected unchecked, got {result}"
+    assert result["reason"] == "models_disagree"
+    assert result["quote_a"] == _REAL_QUOTE    # model A found it
+    assert result["quote_b"] is None           # model B did not
+
+
+# HA-3: both models say not_found → refuted
+def test_high_assurance_both_not_found():
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model",
+                   return_value='{"verdict": "not_found", "quote": ""}'):
+            result = _verify_sourced_claim(
+                "Monolith uses a collisionless embedding table", "2209.07663",
+                high_assurance=True,
+            )
+    assert result["bucket"] == "refuted", f"Expected refuted, got {result}"
+    assert result["reason"] == "not_found_in_text"
+
+
+# HA-4: high_assurance=False regression — single model, existing behavior unchanged
+def test_high_assurance_false_unchanged():
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model",
+                   return_value=f'{{"verdict": "supported", "quote": "{_REAL_QUOTE}"}}'):
+            result = _verify_sourced_claim(
+                "Monolith uses a collisionless embedding table", "2209.07663",
+                high_assurance=False,
+            )
+    assert result["bucket"] == "verified", f"Expected verified, got {result}"
+    assert "assurance" not in result          # no assurance key in standard mode
+    assert result["quote"] == _REAL_QUOTE
+
+
 # ─── Optional live integration tests ──────────────────────────────────────
 # Skipped unless OPENAI_API_KEY is set and --integration flag is passed.
 _HAS_API_KEY = bool(os.getenv("OPENAI_API_KEY"))
