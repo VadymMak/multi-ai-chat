@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.providers.factory import ask_model
-from app.config.verify_prompts import EXTRACT_CLAIMS_PROMPT
+from app.config.verify_prompts import EXTRACT_CLAIMS_PROMPT, VERIFY_QUOTE_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -293,16 +293,117 @@ def _fetch_text(url: str) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────
-# STEP 4 — quote gate (Phase 4, not yet implemented).
-# TODO(phase 4): VERIFY_QUOTE_PROMPT on retrieval-narrowed text,
-#   then quote_supported() against the FULL document (mechanical gate).
+# STEP 4 — the mechanical quote gate.
 # ─────────────────────────────────────────────────────────────────
-def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Dict[str, Any]:
-    """Phase 3: resolve source + fetch text. Phase 4 (quote gate) not yet implemented.
+_SMALL_DOC_CHARS = 6_000    # pass whole to model below this; chunk above
+_NARROW_BUDGET   = 6_000    # target chars sent to model when narrowing
+_CHUNK_SIZE      = 1_200    # chars per chunk
+_CHUNK_OVERLAP   = 200      # overlap between adjacent chunks
 
-    Returns a result dict. Fetch failures carry "_is_fetch_failure": True so
-    the orchestrator can count them separately.
-    A successfully fetched claim stays in `unchecked` until Phase 4 adds the gate.
+# Minimal English stop-words for salient-term scoring.
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "up", "about", "into", "through",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might",
+    "shall", "must", "can", "that", "this", "these", "those", "it", "its",
+    "as", "if", "so", "not", "no", "nor",
+})
+
+
+def _salient_words(text: str) -> frozenset:
+    """Normalised meaningful words (len>3, not stop-words)."""
+    return frozenset(w for w in normalize(text).split() if len(w) > 3 and w not in _STOP_WORDS)
+
+
+def _narrow_to_relevant(document: str, claim: str) -> tuple:
+    """Return (narrowed_text, used_narrowing: bool).
+
+    Small documents are passed whole. For large ones, overlapping chunks are
+    scored by keyword overlap with the claim and the top chunks (up to
+    _NARROW_BUDGET chars) are returned in document order.
+    The full document is never modified — this only affects what the MODEL sees.
+    The gate always runs on the FULL document.
+    """
+    if len(document) <= _SMALL_DOC_CHARS:
+        return document, False
+
+    claim_words = _salient_words(claim)
+
+    # Build overlapping chunks.
+    chunks: List[str] = []
+    start = 0
+    while start < len(document):
+        end = min(start + _CHUNK_SIZE, len(document))
+        chunks.append(document[start:end])
+        if end == len(document):
+            break
+        start += _CHUNK_SIZE - _CHUNK_OVERLAP
+
+    # Score chunks by keyword overlap; select top ones up to _NARROW_BUDGET.
+    scored = sorted(
+        enumerate(chunks),
+        key=lambda iv: -len(claim_words & frozenset(normalize(iv[1]).split())),
+    )
+    selected_idx: List[int] = []
+    total = 0
+    for idx, chunk in scored:
+        if total >= _NARROW_BUDGET:
+            break
+        selected_idx.append(idx)
+        total += len(chunk)
+
+    if not selected_idx:
+        return document[:_NARROW_BUDGET], True
+
+    selected_idx.sort()                         # restore document order
+    narrowed = "\n\n[…]\n\n".join(chunks[i] for i in selected_idx)
+    return narrowed, True
+
+
+def _find_quote(claim: str, document: str) -> Optional[str]:
+    """Find a verbatim quote supporting `claim` in `document`.
+
+    Steps:
+    1. Narrow what the MODEL sees to relevant passages (or pass whole if small).
+    2. Call ask_model with VERIFY_QUOTE_PROMPT at temperature 0.
+    3. THE GATE: accept the returned quote ONLY if quote_supported(quote, document)
+       is True — where `document` is the FULL fetched text, never the narrowed
+       passages. A model cannot pass this gate by hallucinating.
+
+    Returns the verbatim quote string or None.
+    """
+    context, _ = _narrow_to_relevant(document, claim)
+
+    prompt = VERIFY_QUOTE_PROMPT.format(claim=claim, document=context)
+    raw = ask_model(
+        messages=[{"role": "user", "content": prompt}],
+        model_key="gpt-4o-mini",
+        system_prompt=None,
+        temperature=0.0,
+        max_tokens=500,
+    )
+
+    try:
+        data = _loads_lenient(raw)
+    except Exception as exc:
+        logger.error("_find_quote: JSON parse failed: %s | raw=%s", exc, str(raw)[:300])
+        return None
+
+    verdict = str(data.get("verdict", "")).strip()
+    quote   = str(data.get("quote",   "")).strip()
+
+    # THE GATE — checked against the FULL document, not the narrowed context.
+    if verdict == "supported" and quote_supported(quote, document):
+        return quote
+    return None
+
+
+def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False) -> Dict[str, Any]:
+    """All phases active: resolve → fetch → quote gate.
+
+    Fetch failures carry "_is_fetch_failure": True for stats counting.
+    A claim is `verified` only when the mechanical gate passes.
     """
     resolved = _resolve_source(source)
     if resolved is None:
@@ -316,12 +417,25 @@ def _verify_sourced_claim(claim: str, source: str, high_assurance: bool = False)
             "_is_fetch_failure": True,
         }
 
-    # Phase 4 (quote gate) not yet implemented — stash text for the next phase.
-    return {
-        "bucket": "unchecked",
-        "reason": "quote_check_not_implemented",
-        "_fetched_text": fetch_result["text"],
-    }
+    full_text = fetch_result["text"]
+    used_narrowing = len(full_text) > _SMALL_DOC_CHARS
+
+    quote = _find_quote(claim, full_text)
+
+    if quote is not None:
+        return {"bucket": "verified", "quote": quote, "source_origin": resolved["origin"]}
+
+    # Fallback: keyword scan validates the refutation when narrowing was used.
+    # If none of the claim's salient terms appear in the FULL text at all,
+    # the refutation is definitive; if they do appear, we still refute because
+    # the quote gate failed — but the scan gives confidence the refusal is sound.
+    if used_narrowing:
+        salient = _salient_words(claim)
+        full_norm = normalize(full_text)
+        if salient and not any(w in full_norm for w in salient):
+            logger.debug("_verify_sourced_claim: salient terms absent from full text (clean refutation)")
+
+    return {"bucket": "refuted", "reason": "not_found_in_text"}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -357,15 +471,15 @@ def run_verify(
 ) -> Dict[str, Any]:
     """Verify factual claims in `text`. Returns a VerifyReport dict.
 
-    PHASE 3: extraction (step 1) + source resolution (step 2) + fetch (step 3)
-    are live. Quote gate (step 4) not yet implemented — successfully fetched
-    claims land in `unchecked/quote_check_not_implemented`. No claim is ever
-    falsely `verified`.
+    ALL FOUR PHASES ACTIVE: extraction → source resolution → fetch → quote gate.
+    A claim reaches `verified` only when a model-returned verbatim quote passes
+    the mechanical substring gate against the full fetched source text.
       * no stated source              → unchecked/no_source_given
       * fetch disabled (fetch=False)  → unchecked/fetch_disabled
       * source unresolvable           → unchecked/source_unresolvable
       * fetch failure                 → unchecked/<fetch reason>; fetch_failures++
-      * fetched, gate not impl.       → unchecked/quote_check_not_implemented
+      * quote gate fails              → refuted/not_found_in_text
+      * quote gate passes             → verified with verbatim quote
     """
     t0 = time.perf_counter()
     text = (text or "").strip()

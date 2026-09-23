@@ -33,6 +33,7 @@ from app.services.verify_manager import (
     quote_supported,
     _resolve_source,
     _fetch_text,
+    _find_quote,
     _verify_sourced_claim,
 )
 
@@ -172,14 +173,15 @@ def _patch_client(mock_resp_obj: MagicMock):
     return patch(f"{_MODULE}.httpx.Client", return_value=client_cm)
 
 
-# 15 — Successful fetch: resolve + fetch success → quote_check_not_implemented
+# 15 — Successful fetch: resolve + fetch + quote gate (Phase 4 active)
+# Model says not_found → refuted (gate ran; no hallucination to catch here).
 def test_fetch_success_path():
     with _patch_client(_mock_resp(200, _SAMPLE_HTML)):
-        result = _verify_sourced_claim("some claim", "2209.07663")
-    assert result["bucket"] == "unchecked"
-    assert result["reason"] == "quote_check_not_implemented"
-    assert "_fetched_text" in result
-    assert "collisionless" in result["_fetched_text"]
+        with patch("app.services.verify_manager.ask_model",
+                   return_value='{"verdict": "not_found", "quote": ""}'):
+            result = _verify_sourced_claim("some claim", "2209.07663")
+    assert result["bucket"] == "refuted"
+    assert result["reason"] == "not_found_in_text"
 
 
 # 16 — http_404
@@ -237,3 +239,150 @@ def test_verify_sourced_claim_unresolvable():
     assert result["bucket"] == "unchecked"
     assert result["reason"] == "source_unresolvable"
     assert not result.get("_is_fetch_failure")
+
+
+# ═════════════════════════════════════════════════════════════════
+# Phase 4 — ACCEPTANCE TESTS (mocked-document, fully offline)
+# ═════════════════════════════════════════════════════════════════
+#
+# Stub document: contains a sentence about collisionless embedding table
+# (matching the true-positive claim) but does NOT mention any impression pool
+# (so the fabricated claim cannot pass the gate).
+_MONOLITH_STUB = (
+    "Monolith employs a collisionless embedding table that avoids hash collision "
+    "through a dedicated hashtable per feature. "
+    "This design enables online training with real-time data, allowing the model "
+    "to continuously adapt to user preferences without batch retraining. "
+    "The system processes streaming click events and updates parameters in place."
+)
+# A real verbatim substring of _MONOLITH_STUB for the true-positive test.
+_REAL_QUOTE = "collisionless embedding table that avoids hash collision through a dedicated hashtable per feature"
+
+
+def _patch_fetch_stub():
+    """Patch _fetch_text to return _MONOLITH_STUB without hitting the network."""
+    return patch(
+        "app.services.verify_manager._fetch_text",
+        return_value={"ok": True, "text": _MONOLITH_STUB},
+    )
+
+
+# ─── Acceptance test 1 — TRUE NEGATIVE (mocked) ───────────────────────────
+# The fabricated claim is NOT in the stub.
+# Scenario A: model honestly returns not_found.
+def test_acceptance_true_negative_model_honest():
+    fabricated_claim = (
+        "ByteDance Monolith documents a guaranteed impression pool of 300-500 "
+        "via a multi-armed bandit algorithm"
+    )
+    mock_model_response = '{"verdict": "not_found", "quote": ""}'
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model", return_value=mock_model_response):
+            result = _verify_sourced_claim(fabricated_claim, "2209.07663")
+    assert result["bucket"] == "refuted", f"Expected refuted, got {result}"
+    assert result.get("reason") == "not_found_in_text"
+
+
+# Scenario B: model HALLUCINATES a quote — the gate must catch it.
+def test_acceptance_true_negative_gate_catches_hallucination():
+    fabricated_claim = (
+        "ByteDance Monolith documents a guaranteed impression pool of 300-500 "
+        "via a multi-armed bandit algorithm"
+    )
+    # Model invents a quote that looks plausible but is not in _MONOLITH_STUB.
+    hallucinated_response = (
+        '{"verdict": "supported", "quote": "guaranteed impression pool of 300-500 '
+        'via a multi-armed bandit"}'
+    )
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model", return_value=hallucinated_response):
+            result = _verify_sourced_claim(fabricated_claim, "2209.07663")
+    # Gate must block — the hallucinated quote is NOT in _MONOLITH_STUB.
+    assert result["bucket"] == "refuted", (
+        f"GATE FAILED: model hallucinated a quote and it was NOT caught. result={result}"
+    )
+    assert result.get("reason") == "not_found_in_text"
+
+
+# ─── Acceptance test 2 — TRUE POSITIVE (mocked) ───────────────────────────
+# The real quote IS in the stub; model returns it verbatim; gate passes.
+def test_acceptance_true_positive():
+    real_claim = "Monolith uses a collisionless embedding table to avoid hash collisions"
+    model_response = f'{{"verdict": "supported", "quote": "{_REAL_QUOTE}"}}'
+    with _patch_fetch_stub():
+        with patch("app.services.verify_manager.ask_model", return_value=model_response):
+            result = _verify_sourced_claim(real_claim, "2209.07663")
+    assert result["bucket"] == "verified", f"Expected verified, got {result}"
+    assert result.get("quote") == _REAL_QUOTE
+    assert result.get("source_origin") == "stated"
+
+
+# ─── Acceptance test 3 — HONEST REFUSAL ───────────────────────────────────
+# A claim with no stated source must land in unchecked/no_source_given.
+# This goes through the orchestrator directly (no mocking needed).
+def test_acceptance_honest_refusal_no_source():
+    from app.services.verify_manager import run_verify
+    # run_verify calls extract_claims which calls ask_model. Mock it to return
+    # a single fact claim with no source.
+    claims_response = '[{"claim": "The sky is green.", "source": null, "type": "fact"}]'
+    with patch("app.services.verify_manager.ask_model", return_value=claims_response):
+        report = run_verify("The sky is green.", fetch=True)
+    assert len(report["unchecked"]) == 1
+    item = report["unchecked"][0]
+    assert item["reason"] == "no_source_given"
+    assert item["source"] is None
+    assert len(report["verified"]) == 0
+    assert len(report["refuted"]) == 0
+
+
+# ─── _find_quote unit tests ────────────────────────────────────────────────
+def test_find_quote_gate_blocks_fabricated_quote():
+    doc = "The system uses vector embeddings for efficient retrieval."
+    # Model returns a quote NOT present in the doc → gate blocks it.
+    bad_resp = '{"verdict": "supported", "quote": "guaranteed impression pool of 300-500"}'
+    with patch("app.services.verify_manager.ask_model", return_value=bad_resp):
+        result = _find_quote("some claim", doc)
+    assert result is None
+
+
+def test_find_quote_passes_real_quote():
+    doc = "The system uses vector embeddings for efficient retrieval."
+    real_quote = "vector embeddings for efficient retrieval"
+    good_resp = f'{{"verdict": "supported", "quote": "{real_quote}"}}'
+    with patch("app.services.verify_manager.ask_model", return_value=good_resp):
+        result = _find_quote("claim about retrieval", doc)
+    assert result == real_quote
+
+
+def test_find_quote_not_found_returns_none():
+    doc = "The system uses vector embeddings for efficient retrieval."
+    resp = '{"verdict": "not_found", "quote": ""}'
+    with patch("app.services.verify_manager.ask_model", return_value=resp):
+        result = _find_quote("claim about impression pool", doc)
+    assert result is None
+
+
+# ─── Optional live integration tests ──────────────────────────────────────
+# Skipped unless OPENAI_API_KEY is set and --integration flag is passed.
+_HAS_API_KEY = bool(os.getenv("OPENAI_API_KEY"))
+
+@pytest.mark.skipif(not _HAS_API_KEY, reason="OPENAI_API_KEY not configured")
+def test_integration_true_negative_live():
+    """Live: fetch ar5iv 2209.07663 + real model → must refute fabricated claim."""
+    result = _verify_sourced_claim(
+        "ByteDance Monolith documents a guaranteed impression pool of 300-500 "
+        "via a multi-armed bandit algorithm",
+        "2209.07663",
+    )
+    assert result["bucket"] == "refuted", f"Expected refuted, got {result}"
+
+
+@pytest.mark.skipif(not _HAS_API_KEY, reason="OPENAI_API_KEY not configured")
+def test_integration_true_positive_live():
+    """Live: fetch ar5iv 2209.07663 + real model → must verify collisionless claim."""
+    result = _verify_sourced_claim(
+        "Monolith uses a collisionless embedding table to support online training",
+        "2209.07663",
+    )
+    assert result["bucket"] == "verified", f"Expected verified, got {result}"
+    assert result.get("quote"), "Expected a non-empty verbatim quote"
