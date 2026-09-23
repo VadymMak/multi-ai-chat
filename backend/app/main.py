@@ -287,6 +287,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load lessons router: {e}")
 
+try:
+    from app.routers.verify import router as verify_router  # type: ignore
+    app.include_router(verify_router, prefix="/api")
+    logger.info("Loaded router: verify → /api/verify")
+except Exception as e:
+    logger.error(f"Failed to load verify router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()

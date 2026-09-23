@@ -4330,4 +4330,51 @@ async def registry_delete(name: str, user_id: Optional[int] = None) -> str:
         db.close()
 
 
+@mcp.tool()
+async def verify_claims(
+    text: str,
+    max_claims: int = 20,
+    fetch: bool = True,
+    high_assurance: bool = False,
+) -> str:
+    """
+    Verify Mode — fact-check the factual claims in a text against their sources.
+
+    Extracts atomic claims, then (in later phases) resolves + fetches each stated
+    source and confirms a VERBATIM quote by exact substring match. A claim is
+    `verified` ONLY when such a quote is found — the model cannot argue a claim
+    into being verified. Results come back in three buckets that never collapse:
+      • verified  — source opened, supporting verbatim quote found
+      • refuted   — source opened, no supporting quote ("not found in THIS source",
+                    NOT "the claim is false")
+      • unchecked — no source stated, unreachable, paywalled, ambiguous, or failed
+
+    Every aggregate carries a denominator. Manual, cost-bearing call — do NOT run
+    it automatically on every answer; use it for claims you will cite publicly.
+
+    NOTE (phase 1): the fetch/verify pipeline (steps 2-4) is not implemented yet,
+    so sourced claims currently return in `unchecked`. Extraction and the
+    three-bucket report shape are live.
+
+    Args:
+        text:           The text whose factual claims should be checked.
+        max_claims:     Cost guard — cap on how many fact claims to process.
+        fetch:          False = extract and label only, no network.
+        high_assurance: (later phase) run the quote check on two models.
+    """
+    try:
+        from app.services.verify_manager import run_verify
+        report = await asyncio.to_thread(
+            run_verify,
+            text,
+            max_claims,
+            fetch,
+            high_assurance,
+        )
+        return json.dumps(report, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("verify_claims error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
