@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from sqlalchemy import (
-    Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Index, JSON
+    Column, Integer, String, Text, ForeignKey, DateTime, Boolean, Index, JSON, func
 )
 from sqlalchemy.orm import declarative_base, relationship
 from passlib.hash import bcrypt
@@ -455,8 +455,8 @@ class ProjectRegistry(Base):
     notes = Column(Text, nullable=True)
     vault_ref = Column(String(500), nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user = relationship("User", back_populates="registry_entries")
 

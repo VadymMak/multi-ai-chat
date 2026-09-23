@@ -153,6 +153,34 @@ def run_migration() -> None:
                 conn.rollback()
                 print(f"  priority ALTER skipped (non-fatal): {e}")
 
+        # ── 2b. Ensure DB-level DEFAULT now() for created_at / updated_at ──
+        #   This fixes the NotNullViolation on seed INSERTs that omit these
+        #   columns.  Each ALTER is wrapped individually so a fresh DB
+        #   (columns already have the default) doesn't break anything.
+        if pg:
+            for col in ("created_at", "updated_at"):
+                try:
+                    conn.execute(text(
+                        f"ALTER TABLE project_registry "
+                        f"ALTER COLUMN {col} SET DEFAULT now()"
+                    ))
+                    conn.commit()
+                    print(f"  {col}: DEFAULT now() set")
+                except Exception as e:
+                    conn.rollback()
+                    print(f"  {col} ALTER skipped (non-fatal): {e}")
+            for col in ("created_at", "updated_at"):
+                try:
+                    conn.execute(text(
+                        f"UPDATE project_registry "
+                        f"SET {col} = now() WHERE {col} IS NULL"
+                    ))
+                    conn.commit()
+                    print(f"  {col}: NULL rows backfilled")
+                except Exception as e:
+                    conn.rollback()
+                    print(f"  {col} backfill skipped (non-fatal): {e}")
+
         # ── 3. Seed from projects + claude_usage_logs ────────────────────
         # Wrapped in its own try/except so a seed failure NEVER crashes boot.
         try:
@@ -199,8 +227,10 @@ def run_migration() -> None:
                         if pg:
                             result = conn.execute(text("""
                                 INSERT INTO project_registry
-                                    (user_id, name, status, priority)
-                                VALUES (:uid, :name, 'idea', 0)
+                                    (user_id, name, status, priority,
+                                     created_at, updated_at)
+                                VALUES (:uid, :name, 'idea', 0,
+                                        now(), now())
                                 ON CONFLICT (user_id, name) DO NOTHING
                                 RETURNING id
                             """), {"uid": uid, "name": name})
@@ -214,8 +244,10 @@ def run_migration() -> None:
                             if not existing:
                                 conn.execute(text("""
                                     INSERT INTO project_registry
-                                        (user_id, name, status, priority)
-                                    VALUES (:uid, :name, 'idea', 0)
+                                        (user_id, name, status, priority,
+                                         created_at, updated_at)
+                                    VALUES (:uid, :name, 'idea', 0,
+                                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                                 """), {"uid": uid, "name": name})
                                 inserted += 1
                     except Exception as row_err:
