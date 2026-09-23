@@ -4,15 +4,17 @@ Migration: Add project_registry table.
 
 Per-user registry of all projects with links (git, vercel, neon, railway,
 demo, prod) and metadata (category, priority, status, tags, notes, vault_ref).
-Includes idempotent seed from projects + claude_usage_logs.
+Managed exclusively via registry_upsert — NOT auto-seeded.
 
 Safe to run multiple times.
 
 Fixes applied (2026-08-27):
   - priority column gets a DB-level DEFAULT 0 + backfill for any NULL rows
-  - seed INSERT now explicitly includes priority=0
-  - seed loop is wrapped in its own try/except so a seed failure never
-    crashes the container (always exits 0 after the schema step succeeds)
+
+Fixes applied (2026-09-23):
+  - created_at/updated_at get DB-level DEFAULT now() + NULL backfill
+  - auto-seed removed; placeholder rows (status='idea', all links/notes null)
+    are deleted on first run of this migration version
 """
 
 import os
@@ -55,16 +57,6 @@ def _table_exists(conn, name: str, pg: bool) -> bool:
         ), {"n": name})
     return bool(r.scalar())
 
-
-def _clean_name(raw: str) -> str:
-    """Strip folder-identifier prefix, return bare project name."""
-    if not raw:
-        return raw
-    marker = "-projects-"
-    idx = raw.find(marker)
-    if idx != -1:
-        return raw[idx + len(marker):]
-    return raw.rstrip("/").split("/")[-1]
 
 
 def run_migration() -> None:
@@ -181,89 +173,25 @@ def run_migration() -> None:
                     conn.rollback()
                     print(f"  {col} backfill skipped (non-fatal): {e}")
 
-        # ── 3. Seed from projects + claude_usage_logs ────────────────────
-        # Wrapped in its own try/except so a seed failure NEVER crashes boot.
+        # ── 3. Purge auto-seed placeholder rows (idempotent) ────────────
+        # Deletes only status='idea' rows with all link/notes fields NULL —
+        # i.e. the placeholder rows inserted by the old auto-seed logic.
+        # Curated rows (status='active', with categories/links) are untouched.
         try:
-            if pg:
-                user_row = conn.execute(text(
-                    "SELECT id FROM users WHERE is_superuser = true ORDER BY id LIMIT 1"
-                )).fetchone()
-            else:
-                user_row = conn.execute(text(
-                    "SELECT id FROM users WHERE is_superuser = 1 ORDER BY id LIMIT 1"
-                )).fetchone()
-            if not user_row:
-                user_row = conn.execute(
-                    text("SELECT id FROM users ORDER BY id LIMIT 1")
-                ).fetchone()
-
-            if not user_row:
-                print("  no users found — skipping seed")
-                conn.commit()
-            else:
-                uid = int(user_row[0])
-
-                names: set[str] = set()
-
-                for row in conn.execute(text(
-                    "SELECT DISTINCT name FROM projects "
-                    "WHERE name IS NOT NULL AND name != ''"
-                )).fetchall():
-                    n = _clean_name(str(row[0]).strip())
-                    if n:
-                        names.add(n)
-
-                for row in conn.execute(text(
-                    "SELECT DISTINCT project_name FROM claude_usage_logs "
-                    "WHERE project_name IS NOT NULL AND project_name != ''"
-                )).fetchall():
-                    n = _clean_name(str(row[0]).strip())
-                    if n:
-                        names.add(n)
-
-                inserted = 0
-                for name in sorted(names):
-                    try:
-                        if pg:
-                            result = conn.execute(text("""
-                                INSERT INTO project_registry
-                                    (user_id, name, status, priority,
-                                     created_at, updated_at)
-                                VALUES (:uid, :name, 'idea', 0,
-                                        now(), now())
-                                ON CONFLICT (user_id, name) DO NOTHING
-                                RETURNING id
-                            """), {"uid": uid, "name": name})
-                            if result.fetchone():
-                                inserted += 1
-                        else:
-                            existing = conn.execute(text(
-                                "SELECT id FROM project_registry "
-                                "WHERE user_id=:uid AND name=:name"
-                            ), {"uid": uid, "name": name}).fetchone()
-                            if not existing:
-                                conn.execute(text("""
-                                    INSERT INTO project_registry
-                                        (user_id, name, status, priority,
-                                         created_at, updated_at)
-                                    VALUES (:uid, :name, 'idea', 0,
-                                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                                """), {"uid": uid, "name": name})
-                                inserted += 1
-                    except Exception as row_err:
-                        print(f"  seed row '{name}' skipped (non-fatal): {row_err}")
-                        continue
-
-                conn.commit()
-                print(f"  seeded {inserted} new rows for user_id={uid} "
-                      f"({len(names)} candidates)")
-
-        except Exception as seed_err:
-            print(f"  seed phase failed (non-fatal, schema is intact): {seed_err}")
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            result = conn.execute(text("""
+                DELETE FROM project_registry
+                WHERE status = 'idea'
+                  AND category IS NULL
+                  AND git_url IS NULL AND vercel_url IS NULL AND neon_url IS NULL
+                  AND railway_url IS NULL AND demo_url IS NULL AND prod_url IS NULL
+                  AND notes IS NULL AND tags IS NULL
+            """))
+            conn.commit()
+            deleted = result.rowcount if result.rowcount is not None else 0
+            print(f"  purged {deleted} placeholder rows (status=idea, all links null)")
+        except Exception as e:
+            conn.rollback()
+            print(f"  placeholder purge skipped (non-fatal): {e}")
 
     print("Migration completed.")
 
