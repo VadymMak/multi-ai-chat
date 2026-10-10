@@ -23,10 +23,15 @@ import sys
 
 _REMINDER_TEMPLATE = (
     "[Brain MCP] Active project folder: {folder!r}.\n"
-    "Before answering, call `build_context_for_query("
+    "Before answering:\n"
+    "1. Call `build_context_for_query("
     "folder_identifier={folder!r}, query=<short summary of the user's ask>)` "
     "to fetch project context (recent files, prior decisions, session summaries). "
-    "Skip only for trivial edits already in active scope."
+    "If the returned context contains a RELEVANT SKILLS/LESSONS section, "
+    "follow those instructions before using general knowledge.\n"
+    "2. Call `query_pitfalls(project_id=<id>)` to check for known mistakes "
+    "before non-trivial work — avoids repeating past errors.\n"
+    "Skip both only for trivial edits already in active scope."
 )
 
 
