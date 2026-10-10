@@ -16,6 +16,7 @@ Endpoints:
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+import asyncio
 import hashlib
 import json
 import logging
@@ -51,6 +52,9 @@ from app.models import (
 
 
 logger = logging.getLogger(__name__)
+
+# One KE run at a time — prevents pile-up when many batches arrive concurrently
+_ke_semaphore = asyncio.Semaphore(1)
 
 router = APIRouter(prefix="/file-indexer", tags=["file-indexer"])
 
@@ -463,29 +467,38 @@ async def get_file_dependents(
 # LOCAL FILES INDEXING (for VS Code Extension) - UPDATED WITH DEPENDENCIES
 # ====================================================================
 
+def _run_knowledge_extraction_sync(project_id: int, changed_files: list) -> tuple[int, int]:
+    """Sync worker — runs in a thread pool via asyncio.to_thread."""
+    from app.services.knowledge_extractor import KnowledgeExtractor
+    extractor = KnowledgeExtractor()
+    total_e = total_r = 0
+    for file_path, content, language in changed_files:
+        result = extractor.extract_from_file(
+            project_id=project_id,
+            file_path=file_path,
+            content=content,
+            language=language,
+        )
+        total_e += result["entities_added"]
+        total_r += result["relationships_added"]
+    return total_e, total_r
+
+
 async def _extract_changed_files_background(
     project_id: int, changed_files: list
 ) -> None:
-    """Extract knowledge for a specific list of (path, content, language) tuples."""
-    try:
-        from app.services.knowledge_extractor import KnowledgeExtractor
-        extractor = KnowledgeExtractor()
-        total_e = total_r = 0
-        for file_path, content, language in changed_files:
-            result = extractor.extract_from_file(
-                project_id=project_id,
-                file_path=file_path,
-                content=content,
-                language=language,
+    """Off-loop knowledge extraction: runs sync KE work in a thread, one project at a time."""
+    async with _ke_semaphore:
+        try:
+            total_e, total_r = await asyncio.to_thread(
+                _run_knowledge_extraction_sync, project_id, changed_files
             )
-            total_e += result["entities_added"]
-            total_r += result["relationships_added"]
-        logger.info(
-            "✅ Knowledge extraction for %d changed files: project=%d +%d entities +%d rels",
-            len(changed_files), project_id, total_e, total_r,
-        )
-    except Exception as e:
-        logger.warning("⚠️ Knowledge extraction for changed files failed (project %d): %s", project_id, e)
+            logger.info(
+                "✅ Knowledge extraction for %d changed files: project=%d +%d entities +%d rels",
+                len(changed_files), project_id, total_e, total_r,
+            )
+        except Exception as e:
+            logger.warning("⚠️ Knowledge extraction for changed files failed (project %d): %s", project_id, e)
 
 
 @router.post("/index-local", response_model=IndexLocalFilesResponse)
@@ -566,7 +579,7 @@ Imports: {', '.join(metadata.get('imports', []))}
 {file_data.content[:8000]}
 """.strip()
             
-            embedding = vector_service.create_embedding(embedding_text)
+            embedding = await asyncio.to_thread(vector_service.create_embedding, embedding_text)
             
             # File info
             file_name = file_data.path.split("/")[-1].split("\\")[-1]
@@ -652,13 +665,16 @@ Imports: {', '.join(metadata.get('imports', []))}
         logger.info(f"  📊 Updated project status: {total_files} files, {stats['dependencies_saved']} deps")
 
     # Auto-extract knowledge for changed files in background (non-blocking)
-    if changed_for_kg:
+    # Skip when skip_knowledge_extraction=True (bulk indexing mode: embeddings + deps only)
+    if changed_for_kg and not request.skip_knowledge_extraction:
         background_tasks.add_task(
             _extract_changed_files_background,
             request.project_id,
             changed_for_kg,
         )
         logger.info(f"  🧠 Scheduled knowledge extraction for {len(changed_for_kg)} changed files")
+    elif changed_for_kg and request.skip_knowledge_extraction:
+        logger.info(f"  ⏭ Skipped KE for {len(changed_for_kg)} files (skip_knowledge_extraction=True)")
 
     return IndexLocalFilesResponse(
         success=True,

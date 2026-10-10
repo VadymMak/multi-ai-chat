@@ -67,6 +67,7 @@ class IndexLocalFilesRequest(BaseModel):
     """Request to index local files"""
     project_id: int
     files: List[LocalFile]
+    skip_knowledge_extraction: bool = False
 
 
 class IndexLocalFilesResponse(BaseModel):
