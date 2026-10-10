@@ -389,13 +389,13 @@ async def build_smart_context(
                 ORDER BY updated_at DESC
                 LIMIT 1
             """),
-            {"project_id": project_id},
+            {"pid": project_id},
         ).fetchone()
         if act and act.file_path:
             open_file = act.file_path
             dep_count = db.execute(
                 text("SELECT COUNT(*) FROM file_dependencies WHERE project_id = :pid"),
-                {"project_id": project_id},
+                {"pid": project_id},
             ).scalar()
             if dep_count:
                 from app.services.prediction_service import PredictionService
