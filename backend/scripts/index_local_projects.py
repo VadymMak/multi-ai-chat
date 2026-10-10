@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -31,7 +32,8 @@ AUTH_TOKEN = os.environ.get(
     "088PkzLccpsp4adsYxmqFyvbliqDGFAZRF_A1U0KF5s",
 )
 PROJECTS_ROOT = Path("/Users/vadymmak/Documents/projects")
-BATCH_SIZE = 50
+BATCH_SIZE = 25          # smaller batches — safer for single uvicorn worker
+BATCH_SLEEP_S = 1.5      # pause between HTTP calls to keep Railway responsive
 MAX_FILE_BYTES = 200_000  # 200 KB per file
 
 SUPPORTED_EXTENSIONS = {
@@ -96,7 +98,11 @@ def post_batch(project_id: int, files: list[dict], dry_run: bool) -> dict:
         print(f"  [dry-run] would POST {len(files)} files for project {project_id}")
         return {"indexed": len(files), "skipped": 0, "errors": 0}
 
-    body = json.dumps({"project_id": project_id, "files": files}).encode()
+    body = json.dumps({
+        "project_id": project_id,
+        "files": files,
+        "skip_knowledge_extraction": True,  # bulk mode: embeddings + deps only
+    }).encode()
     req = urllib.request.Request(
         f"{BACKEND_URL}/api/file-indexer/index-local",
         data=body,
@@ -106,7 +112,7 @@ def post_batch(project_id: int, files: list[dict], dry_run: bool) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=90) as resp:
         return json.loads(resp.read())
 
 
@@ -119,29 +125,36 @@ def index_project(pid: int, folder: str, dry_run: bool) -> None:
     batch: list[dict] = []
     total = {"indexed": 0, "skipped": 0, "errors": 0}
     file_count = 0
+    batch_num = 0
 
     for file_data in iter_files(root):
         file_count += 1
         batch.append(file_data)
         if len(batch) >= BATCH_SIZE:
+            batch_num += 1
             try:
                 result = post_batch(pid, batch, dry_run)
                 total["indexed"] += result.get("indexed", 0)
                 total["skipped"] += result.get("skipped", 0)
                 total["errors"] += result.get("errors", 0)
+                print(f"    batch {batch_num}: +{result.get('indexed', 0)} indexed")
             except Exception as exc:
-                print(f"  ❌ Batch error: {exc}")
+                print(f"  ❌ Batch {batch_num} error: {exc}")
                 total["errors"] += len(batch)
             batch = []
+            if not dry_run:
+                time.sleep(BATCH_SLEEP_S)
 
     if batch:
+        batch_num += 1
         try:
             result = post_batch(pid, batch, dry_run)
             total["indexed"] += result.get("indexed", 0)
             total["skipped"] += result.get("skipped", 0)
             total["errors"] += result.get("errors", 0)
+            print(f"    batch {batch_num}: +{result.get('indexed', 0)} indexed")
         except Exception as exc:
-            print(f"  ❌ Batch error: {exc}")
+            print(f"  ❌ Batch {batch_num} error: {exc}")
             total["errors"] += len(batch)
 
     print(
@@ -164,10 +177,14 @@ def main() -> None:
             print(f"Project ID {args.project_id} not in list.")
             sys.exit(1)
 
-    print(f"Indexing {len(targets)} project(s)...\n")
+    print(f"Indexing {len(targets)} project(s) sequentially (skip_knowledge_extraction=True)...\n")
     for p in targets:
         print(f"→ [{p['id']}] {p['folder']}")
-        index_project(p["id"], p["folder"], args.dry_run)
+        try:
+            index_project(p["id"], p["folder"], args.dry_run)
+        except Exception as exc:
+            print(f"  ❌ Project {p['id']} failed: {exc} — continuing")
+        print()
 
     print("\nDone.")
 
