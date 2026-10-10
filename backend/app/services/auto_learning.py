@@ -199,11 +199,17 @@ class AutoLearningService:
         Get relevant warnings to include in AI prompt.
         Ranks by text-match relevance first, occurrence_count as tiebreaker.
         Suppresses IDE/Gradle/Eclipse noise patterns.
+        All noise patterns are bind parameters — apostrophes are safe as values.
         """
-        noise_filter = " AND ".join(
-            f"error_pattern NOT ILIKE '%{p}%'"
-            for p in self._IDE_NOISE_PATTERNS
+        # Build parameterized noise filter — never string-interpolate pattern values
+        noise_clauses = " AND ".join(
+            f"error_pattern NOT ILIKE :noise_{i}"
+            for i in range(len(self._IDE_NOISE_PATTERNS))
         )
+        noise_params: dict = {
+            f"noise_{i}": f"%{p}%"
+            for i, p in enumerate(self._IDE_NOISE_PATTERNS)
+        }
 
         if file_path:
             query = text(f"""
@@ -220,15 +226,16 @@ class AutoLearningService:
                 FROM learned_errors
                 WHERE project_id = :project_id
                   AND (file_path = :file_path OR occurrence_count >= 3)
-                  AND {noise_filter}
+                  AND {noise_clauses}
                 ORDER BY error_pattern, relevance DESC, occurrence_count DESC
                 LIMIT :limit
             """)
-            params = {
+            params: dict = {
                 "project_id": project_id,
                 "file_path": file_path,
                 "query_text": query_text,
                 "limit": limit,
+                **noise_params,
             }
         else:
             query = text(f"""
@@ -244,11 +251,16 @@ class AutoLearningService:
                 FROM learned_errors
                 WHERE project_id = :project_id
                   AND occurrence_count >= 2
-                  AND {noise_filter}
+                  AND {noise_clauses}
                 ORDER BY relevance DESC, occurrence_count DESC, last_seen DESC
                 LIMIT :limit
             """)
-            params = {"project_id": project_id, "query_text": query_text, "limit": limit}
+            params = {
+                "project_id": project_id,
+                "query_text": query_text,
+                "limit": limit,
+                **noise_params,
+            }
 
         results = self.db.execute(query, params).fetchall()
 

@@ -2555,7 +2555,7 @@ async def query_pitfalls(query: str, project_id: Optional[int] = None) -> str:
         # ── Own project errors ──
         if project_id is not None:
             svc = AutoLearningService(db)
-            warnings = svc.get_warnings_for_prompt(project_id=project_id, limit=5)
+            warnings = svc.get_warnings_for_prompt(project_id=project_id, query_text=query, limit=5)
             for w in warnings:
                 resolution = f" → {w['solution_pattern']}" if w.get("solution_pattern") else ""
                 lines.append(
