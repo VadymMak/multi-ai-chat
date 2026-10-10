@@ -184,8 +184,10 @@ class AutoLearningService:
     _IDE_NOISE_PATTERNS = [
         ".settings", "@types/node", "Cannot find name 'fs'",
         "Cannot find name 'path'", "Cannot find name 'https'",
-        "build path is incomplete", "gradle", "eclipse",
-        "classpath", "jdt", ".classpath",
+        "build path is incomplete", "build path errors",
+        "gradle", "eclipse", "classpath", "jdt", ".classpath",
+        "java.lang.", "java.io.", ".class files",
+        "The type ", "cannot be resolved", "indirectly referenced",
     ]
 
     def get_warnings_for_prompt(
@@ -250,7 +252,16 @@ class AutoLearningService:
                        END AS relevance
                 FROM learned_errors
                 WHERE project_id = :project_id
-                  AND occurrence_count >= 2
+                  AND (
+                      occurrence_count >= 2
+                      OR (
+                          :query_text IS NOT NULL AND (
+                              error_pattern ILIKE '%' || :query_text || '%'
+                              OR error_type ILIKE '%' || :query_text || '%'
+                              OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
+                          )
+                      )
+                  )
                   AND {noise_clauses}
                 ORDER BY relevance DESC, occurrence_count DESC, last_seen DESC
                 LIMIT :limit
