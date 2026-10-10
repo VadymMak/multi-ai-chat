@@ -180,52 +180,78 @@ class AutoLearningService:
     
     # ==================== WARNING GENERATION ====================
     
+    # IDE-noise patterns to suppress from pitfall results
+    _IDE_NOISE_PATTERNS = [
+        ".settings", "@types/node", "Cannot find name 'fs'",
+        "Cannot find name 'path'", "Cannot find name 'https'",
+        "build path is incomplete", "gradle", "eclipse",
+        "classpath", "jdt", ".classpath",
+    ]
+
     def get_warnings_for_prompt(
         self,
         project_id: int,
         file_path: Optional[str] = None,
+        query_text: Optional[str] = None,
         limit: int = 5
     ) -> List[Dict[str, Any]]:
         """
         Get relevant warnings to include in AI prompt.
-        Prioritizes by occurrence_count and recency.
-        
-        Returns list of warnings with pattern, solution, count.
+        Ranks by text-match relevance first, occurrence_count as tiebreaker.
+        Suppresses IDE/Gradle/Eclipse noise patterns.
         """
-        
-        # Build query based on file_path
+        noise_filter = " AND ".join(
+            f"error_pattern NOT ILIKE '%{p}%'"
+            for p in self._IDE_NOISE_PATTERNS
+        )
+
         if file_path:
-            # Get errors for specific file + project-wide common errors
-            query = text("""
+            query = text(f"""
                 SELECT DISTINCT ON (error_pattern)
                     id, error_pattern, error_type, error_code,
-                    solution_pattern, occurrence_count, resolved_count
+                    solution_pattern, occurrence_count, resolved_count,
+                    CASE
+                        WHEN :query_text IS NOT NULL AND (
+                            error_pattern ILIKE '%' || :query_text || '%'
+                            OR error_type ILIKE '%' || :query_text || '%'
+                            OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
+                        ) THEN 1 ELSE 0
+                    END AS relevance
                 FROM learned_errors
                 WHERE project_id = :project_id
                   AND (file_path = :file_path OR occurrence_count >= 3)
-                ORDER BY error_pattern, occurrence_count DESC
+                  AND {noise_filter}
+                ORDER BY error_pattern, relevance DESC, occurrence_count DESC
                 LIMIT :limit
             """)
             params = {
                 "project_id": project_id,
                 "file_path": file_path,
-                "limit": limit
+                "query_text": query_text,
+                "limit": limit,
             }
         else:
-            # Get project-wide common errors
-            query = text("""
+            query = text(f"""
                 SELECT id, error_pattern, error_type, error_code,
-                       solution_pattern, occurrence_count, resolved_count
+                       solution_pattern, occurrence_count, resolved_count,
+                       CASE
+                           WHEN :query_text IS NOT NULL AND (
+                               error_pattern ILIKE '%' || :query_text || '%'
+                               OR error_type ILIKE '%' || :query_text || '%'
+                               OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
+                           ) THEN 1 ELSE 0
+                       END AS relevance
                 FROM learned_errors
                 WHERE project_id = :project_id
                   AND occurrence_count >= 2
-                ORDER BY occurrence_count DESC, last_seen DESC
+                  AND {noise_filter}
+                ORDER BY relevance DESC, occurrence_count DESC, last_seen DESC
                 LIMIT :limit
             """)
-            params = {"project_id": project_id, "limit": limit}
-        
+            params = {"project_id": project_id, "query_text": query_text, "limit": limit}
+
         results = self.db.execute(query, params).fetchall()
-        
+
         warnings = []
         for row in results:
             warnings.append({
@@ -236,9 +262,9 @@ class AutoLearningService:
                 "solution_pattern": row[4],
                 "occurrence_count": row[5],
                 "resolved_count": row[6],
-                "success_rate": row[6] / row[5] if row[5] > 0 else 0
+                "success_rate": row[6] / row[5] if row[5] > 0 else 0,
             })
-        
+
         return warnings
     
     def format_warnings_for_prompt(
