@@ -19,6 +19,11 @@ No exceptions. Even for simple questions.
 - `get_skill "<name>"` — load a skill from the library (e.g. `startup`, `commit-deploy`, `session-end`)
 - `list_skills` — list all skills, or pass `category` to filter
 
+## Error learning loop (WRITE path):
+- Before non-trivial work: call `query_pitfalls(project_id=20)` — avoid known mistakes.
+- When you hit a real error (failing command, stack trace, test failure): call `record_error`.
+- After fixing it: call `record_fix(error_id=..., solution_pattern="one-line fix")`.
+
 ## IMPORTANT:
 - Never skip Brain context step
 - Never answer directly without calling Brain first

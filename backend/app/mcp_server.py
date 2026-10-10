@@ -4382,4 +4382,120 @@ async def verify_claims(
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool — record_error
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def record_error(
+    project_id: int,
+    error_pattern: str,
+    error_type: str,
+    error_code: Optional[str] = None,
+    file_path: Optional[str] = None,
+    line_number: Optional[int] = None,
+    code_snippet: Optional[str] = None,
+) -> str:
+    """
+    Record a real code error so Brain can learn from it and warn future agents.
+
+    Call this when you hit a non-trivial, reproducible error — a failing command,
+    test failure, or stack trace that required investigation to fix. Do NOT call
+    it for routine lint noise that is fixed in seconds.
+
+    After you fix the error, call record_fix with the same error_id so the
+    distiller can convert the resolved error into a reusable skill.
+
+    Args:
+        project_id:    Brain project id (from get_active_project).
+        error_pattern: Short human-readable description of the error
+                       (e.g. "Cannot find module './UserService'").
+        error_type:    One of: import | type | syntax | runtime | lint |
+                       deploy | migration.
+        error_code:    Optional error code, e.g. "TS2307", "E501".
+        file_path:     File where the error occurred (repo-relative).
+        line_number:   Line number.
+        code_snippet:  Up to ~200 chars of the offending code.
+    """
+    db = _open_db()
+    try:
+        from app.services.auto_learning import AutoLearningService
+
+        def _run() -> dict:
+            svc = AutoLearningService(db)
+            return svc.report_error(
+                project_id=project_id,
+                error_pattern=error_pattern,
+                error_type=error_type,
+                error_code=error_code,
+                file_path=file_path,
+                line_number=line_number,
+                code_snippet=code_snippet,
+            )
+
+        result = await asyncio.to_thread(_run)
+        logger.info(
+            "record_error: project=%s type=%s is_new=%s id=%s",
+            project_id, error_type, result.get("is_new"), result.get("error_id"),
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("record_error error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool — record_fix
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def record_fix(
+    error_id: int,
+    solution_pattern: str,
+    fix_method: str = "ai_edit",
+    original_code: Optional[str] = None,
+    fixed_code: Optional[str] = None,
+) -> str:
+    """
+    Mark a previously recorded error as resolved and store the solution.
+
+    Call this right after you successfully fix an error that was recorded with
+    record_error. Providing solution_pattern is required — it becomes the
+    warning text shown to future agents before they make the same mistake.
+
+    Once resolved_count > 0, the weekly distiller can promote this error+fix
+    into a reusable brain_skill automatically.
+
+    Args:
+        error_id:         The id returned by record_error.
+        solution_pattern: One-line description of the fix, e.g.
+                          "Add @types/node to devDependencies".
+        fix_method:       One of: ai_edit | manual | auto_import | refactor.
+        original_code:    The broken snippet (optional, ≤400 chars).
+        fixed_code:       The corrected snippet (optional, ≤400 chars).
+    """
+    db = _open_db()
+    try:
+        from app.services.auto_learning import AutoLearningService
+
+        def _run() -> bool:
+            svc = AutoLearningService(db)
+            return svc.report_fix(
+                error_id=error_id,
+                solution_pattern=solution_pattern,
+                fix_method=fix_method,
+                original_code=original_code,
+                fixed_code=fixed_code,
+            )
+
+        success = await asyncio.to_thread(_run)
+        logger.info("record_fix: error_id=%s success=%s", error_id, success)
+        return json.dumps({"success": success, "error_id": error_id}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("record_fix error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
 __all__ = ["mcp"]
