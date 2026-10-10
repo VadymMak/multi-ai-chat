@@ -57,6 +57,7 @@ class GetWarningsRequest(BaseModel):
     """Request to get warnings for AI prompt"""
     project_id: int
     file_path: Optional[str] = None
+    query_text: Optional[str] = None
     limit: int = 5
 
 
@@ -202,9 +203,10 @@ async def get_warnings(
         warnings = service.get_warnings_for_prompt(
             project_id=request.project_id,
             file_path=request.file_path,
+            query_text=request.query_text,
             limit=request.limit
         )
-        
+
         prompt_text = service.format_warnings_for_prompt(
             project_id=request.project_id,
             file_path=request.file_path
