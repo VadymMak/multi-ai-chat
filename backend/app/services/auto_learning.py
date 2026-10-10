@@ -190,6 +190,30 @@ class AutoLearningService:
         "The type ", "cannot be resolved", "indirectly referenced",
     ]
 
+    @staticmethod
+    def _build_keyword_match(query_text: Optional[str], prefix: str = "kw") -> tuple[str, dict]:
+        """
+        Split query_text into keywords and build per-word ILIKE conditions.
+        Returns (sql_fragment, params_dict).
+        sql_fragment is TRUE/FALSE, or OR-joined ILIKE checks across
+        error_pattern and solution_pattern.
+        Words ≤ 2 chars are skipped (stop-word-like).
+        """
+        if not query_text:
+            return "FALSE", {}
+        keywords = [w.strip() for w in query_text.split() if len(w.strip()) > 2]
+        if not keywords:
+            return "FALSE", {}
+        parts = [
+            f"(error_pattern ILIKE :{prefix}_{i} "
+            f"OR COALESCE(solution_pattern,'') ILIKE :{prefix}_{i} "
+            f"OR COALESCE(error_type,'') ILIKE :{prefix}_{i})"
+            for i in range(len(keywords))
+        ]
+        sql = "(" + " OR ".join(parts) + ")"
+        params = {f"{prefix}_{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
+        return sql, params
+
     def get_warnings_for_prompt(
         self,
         project_id: int,
@@ -199,11 +223,11 @@ class AutoLearningService:
     ) -> List[Dict[str, Any]]:
         """
         Get relevant warnings to include in AI prompt.
-        Ranks by text-match relevance first, occurrence_count as tiebreaker.
-        Suppresses IDE/Gradle/Eclipse noise patterns.
-        All noise patterns are bind parameters — apostrophes are safe as values.
+        Ranks by text-match relevance first (keyword split), occurrence_count as tiebreaker.
+        Suppresses IDE/Gradle/Eclipse/Java noise patterns.
+        All filter values are bind parameters — apostrophes are safe.
         """
-        # Build parameterized noise filter — never string-interpolate pattern values
+        # Parameterized noise filter — never string-interpolate pattern values
         noise_clauses = " AND ".join(
             f"error_pattern NOT ILIKE :noise_{i}"
             for i in range(len(self._IDE_NOISE_PATTERNS))
@@ -213,18 +237,15 @@ class AutoLearningService:
             for i, p in enumerate(self._IDE_NOISE_PATTERNS)
         }
 
+        # Keyword-split match: each word becomes a separate ILIKE bind param
+        kw_sql, kw_params = self._build_keyword_match(query_text, prefix="kw")
+
         if file_path:
             query = text(f"""
                 SELECT DISTINCT ON (error_pattern)
                     id, error_pattern, error_type, error_code,
                     solution_pattern, occurrence_count, resolved_count,
-                    CASE
-                        WHEN :query_text IS NOT NULL AND (
-                            error_pattern ILIKE '%' || :query_text || '%'
-                            OR error_type ILIKE '%' || :query_text || '%'
-                            OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
-                        ) THEN 1 ELSE 0
-                    END AS relevance
+                    CASE WHEN {kw_sql} THEN 1 ELSE 0 END AS relevance
                 FROM learned_errors
                 WHERE project_id = :project_id
                   AND (file_path = :file_path OR occurrence_count >= 3)
@@ -235,42 +256,27 @@ class AutoLearningService:
             params: dict = {
                 "project_id": project_id,
                 "file_path": file_path,
-                "query_text": query_text,
                 "limit": limit,
                 **noise_params,
+                **kw_params,
             }
         else:
             query = text(f"""
                 SELECT id, error_pattern, error_type, error_code,
                        solution_pattern, occurrence_count, resolved_count,
-                       CASE
-                           WHEN :query_text IS NOT NULL AND (
-                               error_pattern ILIKE '%' || :query_text || '%'
-                               OR error_type ILIKE '%' || :query_text || '%'
-                               OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
-                           ) THEN 1 ELSE 0
-                       END AS relevance
+                       CASE WHEN {kw_sql} THEN 1 ELSE 0 END AS relevance
                 FROM learned_errors
                 WHERE project_id = :project_id
-                  AND (
-                      occurrence_count >= 2
-                      OR (
-                          :query_text IS NOT NULL AND (
-                              error_pattern ILIKE '%' || :query_text || '%'
-                              OR error_type ILIKE '%' || :query_text || '%'
-                              OR COALESCE(solution_pattern, '') ILIKE '%' || :query_text || '%'
-                          )
-                      )
-                  )
+                  AND (occurrence_count >= 2 OR {kw_sql})
                   AND {noise_clauses}
                 ORDER BY relevance DESC, occurrence_count DESC, last_seen DESC
                 LIMIT :limit
             """)
             params = {
                 "project_id": project_id,
-                "query_text": query_text,
                 "limit": limit,
                 **noise_params,
+                **kw_params,
             }
 
         results = self.db.execute(query, params).fetchall()
