@@ -31,6 +31,12 @@ from app.config.debate_prompts import (
 
 logger = logging.getLogger(__name__)
 
+# Module-level alias so evals can monkeypatch without touching verify_manager.
+try:
+    from app.services.verify_manager import run_verify as _debate_verify
+except Exception:  # pragma: no cover
+    _debate_verify = None  # type: ignore
+
 # ── Role seat fallback chains (first available wins) ─────────────────────────
 _PROPOSER_CHAIN  = ["claude-sonnet-4.5", "gpt-4o", "grok-3"]
 _CRITIC_CHAIN    = ["grok-3", "claude-sonnet-4.5", "gpt-4o"]
@@ -44,6 +50,9 @@ _CAP_REBUTTAL  = 600
 
 # Per-role wall-clock timeout (seconds)
 _ROLE_TIMEOUT = 60.0
+
+# Cap on claims sent to verify_manager per debate (cost/latency guard)
+_MAX_VERIFY_CLAIMS = 5
 
 # Rough cost rates (input_per_1m, output_per_1m) in USD
 _COST_RATES: Dict[str, Tuple[float, float]] = {
@@ -162,12 +171,89 @@ async def _call_role(
         raise   # model failure OR span exit failure — propagate to caller
 
 
+# ── Verify annotation ────────────────────────────────────────────────────────
+
+async def _annotate_with_verify(
+    final_answer: str,
+    trace_obj: Any,
+    current_confidence: Optional[int],
+    notes: List[str],
+    unresolved: List[str],
+) -> Tuple[Dict[str, Any], Optional[int], List[str], List[str]]:
+    """
+    Best-effort verify annotation. Never raises — returns unchanged inputs on error.
+    Returns (verified_claims_block, adjusted_confidence, updated_notes, updated_unresolved).
+    """
+    _vfn = _debate_verify  # read module attr so evals can monkeypatch
+    if _vfn is None:
+        return {"error": "verify_manager unavailable"}, current_confidence, notes, unresolved
+
+    empty_block: Dict[str, Any] = {"checked": 0, "verified": 0, "refuted_or_unverified": 0}
+    try:
+        report = await asyncio.to_thread(
+            _vfn, final_answer, _MAX_VERIFY_CLAIMS, True, False,
+        )
+    except Exception as exc:
+        logger.debug("debate verify annotation failed (non-fatal): %s", exc)
+        return {**empty_block, "error": str(exc)}, current_confidence, notes, unresolved
+
+    # Record a best-effort verify span
+    if trace_obj is not None:
+        try:
+            from app.services.trace_service import trace_span
+            stats = report.get("stats", {})
+            async with trace_span(
+                trace_obj, "verify", "verify_annotation",
+                input_summary=f"max_claims={_MAX_VERIFY_CLAIMS}",
+            ) as span:
+                span["output_summary"] = (
+                    f"checked={stats.get('claims_total', 0)} "
+                    f"refuted={stats.get('refuted', 0)} "
+                    f"unchecked={stats.get('unchecked', 0)}"
+                )
+        except Exception:
+            pass
+
+    stats = report.get("stats", {})
+    refuted_count   = len(report.get("refuted", []))
+    # "unverified" = had a source but couldn't confirm it
+    unchecked_list  = report.get("unchecked", [])
+    unverified_count = sum(
+        1 for c in unchecked_list
+        if c.get("source") and c.get("reason") not in ("no_source_given",)
+    )
+    bad_count = refuted_count + unverified_count
+
+    block: Dict[str, Any] = {
+        "checked":              stats.get("claims_total", 0),
+        "verified":             stats.get("verified", 0),
+        "refuted_or_unverified": bad_count,
+    }
+
+    new_conf = current_confidence
+    new_notes = list(notes)
+    new_unresolved = list(unresolved)
+
+    if bad_count > 0:
+        if new_conf is not None:
+            new_conf = max(0, new_conf - 15 * bad_count)
+        new_notes.append(f"verify_penalty:{bad_count}_claims")
+        for c in report.get("refuted", []):
+            new_unresolved.append(f"[verify-refuted] {c.get('claim','')[:120]}")
+        for c in unchecked_list:
+            if c.get("source") and c.get("reason") not in ("no_source_given",):
+                new_unresolved.append(f"[verify-unconfirmed] {c.get('claim','')[:120]}")
+
+    return block, new_conf, new_notes, new_unresolved
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def run_debate(
     question: str,
     context: str = "",
     rounds: int = 1,
+    verify: bool = True,
 ) -> Dict[str, Any]:
     """
     Stateless async multi-model debate.
@@ -175,7 +261,11 @@ async def run_debate(
     rounds=1: proposer → critic → assembler
     rounds=2: proposer → critic → proposer-rebuttal → assembler
 
-    Returns the Phase-1 result dict (see mcp_server debate tool for full schema).
+    verify=True (default): after the assembler, run_verify annotates the
+    final_answer with checkable claims. Refuted/unverified claims lower
+    confidence by 15 each (floor 0) and appear in unresolved_disagreements.
+    The result gains a "verified_claims" summary block. Best-effort: errors
+    in the verify step never break the debate result.
     """
     debate_id = str(uuid.uuid4())
     t_start   = time.perf_counter()
@@ -253,7 +343,7 @@ async def run_debate(
 
     try:
         result = await _run_rounds(
-            question=question, context=context, rounds=rounds,
+            question=question, context=context, rounds=rounds, verify=verify,
             proposer_key=proposer_key, critic_key=critic_key, assembler_key=assembler_key,
             debate_id=debate_id, t_start=t_start, notes=notes, total_cost=total_cost,
             trace_obj=_trace_obj,
@@ -273,6 +363,7 @@ async def _run_rounds(
     question: str,
     context: str,
     rounds: int,
+    verify: bool,
     proposer_key: str,
     critic_key: Optional[str],
     assembler_key: Optional[str],
@@ -395,6 +486,23 @@ async def _run_rounds(
             "what_was_dropped_or_fixed": assembler_parsed.get("what_was_dropped_or_fixed", []),
         }
 
+    # ── VERIFY ANNOTATION (best-effort, never breaks result) ─────────────────
+    verified_claims_block: Optional[Dict[str, Any]] = None
+    if verify and result.get("final_answer"):
+        try:
+            vc_block, new_conf, notes, new_unresolved = await _annotate_with_verify(
+                final_answer=result["final_answer"],
+                trace_obj=trace_obj,
+                current_confidence=result.get("confidence"),
+                notes=notes,
+                unresolved=list(result.get("unresolved_disagreements", [])),
+            )
+            verified_claims_block = vc_block
+            result["confidence"] = new_conf
+            result["unresolved_disagreements"] = new_unresolved
+        except Exception as exc:
+            logger.debug("verify annotation outer error (non-fatal): %s", exc)
+
     result.update({
         "roles": {
             "proposer":  {"model": proposer_key,                    "summary": proposer_text[:300]},
@@ -405,6 +513,8 @@ async def _run_rounds(
         "cost_estimate_usd": round(total_cost, 4),
         "latency_ms":        latency_ms,
     })
+    if verified_claims_block is not None:
+        result["verified_claims"] = verified_claims_block
     if notes:
         result["notes"] = notes
 

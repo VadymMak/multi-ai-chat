@@ -326,4 +326,105 @@ EVAL_CASES = [
         },
         "assert": "deleted_response",
     },
+
+    # ── debate suite (stubbed — no live model calls) ──────────────────────────
+    # All debate cases monkeypatch ask_model (and optionally _debate_verify)
+    # so the full eval run stays cheap and deterministic.
+    {
+        "name": "debate_schema_check",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "run_debate() with stubbed ask_model returns all required keys; "
+            "confidence is int 0-100 (positive path, verify=False to skip annotation)"
+        ),
+        "input": {
+            "kwargs": {
+                "question": "stub: optimistic vs pessimistic locking?",
+                "verify": False,
+            },
+            "ask_model_ordered": [
+                # proposer → plain text
+                "Prefer optimistic locking for high-write counters.",
+                # critic → plain text with numbered flaw
+                "1. Retry storms under heavy load.",
+                # assembler → valid JSON
+                '{"final_answer":"Use optimistic locking.","confidence":75,"unresolved_disagreements":[],"key_risks_still_present":["retry storms"],"what_survived":["MVCC alignment"],"what_was_dropped_or_fixed":[]}',
+            ],
+        },
+        "assert": "has_all_keys",
+        "required_keys": [
+            "final_answer", "confidence", "unresolved_disagreements",
+            "key_risks_still_present", "what_survived", "what_was_dropped_or_fixed",
+            "roles", "debate_id", "cost_estimate_usd", "latency_ms",
+        ],
+    },
+    {
+        "name": "debate_confidence_int",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "confidence from stub assembler (75) is an int in [0,100] — "
+            "not null, not a string, not out of range"
+        ),
+        "input": {
+            "kwargs": {"question": "stub question", "verify": False},
+            "ask_model_ordered": [
+                "Proposer answer.",
+                "1. Flaw one.",
+                '{"final_answer":"Answer.","confidence":75,"unresolved_disagreements":[],"key_risks_still_present":[],"what_survived":[],"what_was_dropped_or_fixed":[]}',
+            ],
+        },
+        "assert": "confidence_in_range",
+    },
+    {
+        "name": "debate_critic_failure_penalty",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "When critic model raises (RuntimeError), run_debate applies −20 "
+            "confidence penalty and records 'critic_unavailable' in notes; "
+            "debate still returns a final_answer (graceful degradation)"
+        ),
+        "input": {
+            "kwargs": {"question": "stub question", "verify": False},
+            "ask_model_ordered": [
+                # proposer OK
+                "Proposer answer.",
+                # critic RAISES — sentinel value; runner replaces with RuntimeError
+                "__CRITIC_RAISES__",
+                # assembler OK (gets called after critic fails)
+                '{"final_answer":"Degraded answer.","confidence":80,"unresolved_disagreements":[],"key_risks_still_present":[],"what_survived":[],"what_was_dropped_or_fixed":[]}',
+            ],
+        },
+        "assert": "critic_failure_degraded",
+    },
+    {
+        "name": "debate_verify_reduces_confidence",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "When _debate_verify returns a refuted claim, confidence drops by 15 "
+            "and 'verified_claims' block appears with refuted_or_unverified > 0"
+        ),
+        "input": {
+            "kwargs": {"question": "stub question", "verify": True},
+            "ask_model_ordered": [
+                "Proposer answer with a wrong claim: PostgreSQL 17 added SKIP LOCKED in 2024.",
+                "1. Flaw.",
+                '{"final_answer":"Final answer.","confidence":80,"unresolved_disagreements":[],"key_risks_still_present":[],"what_survived":[],"what_was_dropped_or_fixed":[]}',
+            ],
+            # Stub run_verify to return a report with one refuted claim
+            "verify_stub": {
+                "verified": [],
+                "refuted": [{"claim": "PostgreSQL 17 added SKIP LOCKED in 2024", "source": "https://example.com", "reason": "not_found_in_text"}],
+                "unchecked": [],
+                "stats": {"claims_total": 1, "verified": 0, "refuted": 1, "unchecked": 0, "opinions_skipped": 0, "fetch_failures": 0},
+                "elapsed_s": 0.1,
+            },
+        },
+        "assert": "verify_reduces_confidence",
+        "base_confidence": 80,
+        "expected_penalty": 15,
+    },
 ]

@@ -374,6 +374,107 @@ async def _run_guardrail_case(case: dict) -> dict:
     return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
 
 
+async def _run_debate_stubbed_case(case: dict) -> dict:
+    """
+    Runs run_debate() with ask_model monkeypatched to return canned responses.
+    Optionally patches _debate_verify via verify_stub in the input.
+    No live network calls — cheap and deterministic.
+    """
+    import app.services.debate_engine as _engine_mod
+
+    inp = case["input"]
+    ordered_responses: List[str] = inp.get("ask_model_ordered", [])
+    verify_stub = inp.get("verify_stub")
+
+    call_counter = {"n": 0}
+
+    def _stubbed_ask_model(messages, model_key=None, **kwargs):  # type: ignore[override]
+        idx = call_counter["n"] % max(len(ordered_responses), 1)
+        call_counter["n"] += 1
+        resp = ordered_responses[idx] if ordered_responses else "stub response"
+        if resp == "__CRITIC_RAISES__":
+            raise RuntimeError("stubbed critic failure")
+        return resp
+
+    # Save originals
+    orig_ask_model = _engine_mod.ask_model
+    orig_debate_verify = _engine_mod._debate_verify
+
+    try:
+        _engine_mod.ask_model = _stubbed_ask_model  # type: ignore[assignment]
+
+        if verify_stub is not None:
+            _engine_mod._debate_verify = lambda text, max_claims, fetch, high_assurance: verify_stub  # type: ignore[assignment]
+        else:
+            _engine_mod._debate_verify = None  # type: ignore[assignment]
+
+        result = await _engine_mod.run_debate(**inp.get("kwargs", {}))
+
+    finally:
+        _engine_mod.ask_model = orig_ask_model  # type: ignore[assignment]
+        _engine_mod._debate_verify = orig_debate_verify  # type: ignore[assignment]
+
+    assert_type = case["assert"]
+
+    if assert_type == "has_all_keys":
+        required = case.get("required_keys", [])
+        missing = [k for k in required if k not in result]
+        return {
+            "passed": not missing,
+            "details": {
+                "keys_present": sorted(result.keys()),
+                "missing": missing,
+            },
+        }
+
+    if assert_type == "confidence_in_range":
+        conf = result.get("confidence")
+        passed = isinstance(conf, int) and 0 <= conf <= 100
+        return {
+            "passed": passed,
+            "details": {"confidence": conf, "type": type(conf).__name__},
+        }
+
+    if assert_type == "critic_failure_degraded":
+        has_final    = bool(result.get("final_answer"))
+        has_notes    = any("critic" in str(n) for n in result.get("notes", []))
+        # Assembler returned confidence 80; critic penalty −20 → 60
+        conf         = result.get("confidence")
+        conf_reduced = conf is not None and conf <= 79  # 80 − 20 = 60
+        return {
+            "passed": has_final and has_notes and conf_reduced,
+            "details": {
+                "has_final_answer": has_final,
+                "critic_note_found": has_notes,
+                "confidence": conf,
+                "notes": result.get("notes"),
+            },
+        }
+
+    if assert_type == "verify_reduces_confidence":
+        base   = case.get("base_confidence", 80)
+        penalty = case.get("expected_penalty", 15)
+        conf   = result.get("confidence")
+        vc     = result.get("verified_claims")
+        passed = (
+            conf is not None
+            and conf <= base - penalty
+            and vc is not None
+            and vc.get("refuted_or_unverified", 0) > 0
+        )
+        return {
+            "passed": passed,
+            "details": {
+                "confidence": conf,
+                "base_confidence": base,
+                "expected_max": base - penalty,
+                "verified_claims": vc,
+            },
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {assert_type}"}}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,6 +487,7 @@ _DISPATCHERS = {
     "extract_claims":      _run_extract_claims_case,
     "skip":                _run_skip_case,
     "guardrail":           _run_guardrail_case,
+    "debate_stubbed":      _run_debate_stubbed_case,
 }
 
 

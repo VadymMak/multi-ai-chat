@@ -28,3 +28,22 @@ No exceptions. Even for simple questions.
 - Never skip Brain context step
 - Never answer directly without calling Brain first
 - Brain returns only relevant 4K tokens — fast and cheap
+
+## When to use debate()
+
+Call `debate()` ONLY when ALL of the following hold:
+  (a) The problem involves **architecture, concurrency, security, data integrity,
+      or an irreversible decision** — OR the agent already produced two conflicting
+      answers this session.
+  (b) A single-model answer is **low-confidence or high-ambiguity**.
+  (c) The **cost of being wrong is high** (user-facing breakage, data loss,
+      significant rework).
+
+**NEVER** call `debate()` for:
+- Routine codegen or refactoring
+- Simple explanations or "how to use X library" questions
+- Questions with a well-known deterministic answer
+- Tasks where a single confident model answer is sufficient
+
+`debate()` fires three paid models (~$0.10–0.40 per call) and takes 40–90s.
+Use it sparingly as a deliberate escalation, not as a default answer path.
