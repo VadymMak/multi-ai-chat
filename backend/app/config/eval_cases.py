@@ -476,4 +476,69 @@ EVAL_CASES = [
         "assert": "context_proposer_only",
         "context_marker": "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER",
     },
+
+    # Phase 4 — async job start/poll (stubbed, no live calls, no real DB required)
+    {
+        "name": "debate_job_start_poll",
+        "suite": "debate",
+        "kind": "debate_job",
+        "description": (
+            "debate_start() returns {debate_id, status='running'} instantly; "
+            "polling debate_result() after completion returns status='done' "
+            "with full result schema (cost block, final_answer, roles)"
+        ),
+        "input": {
+            "kwargs": {
+                "question": "stub job question",
+                "rounds": 1,
+                "verify": False,
+            },
+            "stub_result": {
+                "final_answer": "stubbed answer",
+                "confidence": 70,
+                "unresolved_disagreements": [],
+                "key_risks_still_present": [],
+                "what_survived": [],
+                "what_was_dropped_or_fixed": [],
+                "roles": {"proposer": {}, "critic": {}, "assembler": {}},
+                "debate_id": "stub-id",
+                "cost": {
+                    "total_usd": 0.001,
+                    "by_role": {
+                        "proposer_usd": 0.0005, "critic_usd": 0.0003,
+                        "assembler_usd": 0.0002, "verify_usd": 0.0,
+                    },
+                    "tokens": {
+                        "proposer_in": 100, "proposer_out": 50,
+                        "critic_in": 80,   "critic_out":  30,
+                        "assembler_in": 60, "assembler_out": 20,
+                    },
+                    "latency_ms": 100,
+                },
+                "cost_estimate_usd": 0.001,
+                "latency_ms": 100,
+                "notes": [],
+            },
+        },
+        "assert": "job_start_and_poll",
+    },
+    {
+        "name": "debate_job_timeout",
+        "suite": "debate",
+        "kind": "debate_job",
+        "description": (
+            "When run_debate() hangs longer than DEBATE_JOB_MAX_S, "
+            "the job transitions to status='timeout' without crashing the worker"
+        ),
+        "input": {
+            "kwargs": {
+                "question": "stub timeout question",
+                "rounds": 1,
+                "verify": False,
+            },
+            "stub_hang": True,
+            "job_max_s_override": 0.05,
+        },
+        "assert": "job_timeout",
+    },
 ]

@@ -4957,6 +4957,10 @@ async def debate(
     exceeds DEBATE_MAX_USD (default $0.40).
     Grok is skipped gracefully if GROK_API_KEY is not configured.
 
+    BLOCKING — use ONLY for rounds=1 without verify=True for quick questions.
+    For rounds=2 OR verify=True (heavy, 60-90s), use debate_start + poll
+    debate_result instead to avoid request timeouts.
+
     WHEN TO USE debate():
     Call ONLY when ALL hold:
       (a) the problem involves architecture, concurrency, security, data integrity,
@@ -5093,6 +5097,88 @@ async def debate_cost_report(period: str = "today") -> str:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     finally:
         db.close()
+
+
+@mcp.tool()
+async def debate_start(
+    question: str,
+    project_id: Optional[int] = None,
+    folder_identifier: Optional[str] = None,
+    rounds: int = 1,
+    verify: bool = True,
+) -> str:
+    """
+    Start an async debate job and return IMMEDIATELY with {debate_id, status:"running"}.
+
+    The debate runs in a background asyncio task with a hard timeout
+    (default 180s, set by DEBATE_JOB_MAX_S).  Poll debate_result(debate_id)
+    until status != "running" (typically every 5s, give up after ~3 min).
+
+    Use this instead of debate() for:
+      - rounds=2 (adds a rebuttal round, ~90s)
+      - verify=True with rounds=1 (adds claim verification, ~60-90s)
+      - any debate where you need it to be project-grounded via smart context
+
+    project_id or folder_identifier: builds ONE compressed context and injects
+    it into the PROPOSER ONLY (same as debate_with_context).
+
+    Returns: {debate_id, status:"running"}
+    Possible final statuses from debate_result: "done" | "error" | "timeout"
+    """
+    try:
+        from app.services.debate_job_service import start_job
+        debate_id = await start_job(
+            question=question,
+            project_id=project_id,
+            folder_identifier=folder_identifier,
+            rounds=rounds,
+            verify=verify,
+        )
+        return json.dumps({"debate_id": debate_id, "status": "running"}, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("debate_start error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def debate_result(debate_id: str) -> str:
+    """
+    Poll for the result of an async debate started with debate_start().
+
+    Returns one of:
+      {status:"running", debate_id}           — still in progress, poll again
+      {status:"done", debate_id, final_answer, confidence, cost, ...}  — complete
+      {status:"error",   debate_id, error}    — debate failed
+      {status:"timeout", debate_id, error}    — exceeded hard cap (default 180s)
+      {status:"not_found", debate_id}         — unknown debate_id
+
+    When status=="done", the full debate result is merged in:
+      final_answer, confidence (0-100), cost {total_usd, by_role, tokens},
+      unresolved_disagreements, key_risks_still_present, what_survived,
+      what_was_dropped_or_fixed, verified_claims (if verify=True),
+      roles {proposer, critic, assembler}, latency_ms.
+
+    Poll every ~5s. If status is still "running" after 3 minutes, something
+    is wrong — check debate_cost_report() for any stuck jobs.
+    """
+    try:
+        from app.services.debate_job_service import get_job
+        job = await get_job(debate_id)
+        status = job.get("status", "not_found")
+
+        if status == "done" and job.get("result"):
+            response: dict = dict(job["result"])
+            response["status"] = "done"
+            response["debate_id"] = debate_id
+        else:
+            response = {"debate_id": debate_id, "status": status}
+            if job.get("error"):
+                response["error"] = job["error"]
+
+        return _cap_json(response)
+    except Exception as exc:
+        logger.error("debate_result error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
 __all__ = ["mcp"]

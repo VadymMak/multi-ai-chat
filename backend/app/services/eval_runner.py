@@ -519,6 +519,88 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
     return {"passed": False, "details": {"reason": f"unknown assert: {assert_type}"}}
 
 
+async def _run_debate_job_case(case: dict) -> dict:
+    """
+    Tests the async debate_start / debate_result job flow.
+
+    Uses an in-memory _job_store and a stubbed _debate_run_fn so no DB table or
+    live model calls are needed — cheap and deterministic on Railway and locally.
+
+    assert="job_start_and_poll"  — debate_id returned, status transitions to "done"
+    assert="job_timeout"         — stub that hangs → status transitions to "timeout"
+    """
+    import app.services.debate_job_service as _job_mod
+
+    inp = case["input"]
+    kwargs: dict = inp.get("kwargs", {})
+    stub_result: Optional[dict] = inp.get("stub_result")
+    stub_hang: bool = inp.get("stub_hang", False)
+    job_max_s_override: Optional[float] = inp.get("job_max_s_override")
+
+    # ── Build stubs ────────────────────────────────────────────────────────────
+    async def _fast_stub(**kw):
+        return stub_result or {}
+
+    async def _hang_stub(**kw):
+        await asyncio.sleep(9999)  # hangs until wait_for timeout
+
+    orig_run_fn    = _job_mod._debate_run_fn
+    orig_job_store = _job_mod._job_store
+    orig_max_s     = _job_mod._JOB_MAX_S
+
+    _job_mod._debate_run_fn = _hang_stub if stub_hang else _fast_stub
+    _job_mod._job_store = {}
+    if job_max_s_override is not None:
+        _job_mod._JOB_MAX_S = float(job_max_s_override)
+
+    try:
+        debate_id = await _job_mod.start_job(**kwargs)
+
+        # Let the background task run (stub is instant or hits the tiny timeout)
+        sleep_s = max(0.3, (job_max_s_override or 0) + 0.2)
+        await asyncio.sleep(sleep_s)
+
+        job = await _job_mod.get_job(debate_id)
+        status = job.get("status")
+
+        if case["assert"] == "job_start_and_poll":
+            has_id   = bool(debate_id) and isinstance(debate_id, str) and len(debate_id) > 8
+            is_done  = status == "done"
+            result   = job.get("result") or {}
+            has_fa   = bool(result.get("final_answer"))
+            has_cost = isinstance(result.get("cost"), dict)
+            passed   = has_id and is_done and has_fa and has_cost
+            return {
+                "passed": passed,
+                "details": {
+                    "debate_id":       debate_id,
+                    "poll_status":     status,
+                    "has_final_answer": has_fa,
+                    "has_cost_block":   has_cost,
+                },
+            }
+
+        if case["assert"] == "job_timeout":
+            is_timeout = status == "timeout"
+            has_error  = bool(job.get("error"))
+            passed = is_timeout and has_error
+            return {
+                "passed": passed,
+                "details": {
+                    "debate_id":  debate_id,
+                    "poll_status": status,
+                    "error":       job.get("error"),
+                },
+            }
+
+        return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+    finally:
+        _job_mod._debate_run_fn = orig_run_fn
+        _job_mod._job_store     = orig_job_store
+        _job_mod._JOB_MAX_S     = orig_max_s
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,6 +614,7 @@ _DISPATCHERS = {
     "skip":                _run_skip_case,
     "guardrail":           _run_guardrail_case,
     "debate_stubbed":      _run_debate_stubbed_case,
+    "debate_job":          _run_debate_job_case,
 }
 
 

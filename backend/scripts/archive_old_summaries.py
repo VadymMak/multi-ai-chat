@@ -189,6 +189,45 @@ def _prune_traces(conn, dry_run: bool) -> dict:
     }
 
 
+_DEBATE_JOB_RETENTION_DAYS = 14  # delete debate_jobs older than this
+
+
+def _prune_debate_jobs(conn, dry_run: bool) -> dict:
+    """
+    Delete debate_jobs rows older than _DEBATE_JOB_RETENTION_DAYS days.
+    Best-effort and idempotent — skipped silently if the table doesn't exist.
+    """
+    tbl_exists = conn.execute(text(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name='debate_jobs'"
+    )).scalar() or 0
+    if not tbl_exists:
+        return {"skipped": True, "reason": "debate_jobs table does not exist yet"}
+
+    old_ids = conn.execute(text(
+        "SELECT id FROM debate_jobs "
+        "WHERE created_at < NOW() - INTERVAL ':days days'"
+        .replace(":days days", f"{_DEBATE_JOB_RETENTION_DAYS} days")
+    )).fetchall()
+
+    deleted = 0
+    if old_ids and not dry_run:
+        id_list = [r[0] for r in old_ids]
+        r = conn.execute(text(
+            "DELETE FROM debate_jobs WHERE id = ANY(:ids)"
+        ), {"ids": id_list})
+        conn.commit()
+        deleted = r.rowcount or 0
+    else:
+        deleted = len(old_ids)
+
+    return {
+        "dry_run":        dry_run,
+        "deleted":        deleted,
+        "retention_days": _DEBATE_JOB_RETENTION_DAYS,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Soft retention: archive old SESSION_SUMMARY rows per project."
@@ -232,6 +271,20 @@ def main() -> None:
                   f"(>last {TRACE_RETENTION_MAX})")
     except Exception as exc:
         print(f"  Trace pruning error (non-fatal): {exc}")
+
+    # ── Debate job pruning (best-effort) ───────────────────────────
+    print("\n── Debate job retention ──────────────────────────────────")
+    try:
+        with engine.connect() as conn:
+            job_stats = _prune_debate_jobs(conn, args.dry_run)
+        if job_stats.get("skipped"):
+            print(f"  Skipped: {job_stats.get('reason')}")
+        else:
+            action_word = "would delete" if args.dry_run else "deleted"
+            print(f"  {action_word} {job_stats['deleted']} debate_job(s) "
+                  f"(>{_DEBATE_JOB_RETENTION_DAYS}d)")
+    except Exception as exc:
+        print(f"  Debate job pruning error (non-fatal): {exc}")
 
     if args.prune_traces_only:
         print("\nDone (--prune-traces-only).")

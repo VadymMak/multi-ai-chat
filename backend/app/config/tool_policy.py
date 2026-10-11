@@ -76,6 +76,8 @@ TOOL_CLASS: dict[str, str] = {
     "debate":                     "write",
     "debate_with_context":        "write",
     "debate_cost_report":         "read",
+    "debate_start":               "write",
+    "debate_result":              "read",
 
     # ── destructive ───────────────────────────────────────────────────────────
     "registry_delete":            "destructive",

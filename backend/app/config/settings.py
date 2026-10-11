@@ -190,6 +190,8 @@ class _Settings:
 
     # Debate engine cost circuit-breaker (USD per debate)
     DEBATE_MAX_USD: float = float(os.environ.get("DEBATE_MAX_USD", "0.40"))
+    # Hard timeout for async debate jobs (seconds); default 180s
+    DEBATE_JOB_MAX_S: float = float(os.environ.get("DEBATE_JOB_MAX_S", "180"))
     GROK_VISION_MODEL: str = _getenv_str("GROK_VISION_MODEL", "grok-4.3")
     # Provider try-order for /chat: comma-separated gpt|claude|grok
     TELEGRAM_CHAT_PROVIDER_ORDER: tuple[str, ...] = (

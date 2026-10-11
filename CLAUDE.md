@@ -31,7 +31,7 @@ No exceptions. Even for simple questions.
 
 ## When to use debate()
 
-Call `debate()` ONLY when ALL of the following hold:
+Call a debate ONLY when ALL of the following hold:
   (a) The problem involves **architecture, concurrency, security, data integrity,
       or an irreversible decision** — OR the agent already produced two conflicting
       answers this session.
@@ -39,11 +39,34 @@ Call `debate()` ONLY when ALL of the following hold:
   (c) The **cost of being wrong is high** (user-facing breakage, data loss,
       significant rework).
 
-**NEVER** call `debate()` for:
+**NEVER** call debate for:
 - Routine codegen or refactoring
 - Simple explanations or "how to use X library" questions
 - Questions with a well-known deterministic answer
 - Tasks where a single confident model answer is sufficient
+
+### Which tool to use
+
+| Scenario | Tool |
+|---|---|
+| rounds=1, verify=False, quick question | `debate()` — blocking, fast |
+| rounds=1, verify=True OR rounds=2 | **`debate_start()` + poll `debate_result()`** |
+| project-grounded (context injection) | **`debate_start(project_id=…)` + poll** |
+
+`debate_start()` returns `{debate_id, status:"running"}` immediately.
+Poll `debate_result(debate_id)` every ~5 s until `status != "running"`.
+Always pass `project_id` or `folder_identifier` so the debate is grounded.
+Give up after 3 minutes if still running.
+
+```
+debate_id = debate_start(question=..., project_id=20, rounds=2, verify=True)
+# poll loop:
+while True:
+    r = debate_result(debate_id)
+    if r.status != "running":
+        break
+    sleep(5)
+```
 
 `debate()` fires three paid models (~$0.10–0.40 per call) and takes 40–90s.
 Use it sparingly as a deliberate escalation, not as a default answer path.
