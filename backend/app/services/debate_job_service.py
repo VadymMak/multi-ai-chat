@@ -76,6 +76,55 @@ def _debate_analysis_gate(question: str, force: bool) -> Optional[dict]:
     }
 
 
+def _estimate_debate_cost(rounds: int, verify: bool) -> tuple:
+    """Returns (estimated_cost_usd, estimated_latency_s) for the given debate config."""
+    cost = 0.06 if rounds == 1 else 0.12
+    latency = 35.0 if rounds == 1 else 70.0
+    if verify:
+        cost += 0.04
+        latency += 25.0
+    return round(cost, 2), round(latency, 0)
+
+
+def _debate_confirm_gate(
+    question: str,
+    rounds: int,
+    verify: bool,
+    confirmed: bool,
+    force: bool = False,
+) -> Optional[dict]:
+    """
+    Two-level gate. Returns a gate-response dict to short-circuit, or None to proceed.
+
+    1. confirmed=True → proceed (bypasses all gates — user already said yes)
+    2. Keyword analysis gate (force bypasses this level only):
+         → {skipped:true, ...} for pure analysis/review tasks
+    3. Confirmation gate:
+         → {needs_confirmation:true, ...} for real decisions pending user approval
+
+    Only confirmed=True actually runs debate; everything else is a preview/skip.
+    """
+    if confirmed:
+        return None
+    # Level 1: analysis keyword gate
+    analysis = _debate_analysis_gate(question, force)
+    if analysis:
+        return analysis
+    # Level 2: confirmation required — never auto-fire on a real decision
+    cost, latency = _estimate_debate_cost(rounds, verify)
+    q_short = (question[:120] + "…") if len(question) > 120 else question
+    return {
+        "needs_confirmation": True,
+        "estimated_cost_usd": cost,
+        "estimated_latency_s": latency,
+        "question_summary": q_short,
+        "reason": (
+            "Debate is a paid escalation (~$0.1, ~60s). Do the direct analysis first, "
+            "then ask the user to confirm before running."
+        ),
+    }
+
+
 # ── Runtime cap (seconds) — overridable via DEBATE_JOB_MAX_S env var ─────────
 _JOB_MAX_S: float = float(os.environ.get("DEBATE_JOB_MAX_S", "180"))
 

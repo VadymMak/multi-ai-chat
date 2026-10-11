@@ -477,6 +477,37 @@ EVAL_CASES = [
         "context_marker": "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER",
     },
 
+    # Phase 6 — confirm-gate (needs_confirmation unless confirmed=True)
+    {
+        "name": "debate_confirm_gate_needs_confirm",
+        "suite": "debate",
+        "kind": "debate_confirm_gate",
+        "description": (
+            "A real decision question with confirmed=False returns needs_confirmation "
+            "immediately — no job created, no models fired, $0 cost"
+        ),
+        "input": {
+            "question": "should we migrate the auth service to microservices?",
+            "rounds": 1,
+            "verify": True,
+            "confirmed": False,
+        },
+        "assert": "needs_confirmation",
+    },
+    {
+        "name": "debate_confirm_gate_confirmed_bypasses",
+        "suite": "debate",
+        "kind": "debate_confirm_gate",
+        "description": "confirmed=True bypasses the confirm-gate (gate returns None → debate proceeds)",
+        "input": {
+            "question": "should we migrate the auth service to microservices?",
+            "rounds": 1,
+            "verify": True,
+            "confirmed": True,
+        },
+        "assert": "confirmed_bypasses",
+    },
+
     # Phase 5 — analysis gate (cheap deterministic, no model call)
     {
         "name": "debate_gate_analysis_blocked",

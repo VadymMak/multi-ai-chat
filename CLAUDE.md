@@ -31,6 +31,27 @@ No exceptions. Even for simple questions.
 
 ## When to use debate()
 
+### NORMAL PROCEDURE — debate is a CONFIRMED escalation, never auto-fired
+
+```
+1. Answer / do the review directly first (always).
+2. If a genuinely high-stakes decision surfaced (gate a/b/c all hold), tell the user:
+   "This involves a high-stakes decision: <X>. Run a debate? (~$0.1, ~60s)"
+   and WAIT for their yes/no.
+3. Only if the user says yes → call debate_start(..., confirmed=true).
+```
+
+**Exception:** if the user's message already explicitly says to debate
+("run a debate", "debate this", "use debate mode"), treat that as the
+confirmation and call with `confirmed=true` directly.
+
+**NEVER** call debate/debate_start with `confirmed=true` on your own initiative
+without either an explicit user request or an explicit user yes.
+
+The server enforces this: without `confirmed=true`, debate_start returns
+`{needs_confirmation:true, estimated_cost_usd, estimated_latency_s}` immediately —
+no job, no models, $0. This is the expected non-confirmed response.
+
 ### MANDATORY self-check (run BEFORE every debate_start / debate call)
 
 State in ONE line: "This meets gate (a) because ___, (b) because ___, (c) because ___."

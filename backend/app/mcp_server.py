@@ -4928,6 +4928,7 @@ async def debate(
     rounds: int = 1,
     verify: bool = True,
     force: bool = False,
+    confirmed: bool = False,
 ) -> str:
     """
     Run a multi-model adversarial debate on a question.
@@ -4962,9 +4963,12 @@ async def debate(
     For rounds=2 OR verify=True (heavy, 60-90s), use debate_start + poll
     debate_result instead to avoid request timeouts.
 
-    ANALYSIS GATE: If the question looks like a review/audit/summarize/recommend
-    task, debate() returns {skipped:true, reason, matched} immediately (no models
-    fired, $0 cost). Pass force=true to bypass the gate for genuine edge cases.
+    CONFIRM-GATE: debate is a CONFIRMED escalation, never auto-fired.
+    - Without confirmed=True: returns {needs_confirmation:true, estimated_cost_usd,
+      estimated_latency_s, question_summary} — no models fired, $0 cost.
+    - With confirmed=True: actually runs the debate (user or explicit request only).
+    ANALYSIS GATE: review/audit/summarize tasks return {skipped:true} regardless.
+      Pass force=true to bypass the keyword gate only (confirmed=True bypasses all).
 
     WHEN TO USE debate():
     Call ONLY when ALL hold:
@@ -4978,8 +4982,8 @@ async def debate(
     recommend, "what should we improve", "look at X and tell me" — answer directly.
     """
     try:
-        from app.services.debate_job_service import _debate_analysis_gate
-        gate = _debate_analysis_gate(question, force)
+        from app.services.debate_job_service import _debate_confirm_gate
+        gate = _debate_confirm_gate(question, rounds, verify, confirmed, force)
         if gate:
             return json.dumps(gate, ensure_ascii=False)
         from app.services.debate_engine import run_debate
@@ -5116,6 +5120,7 @@ async def debate_start(
     rounds: int = 1,
     verify: bool = True,
     force: bool = False,
+    confirmed: bool = False,
 ) -> str:
     """
     Start an async debate job and return IMMEDIATELY with {debate_id, status:"running"}.
@@ -5132,16 +5137,19 @@ async def debate_start(
     project_id or folder_identifier: builds ONE compressed context and injects
     it into the PROPOSER ONLY (same as debate_with_context).
 
-    ANALYSIS GATE: If the question looks like a review/audit/summarize/recommend
-    task, debate_start returns {skipped:true, reason, matched} immediately (no job
-    created, no models fired, $0 cost). Pass force=true to bypass the gate.
+    CONFIRM-GATE: debate is a CONFIRMED escalation, never auto-fired.
+    - Without confirmed=True: returns {needs_confirmation:true, estimated_cost_usd,
+      estimated_latency_s, question_summary} — no job created, no models fired, $0.
+    - With confirmed=True: creates the job and returns {debate_id, status:"running"}.
+    ANALYSIS GATE: review/audit/summarize tasks return {skipped:true} first.
+      force=true bypasses the keyword gate; confirmed=true bypasses all gates.
 
-    Returns: {debate_id, status:"running"} — or {skipped:true, ...} if gated.
+    Returns: {debate_id, status:"running"} — or a gate response if not confirmed.
     Possible final statuses from debate_result: "done" | "error" | "timeout"
     """
     try:
-        from app.services.debate_job_service import start_job, _debate_analysis_gate
-        gate = _debate_analysis_gate(question, force)
+        from app.services.debate_job_service import start_job, _debate_confirm_gate
+        gate = _debate_confirm_gate(question, rounds, verify, confirmed, force)
         if gate:
             return json.dumps(gate, ensure_ascii=False)
         debate_id = await start_job(

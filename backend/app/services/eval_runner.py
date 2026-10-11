@@ -601,6 +601,49 @@ async def _run_debate_job_case(case: dict) -> dict:
         _job_mod._JOB_MAX_S     = orig_max_s
 
 
+async def _run_debate_confirm_gate_case(case: dict) -> dict:
+    """
+    Tests the confirm-gate directly — no DB, no model call.
+
+    assert="needs_confirmation"  — real decision + confirmed=False → needs_confirmation:true
+    assert="confirmed_bypasses"  — confirmed=True → gate returns None (debate proceeds)
+    """
+    from app.services.debate_job_service import _debate_confirm_gate
+
+    inp = case["input"]
+    gate_result = _debate_confirm_gate(
+        question=inp["question"],
+        rounds=inp.get("rounds", 1),
+        verify=inp.get("verify", True),
+        confirmed=inp.get("confirmed", False),
+        force=inp.get("force", False),
+    )
+
+    if case["assert"] == "needs_confirmation":
+        passed = (
+            gate_result is not None
+            and gate_result.get("needs_confirmation") is True
+            and not gate_result.get("skipped")
+        )
+        return {
+            "passed": passed,
+            "details": {
+                "needs_confirmation": (gate_result or {}).get("needs_confirmation"),
+                "estimated_cost_usd": (gate_result or {}).get("estimated_cost_usd"),
+                "estimated_latency_s": (gate_result or {}).get("estimated_latency_s"),
+            },
+        }
+
+    if case["assert"] == "confirmed_bypasses":
+        passed = gate_result is None
+        return {
+            "passed": passed,
+            "details": {"gate_bypassed": gate_result is None, "gate_result": gate_result},
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+
 async def _run_debate_gate_case(case: dict) -> dict:
     """
     Tests the deterministic analysis gate directly — no DB, no model call.
@@ -655,6 +698,7 @@ _DISPATCHERS = {
     "debate_stubbed":      _run_debate_stubbed_case,
     "debate_job":          _run_debate_job_case,
     "debate_gate":         _run_debate_gate_case,
+    "debate_confirm_gate": _run_debate_confirm_gate_case,
 }
 
 
