@@ -322,6 +322,7 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
     project_id: str = str(args["project_id"])
     item_type: Optional[str] = args.get("type")
     is_active: bool = bool(args.get("is_active", True))
+    include_archived: bool = bool(args.get("include_archived", False))
     limit: int = int(args.get("limit", 20))
     offset: int = int(args.get("offset", 0))
     preview_chars: int = int(args.get("preview_chars", 200))
@@ -329,33 +330,38 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
     db = _open_db()
     try:
         type_clause = "AND type = :item_type" if item_type else ""
+        # include_archived=True drops the is_active filter entirely (returns both active + archived)
+        active_clause = "" if include_archived else "AND is_active = :is_active"
+
         params: Dict[str, Any] = {
             "project_id": project_id,
-            "is_active": is_active,
             "limit": max(1, min(limit, 200)),
             "offset": max(0, offset),
         }
+        if not include_archived:
+            params["is_active"] = is_active
         if item_type:
             params["item_type"] = item_type
 
         # Count total matching rows for pagination metadata
+        count_params = {k: params[k] for k in ("project_id", *( ["is_active"] if not include_archived else []), *( ["item_type"] if item_type else []))}
         total_count: int = db.execute(
             text(f"""
                 SELECT COUNT(*)
                 FROM canon_items
                 WHERE project_id = :project_id
-                  AND is_active  = :is_active
+                  {active_clause}
                   {type_clause}
             """),
-            {k: params[k] for k in ("project_id", "is_active", *( ["item_type"] if item_type else []))},
+            count_params,
         ).scalar() or 0
 
         rows = db.execute(
             text(f"""
-                SELECT id, type, title, body, created_at
+                SELECT id, type, title, body, created_at, is_active
                 FROM canon_items
                 WHERE project_id = :project_id
-                  AND is_active  = :is_active
+                  {active_clause}
                   {type_clause}
                 ORDER BY created_at DESC
                 LIMIT :limit OFFSET :offset
@@ -369,20 +375,22 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
         for r in rows:
             body = r.body or ""
             preview = body[:preview_chars] + ("…" if len(body) > preview_chars else "")
-            results.append(
-                {
-                    "id": r.id,
-                    "type": r.type,
-                    "title": r.title,
-                    "preview": preview,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                }
-            )
+            item: Dict[str, Any] = {
+                "id": r.id,
+                "type": r.type,
+                "title": r.title,
+                "preview": preview,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            if include_archived:
+                item["is_active"] = r.is_active
+            results.append(item)
         return {
             "total_count": total_count,
             "returned": len(results),
             "limit": params["limit"],
             "offset": params["offset"],
+            "include_archived": include_archived,
             "items": results,
         }
     except Exception as exc:
@@ -558,6 +566,7 @@ async def list_canon_items(
     project_id: str,
     type: Optional[str] = None,
     is_active: bool = True,
+    include_archived: bool = False,
     limit: int = 20,
     offset: int = 0,
     preview_chars: int = 200,
@@ -567,12 +576,16 @@ async def list_canon_items(
     Returns paginated compact rows — use limit/offset to page.
     Each item includes a short preview of the body, not the full text.
     Use get_file_content or a direct DB query to fetch the full body.
+
+    include_archived=True: drop the active filter — returns both active and
+    archived rows (with is_active field in each row). Useful for history recovery.
     """
     result = await _tool_list_canon_items(
         {
             "project_id": project_id,
             "type": type,
             "is_active": is_active,
+            "include_archived": include_archived,
             "limit": limit,
             "offset": offset,
             "preview_chars": preview_chars,

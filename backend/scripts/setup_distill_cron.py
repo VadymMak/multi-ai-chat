@@ -65,8 +65,13 @@ In Railway dashboard → your project → New Service → Empty service:
 
   Name      : brain-distill-cron
   Schedule  : 0 4 * * 1          ← Monday 04:00 UTC (weekly)
-  Command   : python backend/scripts/distill_skills.py
+  Command   : python backend/scripts/distill_skills.py && python backend/scripts/archive_old_summaries.py
   Repo      : same repo, same branch (main)
+
+The command runs two maintenance steps in sequence:
+  1. distill_skills.py      — extract auto skills from session summaries
+  2. archive_old_summaries.py — keep newest 30 SESSION_SUMMARY per project active,
+                               archive older ones (is_active=False, fully recoverable)
 
 Required environment variables (copy from main service):
   DATABASE_URL
@@ -75,9 +80,12 @@ Required environment variables (copy from main service):
 Optional:
   DISTILL_PROJECT_ID   (integer, limit to one project; omit for cross-project)
   DISTILL_SINCE_DAYS   (default 30)
+  ARCHIVE_KEEP         (default 30; passed as --keep to archive_old_summaries.py via
+                        env override — or just edit the Command directly)
 
-Pass --dry-run in Command for a first test run:
+Pass --dry-run to each script for a first test run:
   python backend/scripts/distill_skills.py --dry-run
+  python backend/scripts/archive_old_summaries.py --dry-run
 
 Cost: Railway cron services are billed only for execution time
       (a few seconds per week) — effectively free at this scale.
@@ -86,6 +94,7 @@ Verify: check Railway logs for the cron service after Monday 04:00 UTC.
 Remove a skill: DELETE FROM brain_skills WHERE name = '<name>';
 List auto skills: SELECT name, description FROM brain_skills
                   WHERE description LIKE '[auto]%' ORDER BY name;
+Restore archived summaries: UPDATE canon_items SET is_active=TRUE WHERE id IN (<ids>);
 """)
 
 
