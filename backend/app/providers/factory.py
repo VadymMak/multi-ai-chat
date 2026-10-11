@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from app.config.settings import settings
 from app.config.model_registry import MODEL_REGISTRY
@@ -367,3 +367,46 @@ def ask_model(
 
     print(f"❌ Fallbacks exhausted for provider={provider}. Returning guarded error text.")
     return f"[{provider.capitalize()} Error] Unable to produce a text answer right now."
+
+
+def ask_model_with_usage(
+    messages: List[dict],
+    model_key: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    max_tokens: int = 2048,
+) -> Tuple[str, int, int]:
+    """
+    Single API call → (text, input_tokens, output_tokens). No retry, no fallback.
+    Raises on error. Used by debate engine for accurate cost tracking.
+    """
+    requested_key = (model_key or settings.DEFAULT_MODEL) or ""
+    info = MODEL_REGISTRY.get(requested_key)
+    if not info:
+        raise RuntimeError(f"Unknown model_key '{requested_key}'")
+
+    provider = info["provider"]
+    model = info["model"]
+    temp = float(info.get("temperature", 0.7))
+    norm_messages = _ensure_user_last(_normalize_messages(messages))
+    sys_text = (system_prompt or "").strip() or None
+
+    if provider == "openai":
+        from app.providers.openai_provider import ask_openai_with_usage
+        return ask_openai_with_usage(
+            norm_messages, model=model, temperature=temp,
+            max_tokens=max_tokens, system_prompt=sys_text,
+        )
+    elif provider == "anthropic":
+        from app.providers.claude_provider import ask_claude_with_usage
+        return ask_claude_with_usage(
+            norm_messages, model=model, temperature=temp,
+            max_tokens=max_tokens, system=sys_text,
+        )
+    elif provider == "xai":
+        from app.providers.grok_provider import ask_grok_with_usage
+        return ask_grok_with_usage(
+            norm_messages, model=model, system=sys_text,
+            temperature=temp, max_tokens=max_tokens,
+        )
+    else:
+        raise RuntimeError(f"Unsupported provider '{provider}' for model_key '{requested_key}'")

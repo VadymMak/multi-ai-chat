@@ -427,4 +427,53 @@ EVAL_CASES = [
         "base_confidence": 80,
         "expected_penalty": 15,
     },
+
+    # Phase 3 — cost block + context injection (stubbed)
+    {
+        "name": "debate_cost_block",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "run_debate() returns a 'cost' block with total_usd, by_role, and tokens "
+            "fields computed from stub token counts (no live model calls)"
+        ),
+        "input": {
+            "kwargs": {
+                "question": "stub question for cost block check",
+                "verify": False,
+            },
+            "ask_model_ordered": [
+                "Proposer answer.",
+                "1. Flaw.",
+                '{"final_answer":"Answer.","confidence":70,"unresolved_disagreements":[],"key_risks_still_present":[],"what_survived":[],"what_was_dropped_or_fixed":[]}',
+            ],
+            "stub_token_counts": [200, 80],
+        },
+        "assert": "has_cost_block",
+    },
+    {
+        "name": "debate_context_proposer_only",
+        "suite": "debate",
+        "kind": "debate_stubbed",
+        "description": (
+            "When project_id is given and use_context=True, smart context is injected "
+            "into the proposer prompt only — critic and assembler do NOT receive it"
+        ),
+        "input": {
+            "kwargs": {
+                "question": "stub question for context injection check",
+                "project_id": 20,
+                "use_context": True,
+                "verify": False,
+            },
+            "ask_model_ordered": [
+                "Proposer answer.",
+                "1. Flaw.",
+                '{"final_answer":"Answer.","confidence":70,"unresolved_disagreements":[],"key_risks_still_present":[],"what_survived":[],"what_was_dropped_or_fixed":[]}',
+            ],
+            "context_stub": "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER",
+        },
+        "assert": "context_proposer_only",
+        "context_marker": "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER",
+    },
 ]

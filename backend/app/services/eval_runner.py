@@ -376,8 +376,10 @@ async def _run_guardrail_case(case: dict) -> dict:
 
 async def _run_debate_stubbed_case(case: dict) -> dict:
     """
-    Runs run_debate() with ask_model monkeypatched to return canned responses.
-    Optionally patches _debate_verify via verify_stub in the input.
+    Runs run_debate() with model calls monkeypatched to return canned responses.
+
+    Phase 3: also patches _ask_with_usage_fn (returns (text, in_toks, out_toks))
+    and _debate_smart_context_fn (returns a stub context string).
     No live network calls — cheap and deterministic.
     """
     import app.services.debate_engine as _engine_mod
@@ -385,8 +387,11 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
     inp = case["input"]
     ordered_responses: List[str] = inp.get("ask_model_ordered", [])
     verify_stub = inp.get("verify_stub")
+    stub_token_counts = tuple(inp.get("stub_token_counts", [100, 50]))  # (in, out)
+    context_stub: Optional[str] = inp.get("context_stub")
 
     call_counter = {"n": 0}
+    call_log: List[dict] = []  # records each model call for context assertions
 
     def _stubbed_ask_model(messages, model_key=None, **kwargs):  # type: ignore[override]
         idx = call_counter["n"] % max(len(ordered_responses), 1)
@@ -396,12 +401,30 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
             raise RuntimeError("stubbed critic failure")
         return resp
 
+    def _stubbed_ask_with_usage(messages, model_key=None, **kwargs):  # type: ignore[override]
+        prompt_text = messages[0].get("content", "") if messages else ""
+        call_n_before = call_counter["n"]
+        text = _stubbed_ask_model(messages, model_key, **kwargs)  # may raise
+        in_toks = int(stub_token_counts[0]) if len(stub_token_counts) > 0 else 100
+        out_toks = int(stub_token_counts[1]) if len(stub_token_counts) > 1 else 50
+        call_log.append({"call_n": call_n_before, "prompt": prompt_text})
+        return text, in_toks, out_toks
+
+    async def _stubbed_smart_context(question, project_id, folder_identifier):
+        return context_stub or ""
+
     # Save originals
-    orig_ask_model = _engine_mod.ask_model
-    orig_debate_verify = _engine_mod._debate_verify
+    orig_ask_model        = _engine_mod.ask_model
+    orig_ask_with_usage   = getattr(_engine_mod, "_ask_with_usage_fn", None)
+    orig_debate_verify    = _engine_mod._debate_verify
+    orig_smart_context    = getattr(_engine_mod, "_debate_smart_context_fn", None)
 
     try:
         _engine_mod.ask_model = _stubbed_ask_model  # type: ignore[assignment]
+        _engine_mod._ask_with_usage_fn = _stubbed_ask_with_usage  # type: ignore[assignment]
+
+        if context_stub is not None:
+            _engine_mod._debate_smart_context_fn = _stubbed_smart_context  # type: ignore[assignment]
 
         if verify_stub is not None:
             _engine_mod._debate_verify = lambda text, max_claims, fetch, high_assurance: verify_stub  # type: ignore[assignment]
@@ -412,7 +435,9 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
 
     finally:
         _engine_mod.ask_model = orig_ask_model  # type: ignore[assignment]
+        _engine_mod._ask_with_usage_fn = orig_ask_with_usage  # type: ignore[assignment]
         _engine_mod._debate_verify = orig_debate_verify  # type: ignore[assignment]
+        _engine_mod._debate_smart_context_fn = orig_smart_context  # type: ignore[assignment]
 
     assert_type = case["assert"]
 
@@ -421,42 +446,33 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
         missing = [k for k in required if k not in result]
         return {
             "passed": not missing,
-            "details": {
-                "keys_present": sorted(result.keys()),
-                "missing": missing,
-            },
+            "details": {"keys_present": sorted(result.keys()), "missing": missing},
         }
 
     if assert_type == "confidence_in_range":
         conf = result.get("confidence")
         passed = isinstance(conf, int) and 0 <= conf <= 100
-        return {
-            "passed": passed,
-            "details": {"confidence": conf, "type": type(conf).__name__},
-        }
+        return {"passed": passed, "details": {"confidence": conf, "type": type(conf).__name__}}
 
     if assert_type == "critic_failure_degraded":
         has_final    = bool(result.get("final_answer"))
         has_notes    = any("critic" in str(n) for n in result.get("notes", []))
-        # Assembler returned confidence 80; critic penalty −20 → 60
         conf         = result.get("confidence")
-        conf_reduced = conf is not None and conf <= 79  # 80 − 20 = 60
+        conf_reduced = conf is not None and conf <= 79
         return {
             "passed": has_final and has_notes and conf_reduced,
             "details": {
-                "has_final_answer": has_final,
-                "critic_note_found": has_notes,
-                "confidence": conf,
-                "notes": result.get("notes"),
+                "has_final_answer": has_final, "critic_note_found": has_notes,
+                "confidence": conf, "notes": result.get("notes"),
             },
         }
 
     if assert_type == "verify_reduces_confidence":
-        base   = case.get("base_confidence", 80)
+        base    = case.get("base_confidence", 80)
         penalty = case.get("expected_penalty", 15)
-        conf   = result.get("confidence")
-        vc     = result.get("verified_claims")
-        passed = (
+        conf    = result.get("confidence")
+        vc      = result.get("verified_claims")
+        passed  = (
             conf is not None
             and conf <= base - penalty
             and vc is not None
@@ -465,10 +481,38 @@ async def _run_debate_stubbed_case(case: dict) -> dict:
         return {
             "passed": passed,
             "details": {
-                "confidence": conf,
-                "base_confidence": base,
-                "expected_max": base - penalty,
-                "verified_claims": vc,
+                "confidence": conf, "base_confidence": base,
+                "expected_max": base - penalty, "verified_claims": vc,
+            },
+        }
+
+    if assert_type == "has_cost_block":
+        cost = result.get("cost")
+        passed = (
+            isinstance(cost, dict)
+            and "total_usd" in cost
+            and isinstance(cost.get("by_role"), dict)
+            and "proposer_usd" in cost.get("by_role", {})
+            and isinstance(cost.get("tokens"), dict)
+        )
+        return {"passed": passed, "details": {"cost": cost}}
+
+    if assert_type == "context_proposer_only":
+        marker = case.get("context_marker", "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER")
+        proposer_has_ctx = len(call_log) > 0 and marker in call_log[0].get("prompt", "")
+        critic_no_ctx    = len(call_log) < 2 or marker not in call_log[1].get("prompt", "")
+        assembler_no_ctx = len(call_log) < 3 or marker not in call_log[2].get("prompt", "")
+        context_note     = any("smart_context" in str(n) for n in result.get("notes", []))
+        passed = proposer_has_ctx and critic_no_ctx and assembler_no_ctx and context_note
+        return {
+            "passed": passed,
+            "details": {
+                "proposer_has_context":  proposer_has_ctx,
+                "critic_no_context":     critic_no_ctx,
+                "assembler_no_context":  assembler_no_ctx,
+                "context_note_in_notes": context_note,
+                "notes":                 result.get("notes"),
+                "call_count":            len(call_log),
             },
         }
 

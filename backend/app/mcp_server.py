@@ -4970,11 +4970,129 @@ async def debate(
     """
     try:
         from app.services.debate_engine import run_debate
-        result = await run_debate(question=question, context=context, rounds=rounds, verify=verify)
+        result = await run_debate(
+            question=question, context=context, rounds=rounds, verify=verify,
+        )
         return _cap_json(result)
     except Exception as exc:
         logger.error("debate error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def debate_with_context(
+    question: str,
+    project_id: Optional[int] = None,
+    folder_identifier: Optional[str] = None,
+    rounds: int = 1,
+    verify: bool = True,
+) -> str:
+    """
+    Run debate() with automatic cost-smart context injection.
+
+    Builds ONE compressed context from smart_context (capped at ~3000 tokens)
+    and injects it into the PROPOSER ONLY. Critic and assembler never receive
+    the full context — each model only sees what it needs.
+
+    project_id or folder_identifier: which project's context to pull.
+    If neither is given, behaves like debate() with no context.
+
+    Returns the same JSON as debate() plus a "cost" block:
+      cost: {total_usd, by_role{proposer_usd, critic_usd, assembler_usd, verify_usd},
+             tokens{proposer_in/out, critic_in/out, assembler_in/out}, latency_ms}
+
+    The "cost_estimate_usd" top-level field is also accurate (= cost.total_usd).
+    """
+    try:
+        from app.services.debate_engine import run_debate
+        result = await run_debate(
+            question=question, rounds=rounds, verify=verify,
+            project_id=project_id, folder_identifier=folder_identifier,
+            use_context=True,
+        )
+        return _cap_json(result)
+    except Exception as exc:
+        logger.error("debate_with_context error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def debate_cost_report(period: str = "today") -> str:
+    """
+    Aggregate cost and latency report for all debate() calls stored in brain_traces.
+
+    period: "today" | "week" | "all"
+
+    Returns:
+      {period, debate_count, total_usd, avg_cost_usd, avg_latency_ms,
+       per_model: [{model_key, total_cost_usd, debate_count}]}
+    """
+    valid_periods = {"today", "week", "all"}
+    if period not in valid_periods:
+        period = "today"
+
+    db = _open_db()
+    try:
+        if period == "today":
+            where_period = "AND DATE(t.created_at) = CURRENT_DATE"
+        elif period == "week":
+            where_period = "AND t.created_at >= NOW() - INTERVAL '7 days'"
+        else:
+            where_period = ""
+
+        agg_row = await asyncio.to_thread(
+            lambda: db.execute(text(f"""
+                SELECT
+                    COUNT(*)                           AS debate_count,
+                    COALESCE(SUM(total_cost_usd), 0)   AS total_usd,
+                    COALESCE(AVG(total_cost_usd), 0)   AS avg_cost_usd,
+                    COALESCE(AVG(total_ms), 0)          AS avg_latency_ms
+                FROM brain_traces t
+                WHERE t.kind = 'debate'
+                  {where_period}
+            """)).fetchone()
+        )
+
+        report: Dict[str, Any] = {
+            "period":         period,
+            "debate_count":   int(agg_row[0]) if agg_row else 0,
+            "total_usd":      round(float(agg_row[1]), 6) if agg_row else 0.0,
+            "avg_cost_usd":   round(float(agg_row[2]), 6) if agg_row else 0.0,
+            "avg_latency_ms": int(agg_row[3])             if agg_row else 0,
+        }
+
+        per_model_rows = await asyncio.to_thread(
+            lambda: db.execute(text(f"""
+                SELECT
+                    s.model_key,
+                    COALESCE(SUM(s.cost_usd), 0) AS total_cost_usd,
+                    COUNT(DISTINCT s.trace_id)    AS debate_count
+                FROM brain_trace_spans s
+                JOIN brain_traces t ON s.trace_id = t.trace_id
+                WHERE t.kind = 'debate'
+                  AND s.model_key IS NOT NULL
+                  AND s.layer = 'model'
+                  {where_period}
+                GROUP BY s.model_key
+                ORDER BY total_cost_usd DESC
+            """)).fetchall()
+        )
+
+        report["per_model"] = [
+            {
+                "model_key":      row[0],
+                "total_cost_usd": round(float(row[1]), 6),
+                "debate_count":   int(row[2]),
+            }
+            for row in (per_model_rows or [])
+        ]
+
+        return _cap_json(report)
+    except Exception as exc:
+        logger.error("debate_cost_report error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 __all__ = ["mcp"]

@@ -1,13 +1,20 @@
 """
 Debate Engine v2 — stateless async three-vendor debate.
 
-run_debate(question, context="", rounds=1) → dict
+run_debate(question, context="", rounds=1, verify=True,
+           project_id=None, folder_identifier=None, use_context=True) → dict
 
 Flow (rounds=1): proposer → critic → assembler
 Flow (rounds=2): proposer → critic → rebuttal(proposer) → assembler
 
-ALL LLM calls go off the event loop via asyncio.to_thread(ask_model, ...).
+ALL LLM calls go off the event loop via asyncio.to_thread(ask_model_with_usage, ...).
 No module-level mutable state.
+
+Phase 3 additions:
+- Accurate per-call cost from real token counts (ask_model_with_usage).
+- "cost" block in result: {total_usd, by_role, tokens, latency_ms}.
+- Cost-smart context: build ONE proposer-only context from smart_context,
+  capped at _DEBATE_CONTEXT_CHAR_CAP chars. Critic / assembler never receive it.
 """
 from __future__ import annotations
 
@@ -31,11 +38,20 @@ from app.config.debate_prompts import (
 
 logger = logging.getLogger(__name__)
 
+# ── Module-level aliases (patchable by evals) ────────────────────────────────
+
 # Module-level alias so evals can monkeypatch without touching verify_manager.
 try:
     from app.services.verify_manager import run_verify as _debate_verify
 except Exception:  # pragma: no cover
     _debate_verify = None  # type: ignore
+
+# Usage-tracked caller — evals may replace with a stub.
+try:
+    from app.providers.factory import ask_model_with_usage as _ask_with_usage_fn
+except Exception:  # pragma: no cover
+    _ask_with_usage_fn = None  # type: ignore
+
 
 # ── Role seat fallback chains (first available wins) ─────────────────────────
 _PROPOSER_CHAIN  = ["claude-sonnet-4.5", "gpt-4o", "grok-3"]
@@ -54,7 +70,10 @@ _ROLE_TIMEOUT = 60.0
 # Cap on claims sent to verify_manager per debate (cost/latency guard)
 _MAX_VERIFY_CLAIMS = 5
 
-# Rough cost rates (input_per_1m, output_per_1m) in USD
+# Smart context hard cap (~3000 tokens)
+_DEBATE_CONTEXT_CHAR_CAP = 12_000
+
+# Per-model pricing (input_per_1M_USD, output_per_1M_USD)
 _COST_RATES: Dict[str, Tuple[float, float]] = {
     "claude-sonnet-4.5":        (3.0, 15.0),
     "claude-sonnet-4-20250514": (3.0, 15.0),
@@ -85,9 +104,16 @@ def _resolve_seat(chain: List[str]) -> Tuple[str, bool]:
 
 
 def _estimate_cost(model_key: str, out_tokens: int) -> float:
+    """Rough projection — used ONLY for circuit-breaker check before calls."""
     inp_per_1m, out_per_1m = _COST_RATES.get(model_key, (3.0, 15.0))
-    tokens_in = out_tokens * 2  # rough input estimate
+    tokens_in = out_tokens * 2
     return (tokens_in / 1_000_000 * inp_per_1m) + (out_tokens / 1_000_000 * out_per_1m)
+
+
+def _compute_cost(model_key: str, input_tokens: int, output_tokens: int) -> float:
+    """Accurate cost from real token counts."""
+    inp_per_1m, out_per_1m = _COST_RATES.get(model_key, (3.0, 15.0))
+    return (input_tokens / 1_000_000 * inp_per_1m) + (output_tokens / 1_000_000 * out_per_1m)
 
 
 def _count_flaws(critic_text: str) -> int:
@@ -125,17 +151,33 @@ async def _call_role(
     prompt: str,
     max_tokens: int,
     trace_obj: Any = None,
-) -> Tuple[str, float]:
+) -> Tuple[str, float, int, int]:
     """
     Run one role call off the event loop.
-    Model failures propagate. Span recording is best-effort (never breaks the call).
-    Returns (response_text, cost_usd).
+    Returns (response_text, cost_usd, input_tokens, output_tokens).
+    Uses ask_model_with_usage for accurate token counts.
+    Falls back to ask_model + estimate if _ask_with_usage_fn is unavailable.
     """
-    cost = _estimate_cost(model_key, max_tokens)
+    _afn = _ask_with_usage_fn  # read module attr for eval monkeypatching
 
-    async def _do() -> str:
+    async def _do() -> Tuple[str, int, int]:
+        if _afn is not None:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _afn,
+                        [{"role": "user", "content": prompt}],
+                        model_key=model_key,
+                        system_prompt=system,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=_ROLE_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, TimeoutError) as te:
+                raise RuntimeError(f"timeout after {_ROLE_TIMEOUT}s") from te
+        # Fallback: no usage data (shouldn't happen in prod)
         try:
-            return await asyncio.wait_for(
+            text = await asyncio.wait_for(
                 asyncio.to_thread(
                     ask_model,
                     [{"role": "user", "content": prompt}],
@@ -147,15 +189,22 @@ async def _call_role(
             )
         except (asyncio.TimeoutError, TimeoutError) as te:
             raise RuntimeError(f"timeout after {_ROLE_TIMEOUT}s") from te
+        est_in = max_tokens * 2
+        est_out = max(1, len(text) // 4)
+        return text, est_in, est_out
 
     if trace_obj is None:
-        return await _do(), cost
+        text, in_toks, out_toks = await _do()
+        cost = _compute_cost(model_key, in_toks, out_toks)
+        return text, cost, in_toks, out_toks
 
     # Best-effort span — if trace import or setup fails, still run the model call
     try:
         from app.services.trace_service import trace_span
     except Exception:
-        return await _do(), cost
+        text, in_toks, out_toks = await _do()
+        cost = _compute_cost(model_key, in_toks, out_toks)
+        return text, cost, in_toks, out_toks
 
     try:
         async with trace_span(
@@ -163,10 +212,11 @@ async def _call_role(
             input_summary=f"model={model_key} max_tokens={max_tokens}",
             model_key=model_key,
         ) as span:
+            text, in_toks, out_toks = await _do()
+            cost = _compute_cost(model_key, in_toks, out_toks)
             span["cost_usd"] = cost
-            text = await _do()
             span["output_summary"] = f"{len(text)} chars"
-        return text, cost
+        return text, cost, in_toks, out_toks
     except Exception:
         raise   # model failure OR span exit failure — propagate to caller
 
@@ -216,7 +266,6 @@ async def _annotate_with_verify(
 
     stats = report.get("stats", {})
     refuted_count   = len(report.get("refuted", []))
-    # "unverified" = had a source but couldn't confirm it
     unchecked_list  = report.get("unchecked", [])
     unverified_count = sum(
         1 for c in unchecked_list
@@ -247,6 +296,60 @@ async def _annotate_with_verify(
     return block, new_conf, new_notes, new_unresolved
 
 
+# ── Smart context (proposer-only, opt-in) ────────────────────────────────────
+
+async def _build_debate_context_async(
+    question: str,
+    project_id: Optional[int],
+    folder_identifier: Optional[str],
+) -> str:
+    """
+    Build compressed smart context for the PROPOSER ONLY.
+    Caps at _DEBATE_CONTEXT_CHAR_CAP chars (~3000 tokens).
+    Best-effort — never raises.
+    """
+    from app.memory.db import SessionLocal
+    from app.memory.manager import MemoryManager
+    from app.services.smart_context import build_smart_context as _bsc
+    from sqlalchemy import text as _text
+
+    db = SessionLocal()
+    try:
+        pid = project_id
+        if pid is None and folder_identifier:
+            row = db.execute(
+                _text("SELECT id FROM projects WHERE folder_identifier = :fi LIMIT 1"),
+                {"fi": folder_identifier},
+            ).fetchone()
+            if row:
+                pid = int(row[0])
+
+        if pid is None:
+            return ""
+
+        memory = MemoryManager(db)
+        ctx = await _bsc(
+            project_id=pid,
+            role_id=0,
+            query=question,
+            session_id="",
+            db=db,
+            memory=memory,
+        )
+        if len(ctx) > _DEBATE_CONTEXT_CHAR_CAP:
+            ctx = ctx[:_DEBATE_CONTEXT_CHAR_CAP] + "\n...[context trimmed]"
+        return ctx
+    except Exception as exc:
+        logger.debug("debate smart_context build failed (non-fatal): %s", exc)
+        return ""
+    finally:
+        db.close()
+
+
+# Module-level alias so evals can monkeypatch with a stub async coroutine.
+_debate_smart_context_fn = _build_debate_context_async
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def run_debate(
@@ -254,6 +357,9 @@ async def run_debate(
     context: str = "",
     rounds: int = 1,
     verify: bool = True,
+    project_id: Optional[int] = None,
+    folder_identifier: Optional[str] = None,
+    use_context: bool = True,
 ) -> Dict[str, Any]:
     """
     Stateless async multi-model debate.
@@ -264,13 +370,27 @@ async def run_debate(
     verify=True (default): after the assembler, run_verify annotates the
     final_answer with checkable claims. Refuted/unverified claims lower
     confidence by 15 each (floor 0) and appear in unresolved_disagreements.
-    The result gains a "verified_claims" summary block. Best-effort: errors
-    in the verify step never break the debate result.
+
+    project_id / folder_identifier + use_context=True: build ONE compressed
+    context from smart_context and inject it into the PROPOSER ONLY.
+    Critic and assembler never receive it (cost-smart design).
     """
     debate_id = str(uuid.uuid4())
     t_start   = time.perf_counter()
     notes: List[str] = []
     total_cost = 0.0
+
+    # ── smart context (proposer-only, opt-in) ────────────────────────────────
+    if not context.strip() and use_context and (project_id is not None or folder_identifier):
+        _ctx_fn = _debate_smart_context_fn  # read module attr for eval patching
+        if _ctx_fn is not None:
+            try:
+                built_ctx = await _ctx_fn(question, project_id, folder_identifier)
+                if built_ctx:
+                    context = built_ctx
+                    notes.append(f"smart_context:{len(built_ctx)}chars")
+            except Exception as exc:
+                logger.debug("debate context build outer error (non-fatal): %s", exc)
 
     # ── seat resolution ───────────────────────────────────────────────────────
     try:
@@ -375,17 +495,23 @@ async def _run_rounds(
 ) -> Dict[str, Any]:
     """Inner logic — separated so the trace context manager wraps it cleanly."""
 
+    # Per-role cost and token tracking
+    role_costs: Dict[str, float] = {}
+    role_tokens: Dict[str, Tuple[int, int]] = {}  # role → (in_toks, out_toks)
+
     # ── PROPOSER ─────────────────────────────────────────────────────────────
     context_block = f"\n\n## Context\n{context}" if context.strip() else ""
     proposer_prompt = DEBATE2_PROPOSER_PROMPT.format(
         question=question, context=context_block,
     )
     try:
-        proposer_text, p_cost = await _call_role(
+        proposer_text, p_cost, p_in, p_out = await _call_role(
             "proposer", proposer_key, DEBATE2_PREAMBLE,
             proposer_prompt, _CAP_PROPOSER, trace_obj,
         )
         total_cost += p_cost
+        role_costs["proposer_usd"] = p_cost
+        role_tokens["proposer"] = (p_in, p_out)
     except Exception as exc:
         return {
             "error": f"proposer_failed: {exc}",
@@ -404,11 +530,13 @@ async def _run_rounds(
             question=question, proposal=proposer_text,
         )
         try:
-            critic_text, c_cost = await _call_role(
+            critic_text, c_cost, c_in, c_out = await _call_role(
                 "critic", critic_key, DEBATE2_PREAMBLE,
                 critic_prompt, _CAP_CRITIC, trace_obj,
             )
             total_cost     += c_cost
+            role_costs["critic_usd"] = c_cost
+            role_tokens["critic"] = (c_in, c_out)
             critic_flaw_count = _count_flaws(critic_text)
         except Exception as exc:
             logger.warning("debate critic failed (degraded): %s", exc)
@@ -423,11 +551,12 @@ async def _run_rounds(
             question=question, proposal=proposer_text, critique=critic_text,
         )
         try:
-            _, r_cost = await _call_role(
+            _, r_cost, r_in, r_out = await _call_role(
                 "rebuttal", proposer_key, DEBATE2_PREAMBLE,
                 rebuttal_prompt, _CAP_REBUTTAL, trace_obj,
             )
             total_cost += r_cost
+            role_costs["rebuttal_usd"] = r_cost
         except Exception as exc:
             logger.warning("debate rebuttal failed (non-fatal): %s", exc)
             notes.append("rebuttal_failed")
@@ -445,11 +574,13 @@ async def _run_rounds(
             confidence_penalty=confidence_penalty,
         )
         try:
-            asm_raw, a_cost = await _call_role(
+            asm_raw, a_cost, a_in, a_out = await _call_role(
                 "assembler", assembler_key, DEBATE2_PREAMBLE,
                 assembler_prompt, _CAP_ASSEMBLER, trace_obj,
             )
             total_cost     += a_cost
+            role_costs["assembler_usd"] = a_cost
+            role_tokens["assembler"] = (a_in, a_out)
             assembler_parsed = _parse_assembler(asm_raw)
         except Exception as exc:
             logger.warning("debate assembler failed: %s", exc)
@@ -503,6 +634,26 @@ async def _run_rounds(
         except Exception as exc:
             logger.debug("verify annotation outer error (non-fatal): %s", exc)
 
+    # ── COST BLOCK ────────────────────────────────────────────────────────────
+    p_tok = role_tokens.get("proposer", (0, 0))
+    c_tok = role_tokens.get("critic",   (0, 0))
+    a_tok = role_tokens.get("assembler",(0, 0))
+    cost_block: Dict[str, Any] = {
+        "total_usd": round(total_cost, 6),
+        "by_role": {
+            "proposer_usd":  round(role_costs.get("proposer_usd",  0.0), 6),
+            "critic_usd":    round(role_costs.get("critic_usd",    0.0), 6),
+            "assembler_usd": round(role_costs.get("assembler_usd", 0.0), 6),
+            "verify_usd":    0.0,
+        },
+        "tokens": {
+            "proposer_in":   p_tok[0], "proposer_out":   p_tok[1],
+            "critic_in":     c_tok[0], "critic_out":     c_tok[1],
+            "assembler_in":  a_tok[0], "assembler_out":  a_tok[1],
+        },
+        "latency_ms": latency_ms,
+    }
+
     result.update({
         "roles": {
             "proposer":  {"model": proposer_key,                    "summary": proposer_text[:300]},
@@ -510,7 +661,8 @@ async def _run_rounds(
             "assembler": {"model": assembler_key or "unavailable"},
         },
         "debate_id":         debate_id,
-        "cost_estimate_usd": round(total_cost, 4),
+        "cost":              cost_block,
+        "cost_estimate_usd": round(total_cost, 4),  # kept for backward compat
         "latency_ms":        latency_ms,
     })
     if verified_claims_block is not None:

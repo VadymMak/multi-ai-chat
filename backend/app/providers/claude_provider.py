@@ -267,3 +267,34 @@ def ask_claude(
     except Exception as e:
         print(f"❌ [Claude Unexpected Error] {e}")
         return f"[Claude Error] {str(e)}"
+
+
+def ask_claude_with_usage(
+    messages: List[dict],
+    model: str = DEFAULT_MODEL,
+    temperature: float = TEMPERATURE,
+    max_tokens: int = MAX_TOKENS,
+    system: Optional[str] = None,
+) -> "tuple[str, int, int]":
+    """Single-shot call → (text, input_tokens, output_tokens). No retry or fallback."""
+    client = _get_client()
+    normalized = _normalize_messages(messages)
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": int(max_tokens),
+        "temperature": float(temperature),
+        "messages": normalized,
+    }
+    if system:
+        kwargs["system"] = system
+    response = client.messages.create(**kwargs)  # type: ignore[attr-defined]
+    content = getattr(response, "content", [])
+    text = ""
+    if isinstance(content, list) and content:
+        first = content[0]
+        text = str(getattr(first, "text", first)).strip()
+    usage = getattr(response, "usage", None)
+    in_toks = int(getattr(usage, "input_tokens", 0) or 0)
+    out_toks = int(getattr(usage, "output_tokens", 0) or 0)
+    return text, in_toks, out_toks
+

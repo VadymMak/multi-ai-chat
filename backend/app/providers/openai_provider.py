@@ -514,6 +514,30 @@ def ask_openai(
         return f"[OpenAI Error] {str(e)}"
 
 
+def ask_openai_with_usage(
+    messages: List[dict],
+    model: str = DEFAULT_MODEL,
+    temperature: float = TEMPERATURE,
+    max_tokens: int = MAX_TOKENS,
+    system_prompt: Optional[str] = None,
+) -> "tuple[str, int, int]":
+    """Single-shot call → (text, input_tokens, output_tokens). No retry or fallback."""
+    client = _get_client()
+    final = _build_messages(messages, system_prompt, force_text_only=False)
+    use_completion = _should_use_max_completion_tokens(model)
+    include_temp = _supports_temperature(model)
+    resp = _call_chat_create(
+        client, model=model, final_messages=final,
+        include_temp=include_temp, temp=float(temperature), out_tokens=int(max_tokens),
+        use_completion_param=use_completion, json_mode=False,
+    )
+    text = _extract_text_from_choice(resp.choices[0]).strip() if getattr(resp, "choices", None) else ""
+    usage = getattr(resp, "usage", None)
+    in_toks = int(getattr(usage, "prompt_tokens", 0) or 0)
+    out_toks = int(getattr(usage, "completion_tokens", 0) or 0)
+    return text, in_toks, out_toks
+
+
 def _fallback_plain_text(client: Any, *, fallback_messages: List[dict]) -> str:
     """
     One last attempt on a safer chat model with explicit text-only nudge

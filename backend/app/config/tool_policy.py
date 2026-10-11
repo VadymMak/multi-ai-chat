@@ -74,6 +74,8 @@ TOOL_CLASS: dict[str, str] = {
     "extend_video":               "write",
     "create_video":               "write",
     "debate":                     "write",
+    "debate_with_context":        "write",
+    "debate_cost_report":         "read",
 
     # ── destructive ───────────────────────────────────────────────────────────
     "registry_delete":            "destructive",
