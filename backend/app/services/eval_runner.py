@@ -601,6 +601,45 @@ async def _run_debate_job_case(case: dict) -> dict:
         _job_mod._JOB_MAX_S     = orig_max_s
 
 
+async def _run_debate_gate_case(case: dict) -> dict:
+    """
+    Tests the deterministic analysis gate directly — no DB, no model call.
+
+    assert="gate_skipped"  — analysis question blocked, gate returns a skip-dict
+    assert="gate_bypassed" — force=True causes gate to return None (debate proceeds)
+    """
+    from app.services.debate_job_service import _debate_analysis_gate
+
+    inp = case["input"]
+    question: str = inp["question"]
+    force: bool = inp.get("force", False)
+
+    gate_result = _debate_analysis_gate(question, force)
+
+    if case["assert"] == "gate_skipped":
+        passed = gate_result is not None and gate_result.get("skipped") is True
+        return {
+            "passed": passed,
+            "details": {
+                "skipped":    gate_result.get("skipped") if gate_result else None,
+                "reason":     (gate_result or {}).get("reason"),
+                "matched":    (gate_result or {}).get("matched"),
+            },
+        }
+
+    if case["assert"] == "gate_bypassed":
+        passed = gate_result is None
+        return {
+            "passed": passed,
+            "details": {
+                "bypassed": gate_result is None,
+                "gate_result": gate_result,
+            },
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -615,6 +654,7 @@ _DISPATCHERS = {
     "guardrail":           _run_guardrail_case,
     "debate_stubbed":      _run_debate_stubbed_case,
     "debate_job":          _run_debate_job_case,
+    "debate_gate":         _run_debate_gate_case,
 }
 
 

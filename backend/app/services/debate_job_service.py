@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -26,6 +27,54 @@ from sqlalchemy import text
 from app.memory.db import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+# ── Analysis-gate: deterministic, no model call ──────────────────────────────
+# Patterns that indicate a review/summary/audit task (answer directly, don't debate)
+_ANALYSIS_RE = re.compile(
+    r"\b(review|preview|audit|summarize|summarise|explain|overview|"
+    r"prioritize|prioritise|recommend|"
+    r"what\s+should\s+(we|i)\s+(improve|fix|change|do)|"
+    r"how\s+do\s+(i|we)\s+use|"
+    r"look\s+at\s+\S|"
+    r"give\s+(me|us)\s+(a\s+)?(summary|list|overview|review|recommendation)|"
+    r"tell\s+me\s+(about|what))\b",
+    re.IGNORECASE,
+)
+# Patterns that signal a genuine high-stakes decision — gate lets these through
+_DECISION_RE = re.compile(
+    r"\b(vs\.?|versus|tradeoff|trade.off|migrat|irreversible|"
+    r"optimistic|pessimistic|"
+    r"(should\s+we|should\s+i)\s+(use|choose|adopt|switch|replace|rewrite|refactor|"
+    r"drop|deploy|implement|introduce|build|design|architect))\b",
+    re.IGNORECASE,
+)
+
+
+def _debate_analysis_gate(question: str, force: bool) -> Optional[dict]:
+    """
+    Cheap deterministic pre-check. Returns a skip-dict when the question looks
+    like an analysis/review task (not a high-stakes decision), or None when the
+    debate should proceed.
+
+    force=True bypasses the gate entirely — for genuine edge cases.
+    """
+    if force:
+        return None
+    analysis_match = _ANALYSIS_RE.search(question)
+    if not analysis_match:
+        return None
+    decision_match = _DECISION_RE.search(question)
+    if decision_match:
+        return None  # contains a decision signal — let it through
+    return {
+        "skipped": True,
+        "reason": (
+            "This looks like an analysis/review task, not a high-stakes decision. "
+            "Answer directly. Pass force=true to override."
+        ),
+        "matched": [analysis_match.group(0)],
+    }
+
 
 # ── Runtime cap (seconds) — overridable via DEBATE_JOB_MAX_S env var ─────────
 _JOB_MAX_S: float = float(os.environ.get("DEBATE_JOB_MAX_S", "180"))

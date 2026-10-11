@@ -4927,6 +4927,7 @@ async def debate(
     context: str = "",
     rounds: int = 1,
     verify: bool = True,
+    force: bool = False,
 ) -> str:
     """
     Run a multi-model adversarial debate on a question.
@@ -4961,6 +4962,10 @@ async def debate(
     For rounds=2 OR verify=True (heavy, 60-90s), use debate_start + poll
     debate_result instead to avoid request timeouts.
 
+    ANALYSIS GATE: If the question looks like a review/audit/summarize/recommend
+    task, debate() returns {skipped:true, reason, matched} immediately (no models
+    fired, $0 cost). Pass force=true to bypass the gate for genuine edge cases.
+
     WHEN TO USE debate():
     Call ONLY when ALL hold:
       (a) the problem involves architecture, concurrency, security, data integrity,
@@ -4969,10 +4974,14 @@ async def debate(
       (b) a single-model answer is low-confidence / high-ambiguity;
       (c) the cost of being wrong is high (user-facing breakage, data loss,
           significant rework).
-    NEVER call debate() for routine codegen, simple explanations, or
-    "how to use X library" questions.
+    NEVER debate: review, preview, audit, summarize, explain, prioritize,
+    recommend, "what should we improve", "look at X and tell me" — answer directly.
     """
     try:
+        from app.services.debate_job_service import _debate_analysis_gate
+        gate = _debate_analysis_gate(question, force)
+        if gate:
+            return json.dumps(gate, ensure_ascii=False)
         from app.services.debate_engine import run_debate
         result = await run_debate(
             question=question, context=context, rounds=rounds, verify=verify,
@@ -5106,6 +5115,7 @@ async def debate_start(
     folder_identifier: Optional[str] = None,
     rounds: int = 1,
     verify: bool = True,
+    force: bool = False,
 ) -> str:
     """
     Start an async debate job and return IMMEDIATELY with {debate_id, status:"running"}.
@@ -5122,11 +5132,18 @@ async def debate_start(
     project_id or folder_identifier: builds ONE compressed context and injects
     it into the PROPOSER ONLY (same as debate_with_context).
 
-    Returns: {debate_id, status:"running"}
+    ANALYSIS GATE: If the question looks like a review/audit/summarize/recommend
+    task, debate_start returns {skipped:true, reason, matched} immediately (no job
+    created, no models fired, $0 cost). Pass force=true to bypass the gate.
+
+    Returns: {debate_id, status:"running"} — or {skipped:true, ...} if gated.
     Possible final statuses from debate_result: "done" | "error" | "timeout"
     """
     try:
-        from app.services.debate_job_service import start_job
+        from app.services.debate_job_service import start_job, _debate_analysis_gate
+        gate = _debate_analysis_gate(question, force)
+        if gate:
+            return json.dumps(gate, ensure_ascii=False)
         debate_id = await start_job(
             question=question,
             project_id=project_id,

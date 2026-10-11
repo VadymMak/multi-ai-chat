@@ -477,6 +477,33 @@ EVAL_CASES = [
         "context_marker": "PROPOSER_CONTEXT_STUB_UNIQUE_MARKER",
     },
 
+    # Phase 5 — analysis gate (cheap deterministic, no model call)
+    {
+        "name": "debate_gate_analysis_blocked",
+        "suite": "debate",
+        "kind": "debate_gate",
+        "description": (
+            "A review/analysis question is blocked by the deterministic gate; "
+            "skipped=true is returned with no model fired and $0 cost"
+        ),
+        "input": {
+            "question": "review our AI studio and list improvements",
+            "force": False,
+        },
+        "assert": "gate_skipped",
+    },
+    {
+        "name": "debate_gate_force_bypasses",
+        "suite": "debate",
+        "kind": "debate_gate",
+        "description": "force=True bypasses the analysis gate (gate returns None)",
+        "input": {
+            "question": "review our AI studio and list improvements",
+            "force": True,
+        },
+        "assert": "gate_bypassed",
+    },
+
     # Phase 4 — async job start/poll (stubbed, no live calls, no real DB required)
     {
         "name": "debate_job_start_poll",

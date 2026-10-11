@@ -31,7 +31,13 @@ No exceptions. Even for simple questions.
 
 ## When to use debate()
 
-Call a debate ONLY when ALL of the following hold:
+### MANDATORY self-check (run BEFORE every debate_start / debate call)
+
+State in ONE line: "This meets gate (a) because ___, (b) because ___, (c) because ___."
+If you cannot complete all three, **do NOT debate — answer directly.**
+
+### Gate (a/b/c) — ALL must hold
+
   (a) The problem involves **architecture, concurrency, security, data integrity,
       or an irreversible decision** — OR the agent already produced two conflicting
       answers this session.
@@ -39,11 +45,21 @@ Call a debate ONLY when ALL of the following hold:
   (c) The **cost of being wrong is high** (user-facing breakage, data loss,
       significant rework).
 
-**NEVER** call debate for:
-- Routine codegen or refactoring
-- Simple explanations or "how to use X library" questions
-- Questions with a well-known deterministic answer
-- Tasks where a single confident model answer is sufficient
+### NEVER debate these (answer directly instead)
+
+| Task type | Examples |
+|---|---|
+| Review / preview / audit | "review our AI studio", "preview the new onboarding" |
+| Summarize / explain | "summarize this PR", "explain how X works" |
+| Prioritize / recommend | "what should we improve?", "give recommendations" |
+| Look-at / tell-me | "look at X and tell me what's wrong" |
+| List / overview | "list the features", "give me an overview" |
+| Routine codegen | adding a field, renaming, simple refactor |
+| How-to questions | "how do I use library X?" |
+
+The server enforces this with a **cheap deterministic gate** — debate_start and
+debate return `{skipped:true, reason, matched}` immediately for analysis tasks,
+firing zero models and costing $0. Pass `force=true` to bypass for genuine edge cases.
 
 ### Which tool to use
 
@@ -59,6 +75,7 @@ Always pass `project_id` or `folder_identifier` so the debate is grounded.
 Give up after 3 minutes if still running.
 
 ```
+# Self-check first: "This meets (a) X, (b) Y, (c) Z"
 debate_id = debate_start(question=..., project_id=20, rounds=2, verify=True)
 # poll loop:
 while True:
@@ -66,6 +83,7 @@ while True:
     if r.status != "running":
         break
     sleep(5)
+# If r.skipped == true: the gate fired — answer directly instead
 ```
 
 `debate()` fires three paid models (~$0.10–0.40 per call) and takes 40–90s.
