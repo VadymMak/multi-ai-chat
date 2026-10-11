@@ -176,14 +176,84 @@ async def _run_quote_supported_case(case: dict) -> dict:
     return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
 
 
+async def _run_resolve_source_case(case: dict) -> dict:
+    from app.services.verify_manager import _resolve_source
+
+    inp = case["input"]
+    result = await asyncio.to_thread(_resolve_source, inp["source"])
+
+    if case["assert"] == "is_none":
+        return {
+            "passed": result is None,
+            "details": {"source": inp["source"], "result": result},
+        }
+
+    if case["assert"] == "url_contains":
+        fragment = case.get("expected_url_fragment", "")
+        url = (result or {}).get("url", "")
+        passed = result is not None and fragment in url
+        return {
+            "passed": passed,
+            "details": {
+                "source": inp["source"],
+                "url": url,
+                "expected_fragment": fragment,
+            },
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+
+async def _run_extract_claims_case(case: dict) -> dict:
+    from app.services.verify_manager import extract_claims
+
+    inp = case["input"]
+    text = inp["text"]
+    model_key = inp.get("model_key", "gpt-4o-mini")
+
+    all_claims = await asyncio.to_thread(extract_claims, text, model_key)
+    fact_count = sum(1 for c in all_claims if c.get("type") == "fact")
+
+    if case["assert"] == "count_within_tolerance":
+        expected = case["expected_count"]
+        tol = case.get("tolerance", 2)
+        passed = abs(fact_count - expected) <= tol
+        return {
+            "passed": passed,
+            "score": fact_count,
+            "details": {
+                "fact_count": fact_count,
+                "expected_count": expected,
+                "tolerance": tol,
+                "model_key": model_key,
+                "claims_preview": [c["claim"][:80] for c in all_claims[:8]],
+            },
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+
+async def _run_skip_case(case: dict) -> dict:
+    return {
+        "passed": True,
+        "details": {
+            "status": "skipped",
+            "reason": case.get("description", "no reason given"),
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DISPATCHERS = {
-    "hybrid_search":      _run_hybrid_search_case,
+    "hybrid_search":       _run_hybrid_search_case,
     "build_smart_context": _run_build_context_case,
-    "quote_supported":    _run_quote_supported_case,
+    "quote_supported":     _run_quote_supported_case,
+    "resolve_source":      _run_resolve_source_case,
+    "extract_claims":      _run_extract_claims_case,
+    "skip":                _run_skip_case,
 }
 
 

@@ -96,6 +96,10 @@ SKIP_PATTERNS = [
     "pnpm-lock.yaml",
     "*.map",
     "*.d.ts.map",
+    # Eval harness definition files — excluded to prevent contaminating retrieval evals
+    # (eval_cases.py contains the test query strings; indexing it makes it rank for its own tests)
+    "app/config/eval_cases.py",
+    "tests/evals/",
 ]
 
 # Max file size to index (in bytes)

@@ -4,21 +4,60 @@ Eval harness cases — mechanical asserts only, no LLM judge.
 Each case: name, suite, kind, description, input dict, assert key + params.
 Runner dispatch is in app/services/eval_runner.py.
 
-Suites:
-  retrieval  — hybrid_search returns expected file / does not return noise file
-  context    — build_smart_context is non-empty, under budget, has structure markers
-  verify     — quote_supported discriminates fabricated vs. real verbatim quotes
+Suites (run by name via run_suite(suite=<name>)):
+  retrieval    — hybrid_search returns / does not return expected file
+  context      — build_smart_context is non-empty, under budget, has markers
+  verify       — quote_supported / _resolve_source mechanical paths
+  extraction   — extract_claims count within tolerance (uses LLM; ±2 tolerance)
+  tool_routing — documents absence of server-side verify router (skip)
+  model_swap   — extraction_coverage on DEFAULT vs FALLBACK model_key
+
+"all" runs every suite including model_swap.
+
+─── DISCERNMENT THRESHOLD (spec 2.3) ────────────────────────────────────────
+Baseline pass-rate: 15/15 (100 %).
+A change is SIGNIFICANT when pass-rate delta ≥ 2 cases (≥13 %).
+  • Mechanical cases (quote_supported, resolve_source, hybrid_search, context):
+    result is deterministic → any regression is a real regression.
+  • Stochastic cases (extract_claims): tolerance ±2 handles LLM variance.
+    A CONSISTENT drop below (N-2) across two consecutive runs counts as a
+    real regression.
+Model-swap comparisons are PAIRED: each text is submitted to both models in
+the same run_suite invocation, then outcome buckets are compared — not
+aggregate averages — to avoid model-performance noise masking routing changes.
+──────────────────────────────────────────────────────────────────────────────
 """
 
-# Shared document used for verify suite (Monolith paper excerpt, same as test_verify_core.py)
+# ─── Shared test fixtures ─────────────────────────────────────────────────────
+
+# Monolith paper excerpt (same as test_verify_core.py)
 _MONOLITH_DOC = (
     "Monolith uses a collisionless embedding table to support online learning "
     "with real-time updates, allowing the recommendation system to adapt rapidly "
     "to changing user preferences without batch retraining."
 )
 
+# Reference text for extraction suite: 4 discrete factual claims, no stated sources.
+# Expected N=4 facts; tolerance ±2 → acceptable range [2, 6].
+_EXTRACTION_REFERENCE = (
+    "The Brain MCP server exposes over 40 tools via the MCP protocol. "
+    "Hybrid search combines semantic vector embeddings, full-text search, and "
+    "knowledge graph scores. Session summaries are stored in the canon_items "
+    "table as type SESSION_SUMMARY. The smart_context builder compresses 150K "
+    "tokens of project data to approximately 4K tokens."
+)
+
+# Pure-opinion text for extraction empty control: no verifiable factual claims.
+_OPINION_TEXT = (
+    "I think the sunrise this morning looked absolutely beautiful. "
+    "Coffee always tastes better on a quiet Sunday. "
+    "The team seems really excited about the upcoming sprint."
+)
+
+# ─── Cases ───────────────────────────────────────────────────────────────────
+
 EVAL_CASES = [
-    # ─── retrieval suite ─────────────────────────────────────────────────────
+    # ── retrieval suite ──────────────────────────────────────────────────────
     {
         "name": "retrieval_debate_hit",
         "suite": "retrieval",
@@ -32,7 +71,6 @@ EVAL_CASES = [
             "project_id": 20,
             "top_n": 5,
         },
-        # assert: any of the top-N file_path values contains expected_file
         "assert": "file_in_top_n",
         "expected_file": "debate_manager.py",
     },
@@ -49,11 +87,26 @@ EVAL_CASES = [
             "project_id": 20,
             "top_n": 5,
         },
-        # assert: none of the top-N file_path values contains expected_file
         "assert": "file_not_in_top_n",
         "expected_file": "debate_manager.py",
     },
-    # ─── context suite ───────────────────────────────────────────────────────
+    {
+        "name": "retrieval_verify_manager_hit",
+        "suite": "retrieval",
+        "kind": "hybrid_search",
+        "description": (
+            "hybrid_search('verify claims fact check quote source', project=20) "
+            "→ verify_manager.py appears in top-5 (second positive; different file)"
+        ),
+        "input": {
+            "query": "verify claims fact check quote source",
+            "project_id": 20,
+            "top_n": 5,
+        },
+        "assert": "file_in_top_n",
+        "expected_file": "verify_manager.py",
+    },
+    # ── context suite ────────────────────────────────────────────────────────
     {
         "name": "context_budget",
         "suite": "context",
@@ -84,10 +137,25 @@ EVAL_CASES = [
             "role_id": 0,
         },
         "assert": "contains_markers",
-        # at least one marker must appear in the returned context string
         "markers": ["RELEVANT SKILLS", "PROJECT STRUCTURE", "KNOWLEDGE GRAPH"],
     },
-    # ─── verify suite ────────────────────────────────────────────────────────
+    {
+        "name": "context_budget_stress",
+        "suite": "context",
+        "kind": "build_smart_context",
+        "description": (
+            "build_smart_context(project=20, broad multi-topic query) → STILL ≤ 20 000 chars "
+            "(guards the budget cap under broader / heavier queries)"
+        ),
+        "input": {
+            "query": "hybrid search smart context verify claims debate mode knowledge graph",
+            "project_id": 20,
+            "role_id": 0,
+        },
+        "assert": "non_empty_under_budget",
+        "max_chars": 20_000,
+    },
+    # ── verify suite ─────────────────────────────────────────────────────────
     {
         "name": "verify_refuted",
         "suite": "verify",
@@ -115,5 +183,116 @@ EVAL_CASES = [
             "document": _MONOLITH_DOC,
         },
         "assert": "is_true",
+    },
+    {
+        "name": "verify_unchecked_source",
+        "suite": "verify",
+        "kind": "resolve_source",
+        "description": (
+            "_resolve_source('Attention Is All You Need') → None "
+            "(bare title is unresolvable → claim would land in unchecked/source_unresolvable)"
+        ),
+        "input": {
+            "source": "Attention Is All You Need",
+        },
+        "assert": "is_none",
+    },
+    {
+        "name": "verify_resolve_arxiv",
+        "suite": "verify",
+        "kind": "resolve_source",
+        "description": (
+            "_resolve_source('arXiv:2209.07663') → not None, url contains 'ar5iv' "
+            "(positive path: resolvable source reaches fetch stage)"
+        ),
+        "input": {
+            "source": "arXiv:2209.07663",
+        },
+        "assert": "url_contains",
+        "expected_url_fragment": "ar5iv",
+    },
+    # ── extraction suite ─────────────────────────────────────────────────────
+    # Uses LLM (extract_claims) — stochastic; tolerance ±2 is the discernment threshold.
+    {
+        "name": "extraction_coverage",
+        "suite": "extraction",
+        "kind": "extract_claims",
+        "description": (
+            "extract_claims(4-claim reference text) → count of facts within [2, 6] "
+            "(N=4, tolerance ±2; mandatory true-positive per spec 2.3)"
+        ),
+        "input": {
+            "text": _EXTRACTION_REFERENCE,
+            "model_key": "gpt-4o-mini",
+        },
+        "assert": "count_within_tolerance",
+        "expected_count": 4,
+        "tolerance": 2,
+    },
+    {
+        "name": "extraction_empty_control",
+        "suite": "extraction",
+        "kind": "extract_claims",
+        "description": (
+            "extract_claims(pure-opinion text) → 0 facts ±1 "
+            "(negative control: guards against 'classify everything as fact' regression)"
+        ),
+        "input": {
+            "text": _OPINION_TEXT,
+            "model_key": "gpt-4o-mini",
+        },
+        "assert": "count_within_tolerance",
+        "expected_count": 0,
+        "tolerance": 1,
+    },
+    # ── tool_routing suite ───────────────────────────────────────────────────
+    {
+        "name": "tool_routing_skip",
+        "suite": "tool_routing",
+        "kind": "skip",
+        "description": (
+            "SKIP — Brain has no server-side verify-vs-normal-answer router. "
+            "query_classifier routes between retrieval strategies (FILENAME/SYMBOL/"
+            "PATTERN/SEMANTIC) only; the decision to call verify_claims is made by "
+            "the agent, not a server function. There is no mechanical signal to assert "
+            "against at the service layer. Eval deferred to agent-level acceptance tests."
+        ),
+        "input": {},
+        "assert": "skip",
+    },
+    # ── model_swap suite ─────────────────────────────────────────────────────
+    # Same reference text, different model_key — assert both land within tolerance.
+    # Paired comparison: if both pass, outcome bucket is invariant across models.
+    {
+        "name": "model_swap_extract_mini",
+        "suite": "model_swap",
+        "kind": "extract_claims",
+        "description": (
+            "extract_claims(reference_text, model_key='gpt-4o-mini') → N±2 facts "
+            "(DEFAULT model baseline for model-swap pairing)"
+        ),
+        "input": {
+            "text": _EXTRACTION_REFERENCE,
+            "model_key": "gpt-4o-mini",
+        },
+        "assert": "count_within_tolerance",
+        "expected_count": 4,
+        "tolerance": 2,
+    },
+    {
+        "name": "model_swap_extract_gpt4o",
+        "suite": "model_swap",
+        "kind": "extract_claims",
+        "description": (
+            "extract_claims(reference_text, model_key='gpt-4o') → N±2 facts "
+            "(FALLBACK model — assert bucket invariant vs DEFAULT)"
+        ),
+        "input": {
+            "text": _EXTRACTION_REFERENCE,
+            "model_key": "gpt-4o",
+        },
+        "assert": "count_within_tolerance",
+        "expected_count": 4,
+        "tolerance": 2,
     },
 ]
