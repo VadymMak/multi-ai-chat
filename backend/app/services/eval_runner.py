@@ -260,6 +260,120 @@ async def _run_skip_case(case: dict) -> dict:
     }
 
 
+async def _run_guardrail_case(case: dict) -> dict:
+    """
+    Calls a destructive MCP tool function directly to verify the confirm-gate.
+
+    setup="insert_registry_row" seeds a throwaway ProjectRegistry row that
+    confirm=True will delete; the row uses name="__eval_guardrail_target__" so
+    it is clearly a test artifact and never collides with real data.
+
+    assert="preview_response"  → response must have "preview": True, no "deleted" key
+    assert="deleted_response"  → response must have "deleted" key truthy
+    """
+    from app.mcp_server import registry_delete
+    from app.memory.db import SessionLocal
+
+    inp = case["input"]
+    tool_name = inp["tool"]
+    kwargs    = dict(inp.get("kwargs", {}))
+    setup     = inp.get("setup")
+
+    if tool_name != "registry_delete":
+        return {
+            "passed": False,
+            "details": {"reason": f"guardrail runner only supports registry_delete, got {tool_name!r}"},
+        }
+
+    # ── optional seed ─────────────────────────────────────────────────────────
+    if setup == "insert_registry_row":
+        db = SessionLocal()
+        try:
+            # Resolve the same user_id that registry_delete will use
+            uid_row = db.execute(
+                text("SELECT id FROM users WHERE is_superuser = TRUE ORDER BY id ASC LIMIT 1")
+            ).fetchone()
+            if not uid_row:
+                uid_row = db.execute(
+                    text("SELECT id FROM users ORDER BY id ASC LIMIT 1")
+                ).fetchone()
+            if not uid_row:
+                return {"passed": False, "details": {"reason": "no users in DB for seed"}}
+            uid = uid_row[0]
+
+            # Remove any stale row from a previous failed run
+            db.execute(
+                text("DELETE FROM project_registry WHERE name = :n"),
+                {"n": "__eval_guardrail_target__"},
+            )
+            db.execute(
+                text(
+                    "INSERT INTO project_registry (name, notes, status, user_id) "
+                    "VALUES (:n, :notes, 'active', :uid)"
+                ),
+                {"n": "__eval_guardrail_target__", "notes": "eval guardrail throwaway row", "uid": uid},
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            return {
+                "passed": False,
+                "details": {"reason": f"setup insert failed: {exc}"},
+            }
+        finally:
+            db.close()
+
+    # ── call the tool ─────────────────────────────────────────────────────────
+    raw: str = await registry_delete(**kwargs)
+    try:
+        result = json.loads(raw)
+    except Exception:
+        result = {}
+
+    # ── assert ────────────────────────────────────────────────────────────────
+    if case["assert"] == "preview_response":
+        has_preview   = result.get("preview") is True
+        no_deleted    = "deleted" not in result
+        confirm_req   = result.get("confirm_required") is True
+        passed = has_preview and no_deleted and confirm_req
+        return {
+            "passed": passed,
+            "details": {
+                "result":         result,
+                "has_preview":    has_preview,
+                "no_deleted_key": no_deleted,
+                "confirm_required": confirm_req,
+            },
+        }
+
+    if case["assert"] == "deleted_response":
+        deleted_key = "deleted" in result
+        deleted_val = bool(result.get("deleted"))
+        # Verify row is actually gone
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                text("SELECT id FROM project_registry WHERE name = :n"),
+                {"n": "__eval_guardrail_target__"},
+            ).fetchone()
+            row_gone = row is None
+        finally:
+            db.close()
+
+        passed = deleted_key and deleted_val and row_gone
+        return {
+            "passed": passed,
+            "details": {
+                "result":    result,
+                "deleted_key": deleted_key,
+                "deleted_val": deleted_val,
+                "row_gone":    row_gone,
+            },
+        }
+
+    return {"passed": False, "details": {"reason": f"unknown assert: {case['assert']}"}}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +385,7 @@ _DISPATCHERS = {
     "resolve_source":      _run_resolve_source_case,
     "extract_claims":      _run_extract_claims_case,
     "skip":                _run_skip_case,
+    "guardrail":           _run_guardrail_case,
 }
 
 

@@ -2627,31 +2627,84 @@ async def save_skill(
 # Tool 30 — delete_skill
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
-async def delete_skill(name: str) -> str:
+async def delete_skill(name: str, confirm: bool = False) -> str:
     """
     Permanently delete a skill from the brain_skills library by name.
 
+    DESTRUCTIVE TOOL — requires confirm=True to execute.
+    confirm=False (default) → returns a dry-run PREVIEW; skill is NOT deleted.
+    confirm=True → deletes the skill and writes a guardrail span.
+
+    NEVER pass confirm=true without explicit human approval.
+
     Args:
-        name: Exact skill name to delete (e.g. "auto-skill-distillation").
+        name:    Exact skill name to delete (e.g. "auto-skill-distillation").
+        confirm: Must be True to actually delete. Default False returns preview.
     """
+    from app.services.trace_service import trace as _trace, trace_span as _span
+
     db = _open_db()
     try:
-        result = db.execute(
-            text("DELETE FROM brain_skills WHERE name = :name RETURNING id, name"),
-            {"name": name},
+        # Look up the skill first (needed for both preview and execute)
+        skill_row = db.execute(
+            text("SELECT id, name, category, description FROM brain_skills WHERE name = :n"),
+            {"n": name},
         ).fetchone()
-        db.commit()
-        if result:
-            return json.dumps(
-                {"deleted": True, "skill_id": result[0], "name": result[1]},
-                ensure_ascii=False,
-            )
+
+        if not confirm:
+            # ── PREVIEW MODE ──────────────────────────────────────────────
+            async with _trace("tool", summary=f"delete_skill preview name={name}") as _t:
+                async with _span(_t, "guardrail", "delete_skill",
+                                 input_summary=f"name={name} confirm=False") as _s:
+                    _s["status"] = "skip"
+                    preview: dict = {
+                        "preview":          True,
+                        "confirm_required": True,
+                        "action":           "delete_skill",
+                        "name":             name,
+                        "found":            skill_row is not None,
+                        "would_delete":     [{
+                            "id":          skill_row[0],
+                            "name":        skill_row[1],
+                            "category":    skill_row[2],
+                            "description": skill_row[3],
+                        }] if skill_row else [],
+                        "message": (
+                            f"Pass confirm=true to permanently delete skill {name!r}."
+                            if skill_row else
+                            f"Skill {name!r} not found. Nothing would be deleted."
+                        ),
+                    }
+                    _s["output_summary"] = (
+                        f"preview: {'1 skill' if skill_row else 'not found'}, no deletion"
+                    )
+            return _cap_json(preview)
+
+        # ── EXECUTE MODE ──────────────────────────────────────────────────
+        async with _trace("tool", summary=f"delete_skill execute name={name}") as _t:
+            async with _span(_t, "guardrail", "delete_skill",
+                             input_summary=f"name={name} confirm=True") as _s:
+                if not skill_row:
+                    _s["output_summary"] = "not found — nothing deleted"
+                    return json.dumps(
+                        {"deleted": False, "reason": f"skill '{name}' not found"},
+                        ensure_ascii=False,
+                    )
+                db.execute(
+                    text("DELETE FROM brain_skills WHERE name = :n"),
+                    {"n": name},
+                )
+                db.commit()
+                _s["output_summary"] = f"deleted skill={name}"
         return json.dumps(
-            {"deleted": False, "reason": f"skill '{name}' not found"},
+            {"deleted": True, "skill_id": skill_row[0], "name": skill_row[1]},
             ensure_ascii=False,
         )
     except Exception as exc:
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.error("delete_skill error: %s", exc)
         return json.dumps({"error": str(exc), "deleted": False}, ensure_ascii=False)
     finally:
@@ -4439,14 +4492,28 @@ async def registry_get(name: str, user_id: Optional[int] = None) -> str:
 # registry_delete
 # ─────────────────────────────────────────────────────────────────
 @mcp.tool()
-async def registry_delete(name: str, user_id: Optional[int] = None) -> str:
+async def registry_delete(
+    name: str,
+    user_id: Optional[int] = None,
+    confirm: bool = False,
+) -> str:
     """
     Delete a project registry entry by name.
+
+    DESTRUCTIVE TOOL — requires confirm=True to execute.
+    confirm=False (default) → returns a dry-run PREVIEW showing exactly what
+    would be deleted; the entry is NOT touched.
+    confirm=True → deletes the entry and writes a guardrail span to the trace.
+
+    NEVER pass confirm=true without explicit human approval.
 
     Args:
         name:    Project name to delete.
         user_id: Owner user id (defaults to first superuser).
+        confirm: Must be True to actually delete. Default False returns preview.
     """
+    from app.services.trace_service import trace as _trace, trace_span as _span
+
     db = _open_db()
     try:
         uid = _resolve_registry_user_id(db, user_id)
@@ -4457,14 +4524,53 @@ async def registry_delete(name: str, user_id: Optional[int] = None) -> str:
             ProjectRegistry.name == name,
         ).first()
 
-        if entry is None:
-            return json.dumps({"error": f"No registry entry found for name={name!r}"})
+        if not confirm:
+            # ── PREVIEW MODE — no deletion ────────────────────────────────
+            async with _trace("tool", summary=f"registry_delete preview name={name}") as _t:
+                async with _span(_t, "guardrail", "registry_delete",
+                                 input_summary=f"name={name} confirm=False") as _s:
+                    _s["status"] = "skip"
+                    preview: dict = {
+                        "preview":          True,
+                        "confirm_required": True,
+                        "action":           "registry_delete",
+                        "name":             name,
+                        "found":            entry is not None,
+                        "would_delete":     [{
+                            "id":       entry.id,
+                            "name":     entry.name,
+                            "category": entry.category,
+                            "status":   entry.status,
+                            "git_url":  entry.git_url,
+                        }] if entry else [],
+                        "message": (
+                            f"Pass confirm=true to permanently delete registry entry {name!r}."
+                            if entry else
+                            f"No registry entry found for name={name!r}. Nothing would be deleted."
+                        ),
+                    }
+                    _s["output_summary"] = (
+                        f"preview: {'1 entry' if entry else 'not found'}, no deletion"
+                    )
+            return _cap_json(preview)
 
-        db.delete(entry)
-        db.commit()
+        # ── EXECUTE MODE — confirm=True ────────────────────────────────────
+        async with _trace("tool", summary=f"registry_delete execute name={name}") as _t:
+            async with _span(_t, "guardrail", "registry_delete",
+                             input_summary=f"name={name} confirm=True") as _s:
+                if entry is None:
+                    _s["output_summary"] = "not found — nothing deleted"
+                    return json.dumps({"error": f"No registry entry found for name={name!r}"})
+                db.delete(entry)
+                db.commit()
+                _s["output_summary"] = f"deleted name={name}"
         return json.dumps({"deleted": name})
+
     except Exception as exc:
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.error("registry_delete error: %s", exc)
         return json.dumps({"error": str(exc)})
     finally:

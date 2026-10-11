@@ -295,4 +295,35 @@ EVAL_CASES = [
         "expected_count": 4,
         "tolerance": 2,
     },
+
+    # ── guardrail suite ───────────────────────────────────────────────────────
+    {
+        "name": "guardrail_preview_blocks_delete",
+        "suite": "guardrail",
+        "kind": "guardrail",
+        "description": (
+            "registry_delete(confirm=False) on a non-existent name → "
+            "preview dict returned, no deletion performed"
+        ),
+        "input": {
+            "tool":    "registry_delete",
+            "kwargs":  {"name": "__eval_guardrail_nonexistent__", "confirm": False},
+        },
+        "assert": "preview_response",
+    },
+    {
+        "name": "guardrail_confirm_executes",
+        "suite": "guardrail",
+        "kind": "guardrail",
+        "description": (
+            "registry_delete(confirm=True) on a throwaway row → deleted=True, "
+            "row gone from DB, guardrail span recorded"
+        ),
+        "input": {
+            "tool":    "registry_delete",
+            "kwargs":  {"name": "__eval_guardrail_target__", "confirm": True},
+            "setup":   "insert_registry_row",
+        },
+        "assert": "deleted_response",
+    },
 ]
