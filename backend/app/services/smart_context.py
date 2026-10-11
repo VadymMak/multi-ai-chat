@@ -9,6 +9,7 @@ REFACTORED v2.0:
   * END (high attention): Relevant Code
 """
 
+import asyncio
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -253,7 +254,7 @@ async def build_smart_context(
         ).scalar() or 0
 
         if kg_total > 0:
-            kg_embedding = vector_service.create_embedding(query)
+            kg_embedding = await asyncio.to_thread(vector_service.create_embedding, query)
 
             kg_rows = db.execute(
                 text("""
@@ -644,12 +645,11 @@ async def build_smart_context(
         
         print(f"🔍 [Smart Context] 5. Hybrid search for project={project_id}...")
 
-        relevant_files = hybrid_search(
-            query=query,
-            project_id=project_id,
-            db=db,
-            preset="code",  # Balanced: semantic=40%, fts=30%, graph=30%
-            limit=15
+        relevant_files = await asyncio.to_thread(
+            hybrid_search,
+            query, project_id, db,
+            preset="code",
+            limit=15,
         )
 
         if relevant_files:

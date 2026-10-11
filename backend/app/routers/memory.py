@@ -1,4 +1,5 @@
 # app/routers/memory.py
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -180,7 +181,8 @@ async def save_session_summary(
         prompt = _SESSION_SUMMARY_PROMPT.format(
             content=request.session_content[:8000]
         )
-        response = client.chat.completions.create(
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500,

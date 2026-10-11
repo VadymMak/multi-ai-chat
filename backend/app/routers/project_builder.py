@@ -9,6 +9,7 @@ UPDATED: Uses Claude Sonnet 4.5 with Smart Context for code generation
 - Project structure (Git file tree)
 """
 
+import asyncio
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -569,17 +570,18 @@ GENERATE THE COMPLETE CODE FOR: {request.file_path}"""
     try:
         messages = [{"role": "user", "content": user_prompt}]
         
-        code = ask_openai(
+        code = await asyncio.to_thread(
+            ask_openai,
             messages=messages,
             model="gpt-4o",
             max_tokens=4000,
             temperature=0.3,
-            system_prompt=FILE_GENERATOR_SYSTEM
+            system_prompt=FILE_GENERATOR_SYSTEM,
         )
-        
+
         if code.startswith("[OpenAI Error]"):
             raise HTTPException(status_code=500, detail=code)
-        
+
         language = detect_language(request.file_path)
         code = clean_code_output(code)
         tokens_used = len(code) // 4
@@ -855,12 +857,13 @@ DESCRIPTION: {description}
                     
                     prompt_parts.append(f"\nGENERATE COMPLETE CODE FOR: {file_path}")
                     
-                    code = ask_openai(
+                    code = await asyncio.to_thread(
+                        ask_openai,
                         messages=[{"role": "user", "content": "\n".join(prompt_parts)}],
                         model="gpt-4o",
                         max_tokens=4000,
                         temperature=0.3,
-                        system_prompt=FILE_GENERATOR_SYSTEM
+                        system_prompt=FILE_GENERATOR_SYSTEM,
                     )
                 
                 # Check for errors

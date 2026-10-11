@@ -1,4 +1,5 @@
 # app/routers/upload_file.py
+import asyncio
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -259,10 +260,11 @@ async def upload_file(
 
             prov = (provider or "claude").lower()
             if prov == "openai":
-                summary = ask_openai(
+                summary = await asyncio.to_thread(
+                    ask_openai,
                     messages=[user_prompt],
                     system_prompt=system_msg["content"],
-                    model=(OPENAI_SUMMARIZE_MODEL or None)
+                    model=(OPENAI_SUMMARIZE_MODEL or None),
                 )
             else:
                 summary = ask_claude([system_msg, user_prompt])

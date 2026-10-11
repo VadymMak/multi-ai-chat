@@ -269,7 +269,7 @@ async def _tool_search_conversation_memory(args: Dict[str, Any]) -> Any:
     db = _open_db()
     try:
         from app.services.vector_service import create_embedding
-        query_embedding: List[float] = create_embedding(query)
+        query_embedding: List[float] = await asyncio.to_thread(create_embedding, query)
 
         role_clause = "AND role_id = :role_id" if role_id is not None else ""
         params: Dict[str, Any] = {
@@ -866,7 +866,7 @@ async def _tool_get_developer_patterns(
         else:
             # Semantic search across ALL projects
             try:
-                query_embedding = create_embedding(query)
+                query_embedding = await asyncio.to_thread(create_embedding, query)
                 rows = db.execute(
                     text("""
                         SELECT ke.name, ke.entity_type, ke.description,
@@ -3798,7 +3798,7 @@ async def query_knowledge_graph(
 
         # Semantic match: generate embedding and find closest entities
         from app.services.vector_service import create_embedding
-        embedding = create_embedding(query)
+        embedding = await asyncio.to_thread(create_embedding, query)
 
         rows = db.execute(
             text("""
@@ -3935,37 +3935,50 @@ async def extract_knowledge_for_project(
     finally:
         db.close()
 
-    try:
+    def _run_extraction_sync() -> Dict[str, int]:
         from app.services.knowledge_extractor import KnowledgeExtractor
         extractor = KnowledgeExtractor()
 
-        total_files = 0
-        total_entities = 0
-        total_relationships = 0
-        batches_run = 0
-        offset = 0
+        _total_files = 0
+        _total_entities = 0
+        _total_relationships = 0
+        _batches_run = 0
+        _offset = 0
 
-        while offset < max_files:
-            batch = min(batch_size, max_files - offset)
-            result = extractor.extract_from_project(
+        while _offset < max_files:
+            _batch = min(batch_size, max_files - _offset)
+            _result = extractor.extract_from_project(
                 project_id=project_id,
-                limit=batch,
-                offset=offset,
+                limit=_batch,
+                offset=_offset,
             )
-            batches_run += 1
-            total_files += result["files_processed"]
-            total_entities += result["entities_added"]
-            total_relationships += result["relationships_added"]
+            _batches_run += 1
+            _total_files += _result["files_processed"]
+            _total_entities += _result["entities_added"]
+            _total_relationships += _result["relationships_added"]
             logger.info(
                 "extract_knowledge_for_project: project=%d batch=%d offset=%d "
                 "files=%d entities=%d",
-                project_id, batches_run, offset,
-                result["files_processed"], result["entities_added"],
+                project_id, _batches_run, _offset,
+                _result["files_processed"], _result["entities_added"],
             )
-            # Stop when the batch returned fewer rows than requested
-            if result["files_processed"] < batch:
+            if _result["files_processed"] < _batch:
                 break
-            offset += batch
+            _offset += _batch
+
+        return {
+            "batches_run": _batches_run,
+            "total_files": _total_files,
+            "total_entities": _total_entities,
+            "total_relationships": _total_relationships,
+        }
+
+    try:
+        counts = await asyncio.to_thread(_run_extraction_sync)
+        batches_run = counts["batches_run"]
+        total_files = counts["total_files"]
+        total_entities = counts["total_entities"]
+        total_relationships = counts["total_relationships"]
 
         # Final graph size
         db2 = _open_db()
