@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -20,6 +21,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Iterator, Optional
+
+try:
+    import certifi
+    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    _SSL_CTX = ssl.create_default_context()  # system CA bundle fallback
 
 # ────────────────────────────────────────────────
 # Config
@@ -147,7 +154,7 @@ def _api(method: str, path: str, body: Optional[dict] = None, timeout: int = 30)
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body_bytes = e.read()
