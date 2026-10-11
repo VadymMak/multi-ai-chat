@@ -84,6 +84,55 @@ def _open_db():
 
 
 # ─────────────────────────────────────────────────────────────────
+# Output-size safety net
+# ─────────────────────────────────────────────────────────────────
+def _cap_json(payload: Any, max_chars: int = 24_000) -> str:
+    """
+    Serialize payload to JSON (ensure_ascii=False, default=str).
+    If the result exceeds max_chars, find the largest list field, truncate it
+    to the first N items that fit, and append _truncated/hint metadata.
+    Never disables the size check — always returns a string ≤ max_chars.
+    """
+    raw = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(raw) <= max_chars:
+        return raw
+
+    # Try to shrink the largest list field
+    if isinstance(payload, dict):
+        largest_key = None
+        largest_len = 0
+        for k, v in payload.items():
+            if isinstance(v, list) and len(v) > largest_len:
+                largest_key = k
+                largest_len = len(v)
+        if largest_key and largest_len > 1:
+            truncated = dict(payload)
+            items = list(payload[largest_key])
+            # Binary-search for how many items fit
+            lo, hi = 1, largest_len - 1
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                probe = dict(truncated)
+                probe[largest_key] = items[:mid]
+                probe["_truncated"] = True
+                probe["_hint"] = "use limit/offset to page"
+                if len(json.dumps(probe, ensure_ascii=False, default=str)) <= max_chars:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            truncated[largest_key] = items[:lo]
+            truncated["_truncated"] = True
+            truncated["_hint"] = "use limit/offset to page"
+            result = json.dumps(truncated, ensure_ascii=False, default=str)
+            if len(result) <= max_chars:
+                return result
+
+    # Last resort: hard-truncate the raw string with a suffix
+    suffix = '... [TRUNCATED — use limit/offset]"}'
+    return raw[: max_chars - len(suffix)] + suffix
+
+
+# ─────────────────────────────────────────────────────────────────
 # Tool 1 — search_project_files
 # ─────────────────────────────────────────────────────────────────
 async def _tool_search_project_files(args: Dict[str, Any]) -> Any:
@@ -273,23 +322,43 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
     project_id: str = str(args["project_id"])
     item_type: Optional[str] = args.get("type")
     is_active: bool = bool(args.get("is_active", True))
+    limit: int = int(args.get("limit", 20))
+    offset: int = int(args.get("offset", 0))
+    preview_chars: int = int(args.get("preview_chars", 200))
 
     db = _open_db()
     try:
         type_clause = "AND type = :item_type" if item_type else ""
         params: Dict[str, Any] = {
-            "project_id": project_id, "is_active": is_active}
+            "project_id": project_id,
+            "is_active": is_active,
+            "limit": max(1, min(limit, 200)),
+            "offset": max(0, offset),
+        }
         if item_type:
             params["item_type"] = item_type
 
+        # Count total matching rows for pagination metadata
+        total_count: int = db.execute(
+            text(f"""
+                SELECT COUNT(*)
+                FROM canon_items
+                WHERE project_id = :project_id
+                  AND is_active  = :is_active
+                  {type_clause}
+            """),
+            {k: params[k] for k in ("project_id", "is_active", *( ["item_type"] if item_type else []))},
+        ).scalar() or 0
+
         rows = db.execute(
             text(f"""
-                SELECT id, type, title, body, tags, created_at
+                SELECT id, type, title, body, created_at
                 FROM canon_items
                 WHERE project_id = :project_id
                   AND is_active  = :is_active
                   {type_clause}
                 ORDER BY created_at DESC
+                LIMIT :limit OFFSET :offset
             """),
             params,
         ).fetchall()
@@ -298,23 +367,24 @@ async def _tool_list_canon_items(args: Dict[str, Any]) -> Any:
 
         results: List[Dict[str, Any]] = []
         for r in rows:
-            tags: Any = r.tags
-            if isinstance(tags, str):
-                try:
-                    tags = json.loads(tags)
-                except Exception:
-                    tags = []
+            body = r.body or ""
+            preview = body[:preview_chars] + ("…" if len(body) > preview_chars else "")
             results.append(
                 {
                     "id": r.id,
                     "type": r.type,
                     "title": r.title,
-                    "body": r.body,
-                    "tags": tags,
+                    "preview": preview,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
             )
-        return results
+        return {
+            "total_count": total_count,
+            "returned": len(results),
+            "limit": params["limit"],
+            "offset": params["offset"],
+            "items": results,
+        }
     except Exception as exc:
         logger.error("list_canon_items error: %s", exc)
         return {"error": str(exc)}
@@ -485,12 +555,30 @@ async def search_conversation_memory(
 
 @mcp.tool()
 async def list_canon_items(
-    project_id: str, type: Optional[str] = None, is_active: bool = True
+    project_id: str,
+    type: Optional[str] = None,
+    is_active: bool = True,
+    limit: int = 20,
+    offset: int = 0,
+    preview_chars: int = 200,
 ) -> str:
+    """
+    List canon items (ADRs, notes, session summaries) for a project.
+    Returns paginated compact rows — use limit/offset to page.
+    Each item includes a short preview of the body, not the full text.
+    Use get_file_content or a direct DB query to fetch the full body.
+    """
     result = await _tool_list_canon_items(
-        {"project_id": project_id, "type": type, "is_active": is_active}
+        {
+            "project_id": project_id,
+            "type": type,
+            "is_active": is_active,
+            "limit": limit,
+            "offset": offset,
+            "preview_chars": preview_chars,
+        }
     )
-    return json.dumps(result, default=str, ensure_ascii=False)
+    return _cap_json(result)
 
 
 @mcp.tool()
@@ -734,8 +822,17 @@ async def hybrid_search_files(
 async def _tool_get_developer_patterns(
     query: str,
     project_id: Optional[int],
+    limit: int = 20,
 ) -> Any:
     from app.services.vector_service import create_embedding
+
+    _FIELD_MAX = 200  # truncate every text field to this many chars
+    _limit = max(1, min(limit, 200))
+
+    def _trunc(s: Optional[str]) -> Optional[str]:
+        if not s:
+            return s
+        return s[:_FIELD_MAX] + ("…" if len(s) > _FIELD_MAX else "")
 
     db = _open_db()
     try:
@@ -749,8 +846,9 @@ async def _tool_get_developer_patterns(
                     JOIN projects p ON p.id = ke.project_id
                     WHERE ke.project_id = :project_id
                     ORDER BY ke.entity_type, ke.name
+                    LIMIT :limit
                 """),
-                {"project_id": project_id},
+                {"project_id": project_id, "limit": _limit},
             ).fetchall()
         else:
             # Semantic search across ALL projects
@@ -765,12 +863,12 @@ async def _tool_get_developer_patterns(
                         WHERE ke.embedding IS NOT NULL
                         ORDER BY ke.embedding <=> CAST(:embedding AS vector),
                                  ke.entity_type, ke.name
-                        LIMIT 100
+                        LIMIT :limit
                     """),
-                    {"embedding": query_embedding},
+                    {"embedding": query_embedding, "limit": _limit},
                 ).fetchall()
             except Exception:
-                # Fallback: return all without semantic ranking
+                # Fallback: return without semantic ranking
                 rows = db.execute(
                     text("""
                         SELECT ke.name, ke.entity_type, ke.description,
@@ -778,8 +876,9 @@ async def _tool_get_developer_patterns(
                         FROM knowledge_entities ke
                         JOIN projects p ON p.id = ke.project_id
                         ORDER BY ke.entity_type, ke.name
-                        LIMIT 100
+                        LIMIT :limit
                     """),
+                    {"limit": _limit},
                 ).fetchall()
 
         if not rows:
@@ -791,7 +890,6 @@ async def _tool_get_developer_patterns(
             }
 
         # ── 2. Group by project → entity_type ───────────────────
-        # entity_type → plural key used in output
         TYPE_KEY = {
             "framework":              "frameworks",
             "library":                "libraries",
@@ -815,14 +913,15 @@ async def _tool_get_developer_patterns(
                 patterns[proj][bucket] = []
 
             patterns[proj][bucket].append({
-                "name": r.name,
-                "description": r.description,
-                "source_file": r.source_file,
+                "name": _trunc(r.name),
+                "description": _trunc(r.description),
+                "source_file": _trunc(r.source_file),
             })
 
         return {
             "query": query,
             "projects_searched": len(projects_seen),
+            "returned": len(rows),
             "patterns": patterns,
         }
 
@@ -837,6 +936,7 @@ async def _tool_get_developer_patterns(
 async def get_developer_patterns(
     query: str,
     project_id: Optional[int] = None,
+    limit: int = 20,
 ) -> str:
     """
     Search developer patterns across all projects.
@@ -847,11 +947,11 @@ async def get_developer_patterns(
     - "Найди похожий код"
 
     If project_id is None — searches ALL projects.
-    Returns frameworks, libraries, patterns, components
-    that match the query.
+    Returns frameworks, libraries, patterns, components that match the query.
+    Use limit to control how many entities are returned (default 20, max 200).
     """
-    result = await _tool_get_developer_patterns(query=query, project_id=project_id)
-    return json.dumps(result, default=str, ensure_ascii=False)
+    result = await _tool_get_developer_patterns(query=query, project_id=project_id, limit=limit)
+    return _cap_json(result)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2403,11 +2503,7 @@ async def list_skills(category: Optional[str] = None) -> str:
             }
             for r in rows
         ]
-        return json.dumps(
-            {"count": len(skills), "category_filter": category, "skills": skills},
-            ensure_ascii=False,
-            default=str,
-        )
+        return _cap_json({"count": len(skills), "category_filter": category, "skills": skills})
     except Exception as exc:
         logger.error("list_skills error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
