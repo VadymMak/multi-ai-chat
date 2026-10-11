@@ -40,7 +40,21 @@ async def run_evals_endpoint(
     """Run the eval harness and return a report with denominators."""
     try:
         from app.services.eval_runner import run_suite
-        report = await run_suite(suite=body.suite, model_key=body.model_key)
+        from app.services.trace_service import trace as _trace, trace_span as _span
+
+        report: dict = {}
+        try:
+            async with _trace("eval", summary=f"suite={body.suite}") as _t:
+                async with _span(_t, "eval", f"run_suite:{body.suite}",
+                                 input_summary=f"suite={body.suite}") as _s:
+                    report = await run_suite(suite=body.suite, model_key=body.model_key)
+                    _s["output_summary"] = (
+                        f"total={report.get('total')} passed={report.get('passed')} "
+                        f"failed={report.get('failed')}"
+                    )
+        except Exception:
+            report = await run_suite(suite=body.suite, model_key=body.model_key)
+
         return report
     except Exception as exc:
         logger.error("run_evals_endpoint error: %s", exc)

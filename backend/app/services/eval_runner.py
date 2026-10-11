@@ -107,20 +107,37 @@ async def _run_hybrid_search_case(case: dict) -> dict:
 async def _run_build_context_case(case: dict) -> dict:
     from app.services.smart_context import build_smart_context
     from app.memory.manager import MemoryManager
+    from app.services.trace_service import trace as _trace, trace_span as _span
 
     inp = case["input"]
+    query = inp["query"]
 
     db = SessionLocal()
     try:
         memory = MemoryManager(db)
-        context: str = await build_smart_context(
-            project_id=inp["project_id"],
-            role_id=inp.get("role_id", 0),
-            query=inp["query"],
-            session_id="",
-            db=db,
-            memory=memory,
-        )
+        context: str = ""
+        try:
+            async with _trace("query", summary=f"eval:{case['name']} q={query[:100]}") as _t:
+                async with _span(_t, "context", "smart_context",
+                                 input_summary=f"pid={inp['project_id']} q={query[:100]}") as _s:
+                    context = await build_smart_context(
+                        project_id=inp["project_id"],
+                        role_id=inp.get("role_id", 0),
+                        query=query,
+                        session_id="",
+                        db=db,
+                        memory=memory,
+                    )
+                    _s["output_summary"] = f"{len(context)} chars"
+        except Exception:
+            context = await build_smart_context(
+                project_id=inp["project_id"],
+                role_id=inp.get("role_id", 0),
+                query=query,
+                session_id="",
+                db=db,
+                memory=memory,
+            )
     finally:
         db.close()
 
