@@ -8,6 +8,7 @@ from app.config.model_registry import MODEL_REGISTRY
 from app.providers.openai_provider import ask_openai
 from app.providers.claude_provider import ask_claude
 from app.providers.glm_provider import ask_glm
+from app.providers.grok_provider import ask_grok
 
 
 def _normalize_messages(messages: List[dict]) -> List[Dict[str, str]]:
@@ -214,6 +215,17 @@ def ask_model(
         if api_key:
             glm_kwargs["api_key"] = api_key
         answer = ask_glm(**glm_kwargs)
+    elif provider == "xai":
+        xai_kwargs: Dict[str, Any] = {
+            "messages": norm_messages,
+            "model": model,
+            "system": sys_prompt,
+            "temperature": temp,
+            "max_tokens": out_tokens,
+        }
+        if api_key:
+            xai_kwargs["api_key"] = api_key
+        answer = ask_grok(**xai_kwargs)
     else:
         raise RuntimeError(f"Unsupported provider '{provider}' for model_key '{requested_key}'")
 
@@ -262,6 +274,14 @@ def ask_model(
         if api_key:
             claude_kwargs2["api_key"] = api_key
         answer2 = ask_claude(**claude_kwargs2)
+    elif provider == "xai":
+        answer2 = ask_grok(
+            messages=repaired,
+            model=model,
+            system=sys_prompt,
+            temperature=temp,
+            max_tokens=out_tokens,
+        )
     else:  # glm
         glm_kwargs2: Dict[str, Any] = {
             "messages": repaired,
@@ -323,6 +343,14 @@ def ask_model(
             if api_key:
                 claude_kwargs3["api_key"] = api_key
             answer3 = ask_claude(**claude_kwargs3)
+        elif provider == "xai":
+            answer3 = ask_grok(
+                messages=repaired,
+                model=fb["model"],
+                system=sys_prompt,
+                temperature=float(fb.get("temperature", temp)),
+                max_tokens=int(fb.get("max_tokens", out_tokens)),
+            )
         else:  # glm
             glm_kwargs3: Dict[str, Any] = {
                 "messages": repaired,

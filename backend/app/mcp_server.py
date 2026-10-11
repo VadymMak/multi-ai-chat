@@ -4921,4 +4921,41 @@ async def get_trace(trace_id: str) -> str:
         db.close()
 
 
+@mcp.tool()
+async def debate(
+    question: str,
+    context: str = "",
+    rounds: int = 1,
+) -> str:
+    """
+    Run a multi-model adversarial debate on a question.
+
+    Three vendors each play a fixed role:
+      - PROPOSER (Claude): builds a structured answer with assumptions and risks.
+      - CRITIC   (Grok):   attacks the proposal — numbered fatal flaws only, no praise.
+      - ASSEMBLER (GPT-4o): synthesises into a final verdict with confidence score.
+
+    rounds=1  (default): proposer → critic → assembler
+    rounds=2:            proposer → critic → proposer-rebuttal → assembler
+
+    Returns a JSON object:
+      final_answer, confidence (0-100|null),
+      unresolved_disagreements[], key_risks_still_present[],
+      what_survived[], what_was_dropped_or_fixed[],
+      roles{proposer, critic, assembler},
+      debate_id, cost_estimate_usd, latency_ms
+
+    Cost circuit-breaker: aborts and returns a plain answer if projected cost
+    exceeds DEBATE_MAX_USD (default $0.40).
+    Grok is skipped gracefully if GROK_API_KEY is not configured.
+    """
+    try:
+        from app.services.debate_engine import run_debate
+        result = await run_debate(question=question, context=context, rounds=rounds)
+        return _cap_json(result)
+    except Exception as exc:
+        logger.error("debate error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]

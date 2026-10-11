@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
     except Exception:  # pragma: no cover
         _HAS_REQ_NOTREQ = False
 
-Provider = Literal["openai", "anthropic", "glm"]
+Provider = Literal["openai", "anthropic", "glm", "xai"]
 
 if _HAS_REQ_NOTREQ:
     class ModelInfo(TypedDict):
@@ -143,6 +143,17 @@ MODEL_REGISTRY: Dict[str, ModelInfo] = {
         "provider": "anthropic",
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 8192,
+        "temperature": 0.7,
+    },
+
+    # ---------------------------------------------------------------------
+    # xAI Grok (OpenAI-compatible, base_url https://api.x.ai/v1)
+    # Requires GROK_API_KEY env var; handled by grok_provider.ask_grok().
+    # ---------------------------------------------------------------------
+    "grok-3": {
+        "provider": "xai",
+        "model": "grok-4.3",   # actual API model name from settings.GROK_MODEL
+        "max_tokens": 4096,
         "temperature": 0.7,
     },
 

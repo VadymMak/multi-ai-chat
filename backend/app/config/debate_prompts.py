@@ -481,6 +481,113 @@ Generate the PERFECTLY STRUCTURED final output now."""
 
 
 # =============================================================================
+# DEBATE ENGINE v2 — Phase 1 prompts (stateless, three-vendor)
+# Roles: PROPOSER (Claude), CRITIC (Grok), ASSEMBLER (GPT-4o)
+# =============================================================================
+
+DEBATE2_PREAMBLE = (
+    "You are part of a multi-model debate system. "
+    "Stay strictly in role. Output only the requested format."
+)
+
+DEBATE2_PROPOSER_PROMPT = """## Your role: PROPOSER
+
+You are the first voice in a structured debate. Provide the strongest possible answer
+to the question below. Be thorough, precise, and acknowledge real trade-offs.
+{context}
+
+## Question
+{question}
+
+## Instructions
+- Structure your answer with clear headings.
+- State your key assumptions explicitly.
+- Identify the two or three most significant risks in your own proposal.
+- Do NOT hedge excessively — commit to a recommendation.
+
+Maximum 2500 tokens."""
+
+DEBATE2_CRITIC_PROMPT = """## Your role: ADVERSARIAL CRITIC
+
+Your ONLY job is to find what is WRONG with the proposal below.
+
+## Original question
+{question}
+
+## Proposal to critique
+{proposal}
+
+## Rules (strict)
+- DO NOT say anything positive or balanced.
+- DO NOT propose a full alternative solution (1-2 sentence alternatives at most).
+- DO number each fatal flaw clearly: 1. 2. 3. ...
+- For each flaw give: **Bold title**, then ≤2 sentences explaining the failure mode
+  or hidden assumption.
+- Hunt for: hidden assumptions, edge cases where it breaks, failure modes and their
+  consequences, better alternatives at a high level only.
+
+Output ONLY the numbered list of fatal flaws. Nothing else.
+Maximum 2000 tokens."""
+
+DEBATE2_REBUTTAL_PROMPT = """## Your role: PROPOSER REBUTTAL
+
+You previously proposed a solution. A critic has attacked it. Respond ONLY to the
+fatal flaws that are actually valid — concede the ones that are, defend the ones that
+are not.
+
+## Original question
+{question}
+
+## Your original proposal (summary)
+{proposal}
+
+## Critic's fatal flaws
+{critique}
+
+## Instructions
+- Address each numbered flaw directly (keep the same numbering).
+- Concede if the flaw is valid; defend if it is not.
+- Do NOT repeat your full proposal.
+- Be brief: ≤600 tokens total."""
+
+DEBATE2_ASSEMBLER_PROMPT = """## Your role: ASSEMBLER
+
+You receive the output of a structured debate. Your job is to synthesize the OPTIMAL
+final answer.
+
+## Original question
+{question}
+
+## Proposal
+{proposal}
+
+## Critic's fatal flaws
+{critique}
+
+## Rebuttal (may be absent)
+{rebuttal}
+
+## Instructions
+You MUST output ONLY valid JSON — no markdown, no code fences, no prose before or
+after the JSON object. Any deviation will cause a parse error.
+
+Confidence guidance: start at 70. Add up to +20 for a strong, well-defended proposal.
+Subtract up to -30 for severe unresolved flaws. Also apply this fixed adjustment: {confidence_penalty}.
+
+Required JSON schema (every field required):
+{{
+  "final_answer": "<comprehensive answer integrating valid points from both sides>",
+  "confidence": <integer 0-100>,
+  "unresolved_disagreements": ["<string>", ...],
+  "key_risks_still_present": ["<string>", ...],
+  "what_survived": ["<string — proposal points that held up under critique>", ...],
+  "what_was_dropped_or_fixed": ["<string — proposal points that critique invalidated or improved>", ...]
+}}
+
+Maximum 1500 tokens."""
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 

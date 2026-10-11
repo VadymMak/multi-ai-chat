@@ -187,6 +187,9 @@ class _Settings:
     GROK_API_KEY: str = _getenv_str("GROK_API_KEY", "")
     # grok-4.3 is multimodal (text + vision); retired: grok-3, grok-2-vision-1212
     GROK_MODEL: str = _getenv_str("GROK_MODEL", "grok-4.3")
+
+    # Debate engine cost circuit-breaker (USD per debate)
+    DEBATE_MAX_USD: float = float(os.environ.get("DEBATE_MAX_USD", "0.40"))
     GROK_VISION_MODEL: str = _getenv_str("GROK_VISION_MODEL", "grok-4.3")
     # Provider try-order for /chat: comma-separated gpt|claude|grok
     TELEGRAM_CHAT_PROVIDER_ORDER: tuple[str, ...] = (

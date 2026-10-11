@@ -73,6 +73,7 @@ TOOL_CLASS: dict[str, str] = {
     "generate_voiceover":         "write",
     "extend_video":               "write",
     "create_video":               "write",
+    "debate":                     "write",
 
     # ── destructive ───────────────────────────────────────────────────────────
     "registry_delete":            "destructive",
