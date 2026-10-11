@@ -294,6 +294,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load verify router: {e}")
 
+try:
+    from app.routers.evals import router as evals_router  # type: ignore
+    app.include_router(evals_router, prefix="/api")
+    logger.info("Loaded router: evals → /api/evals")
+except Exception as e:
+    logger.error(f"Failed to load evals router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()

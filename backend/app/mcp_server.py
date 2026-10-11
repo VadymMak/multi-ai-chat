@@ -4620,4 +4620,36 @@ async def record_fix(
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tool — run_evals
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def run_evals(
+    suite: str = "all",
+    model_key: Optional[str] = None,
+) -> str:
+    """
+    Run the Brain eval harness and return a report with denominators.
+
+    Executes all eval cases (or one suite) using mechanical asserts —
+    no LLM judge. Results are persisted to brain_evals for regression
+    tracking.
+
+    Report shape:
+      { run_id, suite, total, passed, failed, model_key, elapsed_s,
+        results: [{eval_name, suite, passed, score, details}] }
+
+    Args:
+        suite:     "all" (default) or a suite name: "retrieval", "context", "verify".
+        model_key: Optional tag for this run (does not change which model evals use).
+    """
+    try:
+        from app.services.eval_runner import run_suite
+        report = await run_suite(suite=suite, model_key=model_key)
+        return _cap_json(json.dumps(report, ensure_ascii=False))
+    except Exception as exc:
+        logger.error("run_evals error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
 __all__ = ["mcp"]
