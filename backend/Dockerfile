@@ -60,5 +60,6 @@ CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
      python backend/scripts/fix_family_users.py && \
      python backend/migrations/add_project_registry.py && \
      python backend/migrations/add_brain_evals_table.py && \
+     python backend/migrations/add_brain_traces_tables.py && \
      python backend/scripts/remove_eval_contamination.py && \
      uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

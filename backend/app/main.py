@@ -301,6 +301,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load evals router: {e}")
 
+try:
+    from app.routers.traces import router as traces_router  # type: ignore
+    app.include_router(traces_router, prefix="/api")
+    logger.info("Loaded router: traces → /api/traces")
+except Exception as e:
+    logger.error(f"Failed to load traces router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()

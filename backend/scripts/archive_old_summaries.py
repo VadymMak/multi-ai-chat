@@ -31,6 +31,11 @@ from sqlalchemy import create_engine, text
 
 DEFAULT_KEEP_ACTIVE = 30
 
+# Trace retention — prune brain_traces (+ cascade spans) older than N days
+# OR beyond the last M rows, whichever is tighter.
+TRACE_RETENTION_DAYS = int(os.environ.get("TRACE_RETENTION_DAYS", "14"))
+TRACE_RETENTION_MAX  = int(os.environ.get("TRACE_RETENTION_MAX", "5000"))
+
 
 def get_database_url() -> str:
     url = os.environ.get("DATABASE_URL", "")
@@ -114,6 +119,76 @@ def _run_project(conn, project_id: int, keep: int, dry_run: bool) -> dict:
     }
 
 
+def _prune_traces(conn, dry_run: bool) -> dict:
+    """
+    Delete brain_traces (and their spans via trace_id match) that are either:
+      - older than TRACE_RETENTION_DAYS days, OR
+      - beyond the most recent TRACE_RETENTION_MAX rows
+    whichever is tighter. Idempotent. Best-effort — errors are surfaced, not raised.
+    """
+    # Check table exists before touching it
+    tbl_exists = conn.execute(text(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_name='brain_traces'"
+    )).scalar() or 0
+    if not tbl_exists:
+        return {"skipped": True, "reason": "brain_traces table does not exist yet"}
+
+    deleted_by_age = 0
+    deleted_by_cap = 0
+
+    # ── 1. Delete by age ───────────────────────────────────────────────────
+    age_ids = conn.execute(text("""
+        SELECT trace_id FROM brain_traces
+        WHERE created_at < NOW() - INTERVAL ':days days'
+    """.replace(":days days", f"{TRACE_RETENTION_DAYS} days"))).fetchall()
+    age_trace_ids = [r.trace_id for r in age_ids]
+
+    if age_trace_ids and not dry_run:
+        conn.execute(text(
+            "DELETE FROM brain_trace_spans WHERE trace_id = ANY(:ids)"
+        ), {"ids": age_trace_ids})
+        r = conn.execute(text(
+            "DELETE FROM brain_traces WHERE trace_id = ANY(:ids)"
+        ), {"ids": age_trace_ids})
+        conn.commit()
+        deleted_by_age = r.rowcount or 0
+    else:
+        deleted_by_age = len(age_trace_ids)
+
+    # ── 2. Delete by row cap (keep only newest TRACE_RETENTION_MAX) ────────
+    total_remaining = conn.execute(text("SELECT COUNT(*) FROM brain_traces")).scalar() or 0
+    over_cap = max(0, total_remaining - (TRACE_RETENTION_MAX if not dry_run else (total_remaining - deleted_by_age)))
+
+    if over_cap > 0:
+        cap_ids = conn.execute(text("""
+            SELECT trace_id FROM brain_traces
+            ORDER BY created_at ASC
+            LIMIT :n
+        """), {"n": over_cap}).fetchall()
+        cap_trace_ids = [r.trace_id for r in cap_ids]
+
+        if cap_trace_ids and not dry_run:
+            conn.execute(text(
+                "DELETE FROM brain_trace_spans WHERE trace_id = ANY(:ids)"
+            ), {"ids": cap_trace_ids})
+            r2 = conn.execute(text(
+                "DELETE FROM brain_traces WHERE trace_id = ANY(:ids)"
+            ), {"ids": cap_trace_ids})
+            conn.commit()
+            deleted_by_cap = r2.rowcount or 0
+        else:
+            deleted_by_cap = len(cap_trace_ids)
+
+    return {
+        "dry_run":         dry_run,
+        "deleted_by_age":  deleted_by_age,
+        "deleted_by_cap":  deleted_by_cap,
+        "retention_days":  TRACE_RETENTION_DAYS,
+        "retention_max":   TRACE_RETENTION_MAX,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Soft retention: archive old SESSION_SUMMARY rows per project."
@@ -123,19 +198,44 @@ def main() -> None:
                         help=f"Number of active summaries to keep per project (default {DEFAULT_KEEP_ACTIVE})")
     parser.add_argument("--project-id", type=int, default=None,
                         help="Limit to a single project_id_int")
+    parser.add_argument("--prune-traces-only", action="store_true",
+                        help="Only prune brain_traces/spans; skip SESSION_SUMMARY archival")
     args = parser.parse_args()
 
     keep = max(1, args.keep)
 
     print("=" * 65)
     print("📦 Brain: archive_old_summaries")
-    print(f"   keep_active : {keep}")
-    print(f"   dry_run     : {args.dry_run}")
+    print(f"   keep_active      : {keep}")
+    print(f"   dry_run          : {args.dry_run}")
+    print(f"   prune_traces_only: {args.prune_traces_only}")
+    print(f"   trace_retain_days: {TRACE_RETENTION_DAYS}")
+    print(f"   trace_retain_max : {TRACE_RETENTION_MAX}")
     if args.project_id:
         print(f"   project_id  : {args.project_id}")
     print("=" * 65)
 
     engine = create_engine(get_database_url())
+
+    # ── Trace pruning (always runs, best-effort) ───────────────────
+    print("\n── Trace retention ──────────────────────────────────────")
+    try:
+        with engine.connect() as conn:
+            trace_stats = _prune_traces(conn, args.dry_run)
+        if trace_stats.get("skipped"):
+            print(f"  Skipped: {trace_stats.get('reason')}")
+        else:
+            action_word = "would delete" if args.dry_run else "deleted"
+            print(f"  By age  : {action_word} {trace_stats['deleted_by_age']} trace(s) "
+                  f"(>{TRACE_RETENTION_DAYS}d)")
+            print(f"  By cap  : {action_word} {trace_stats['deleted_by_cap']} trace(s) "
+                  f"(>last {TRACE_RETENTION_MAX})")
+    except Exception as exc:
+        print(f"  Trace pruning error (non-fatal): {exc}")
+
+    if args.prune_traces_only:
+        print("\nDone (--prune-traces-only).")
+        return
 
     with engine.connect() as conn:
         # Discover projects that have SESSION_SUMMARYs

@@ -507,14 +507,33 @@ async def _tool_build_context_for_query(args: Dict[str, Any]) -> Any:
                 return {"error": f"no project matched folder_identifier={folder_id!r}"}
 
         memory = MemoryManager(db)
-        context: str = await build_smart_context(
-            project_id=project_id_int,
-            role_id=role_id,
-            query=query,
-            session_id="",
-            db=db,
-            memory=memory,
-        )
+
+        # ── Tracing (best-effort — never breaks the real request) ──────
+        try:
+            from app.services.trace_service import trace as _trace, trace_span as _span
+            async with _trace("query", summary=query[:200]) as _t:
+                async with _span(_t, "context", "smart_context",
+                                 input_summary=f"pid={project_id_int} q={query[:120]}") as _s:
+                    context: str = await build_smart_context(
+                        project_id=project_id_int,
+                        role_id=role_id,
+                        query=query,
+                        session_id="",
+                        db=db,
+                        memory=memory,
+                    )
+                    _s["output_summary"] = f"{len(context)} chars, {len(context)//4} est_tokens"
+        except Exception:
+            # Tracing unavailable or failed — run without it
+            context = await build_smart_context(
+                project_id=project_id_int,
+                role_id=role_id,
+                query=query,
+                session_id="",
+                db=db,
+                memory=memory,
+            )
+
         return {"context": context, "project_id": project_id_int}
     except Exception as exc:
         logger.error("build_context_for_query error: %s", exc)
@@ -4645,11 +4664,155 @@ async def run_evals(
     """
     try:
         from app.services.eval_runner import run_suite
-        report = await run_suite(suite=suite, model_key=model_key)
+        from app.services.trace_service import trace as _trace, trace_span as _span
+
+        report: dict = {}
+        try:
+            async with _trace("eval", summary=f"suite={suite}") as _t:
+                async with _span(_t, "eval", f"run_suite:{suite}",
+                                 input_summary=f"suite={suite} model_key={model_key}") as _s:
+                    report = await run_suite(suite=suite, model_key=model_key)
+                    _s["output_summary"] = (
+                        f"total={report.get('total')} passed={report.get('passed')} "
+                        f"failed={report.get('failed')}"
+                    )
+        except Exception:
+            report = await run_suite(suite=suite, model_key=model_key)
+
         return _cap_json(json.dumps(report, ensure_ascii=False))
     except Exception as exc:
         logger.error("run_evals error: %s", exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool — list_traces
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def list_traces(
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+) -> str:
+    """
+    Return recent Brain traces (one per request), newest first.
+
+    Args:
+        kind:   Optional filter — query | verify | eval | tool
+        status: Optional filter — ok | error
+        limit:  Max rows (default 20, max 100).
+    """
+    db = _open_db()
+    try:
+        limit = min(max(1, limit), 100)
+        params: dict = {"limit": limit}
+        filters = ""
+        if kind:
+            filters += " AND kind = :kind"
+            params["kind"] = kind
+        if status:
+            filters += " AND status = :status"
+            params["status"] = status
+
+        from sqlalchemy import text as _text
+        rows = await asyncio.to_thread(
+            lambda: db.execute(_text(f"""
+                SELECT trace_id, kind, summary, status,
+                       total_cost_usd, total_ms, created_at
+                FROM brain_traces
+                WHERE 1=1 {filters}
+                ORDER BY created_at DESC
+                LIMIT :limit
+            """), params).fetchall()
+        )
+        result = [
+            {
+                "trace_id":       r.trace_id,
+                "kind":           r.kind,
+                "summary":        r.summary,
+                "status":         r.status,
+                "total_cost_usd": r.total_cost_usd,
+                "total_ms":       r.total_ms,
+                "created_at":     str(r.created_at),
+            }
+            for r in rows
+        ]
+        return _cap_json({"traces": result, "count": len(result)})
+    except Exception as exc:
+        logger.error("list_traces error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool — get_trace
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def get_trace(trace_id: str) -> str:
+    """
+    Return the ordered span timeline for one trace.
+
+    Shows each step (layer/name/status/duration_ms/cost_usd) in seq order.
+    Use list_traces to find a trace_id.
+
+    Args:
+        trace_id: UUID string from list_traces.
+    """
+    db = _open_db()
+    try:
+        from sqlalchemy import text as _text
+
+        trace_row = await asyncio.to_thread(
+            lambda: db.execute(_text("""
+                SELECT trace_id, kind, summary, status,
+                       total_cost_usd, total_ms, created_at
+                FROM brain_traces WHERE trace_id = :tid LIMIT 1
+            """), {"tid": trace_id}).fetchone()
+        )
+        if trace_row is None:
+            return json.dumps({"error": f"trace not found: {trace_id}"}, ensure_ascii=False)
+
+        spans = await asyncio.to_thread(
+            lambda: db.execute(_text("""
+                SELECT seq, layer, name, status,
+                       input_summary, output_summary, error,
+                       model_key, cost_usd, duration_ms, created_at
+                FROM brain_trace_spans
+                WHERE trace_id = :tid ORDER BY seq ASC
+            """), {"tid": trace_id}).fetchall()
+        )
+
+        result = {
+            "trace_id":       trace_row.trace_id,
+            "kind":           trace_row.kind,
+            "summary":        trace_row.summary,
+            "status":         trace_row.status,
+            "total_cost_usd": trace_row.total_cost_usd,
+            "total_ms":       trace_row.total_ms,
+            "created_at":     str(trace_row.created_at),
+            "spans": [
+                {
+                    "seq":            s.seq,
+                    "layer":          s.layer,
+                    "name":           s.name,
+                    "status":         s.status,
+                    "input_summary":  s.input_summary,
+                    "output_summary": s.output_summary,
+                    "error":          s.error,
+                    "model_key":      s.model_key,
+                    "cost_usd":       s.cost_usd,
+                    "duration_ms":    s.duration_ms,
+                }
+                for s in spans
+            ],
+        }
+        return _cap_json(result)
+    except Exception as exc:
+        logger.error("get_trace error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
 
 
 __all__ = ["mcp"]
