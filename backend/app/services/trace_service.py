@@ -69,6 +69,7 @@ class _Trace:
 def _flush_sync(trace: _Trace) -> None:
     from app.memory.db import SessionLocal
 
+    print(f"[trace_flush] START trace_id={trace.trace_id[:12]} kind={trace.kind} spans={len(trace.spans)}")
     db = SessionLocal()
     try:
         total_ms = trace._elapsed_ms()
@@ -116,7 +117,11 @@ def _flush_sync(trace: _Trace) -> None:
             })
 
         db.commit()
+        print(f"[trace_flush] OK trace_id={trace.trace_id[:12]}")
     except Exception as exc:
+        import traceback as _tb
+        print(f"[trace_flush] ERROR trace_id={trace.trace_id[:12]}: {exc}")
+        _tb.print_exc()
         logger.warning("trace flush error (non-fatal): %s", exc)
         try:
             db.rollback()
@@ -151,9 +156,11 @@ async def trace(
         t.status = "error"
         raise
     finally:
+        print(f"[trace_ctx] flushing trace_id={t.trace_id[:12]} status={t.status} spans={len(t.spans)}")
         try:
             await asyncio.to_thread(_flush_sync, t)
         except Exception as flush_exc:
+            print(f"[trace_ctx] flush thread error: {flush_exc}")
             logger.warning("trace flush thread error (non-fatal): %s", flush_exc)
 
 
