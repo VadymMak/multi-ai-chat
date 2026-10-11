@@ -10,9 +10,13 @@ REFACTORED v2.0:
 """
 
 import asyncio
-from typing import List, Dict, Any
-from sqlalchemy.orm import Session
+import logging
+from typing import Any, Dict, List
+
 from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 # Import existing services
 from app.services import vector_service
@@ -415,7 +419,7 @@ async def build_smart_context(
                     parts.append(impact_line)
                     print(f"✅ [Smart Context] 0.8. Impact preview: risk={risk_score}, direct={len(impact['directly_affected'])}")
     except Exception as e:
-        print(f"⚠️ [Smart Context] 0.8. Impact preview failed: {e}")
+        logger.debug("[Smart Context] 0.8. Impact preview skipped: %s", e)
 
     # ============================================================
     # 1. PROJECT TREE (START - high attention!)

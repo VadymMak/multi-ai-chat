@@ -179,10 +179,12 @@ class DependencyGraph:
                     if dfs(neighbor, path.copy()):
                         return True
                 elif neighbor in rec_stack:
-                    # Cycle found!
-                    cycle_start = path.index(neighbor)
-                    cycle = path[cycle_start:] + [neighbor]
-                    cycles.append(cycle)
+                    # Cycle found — guard against neighbor not being in this path
+                    # (rec_stack is shared across all DFS branches)
+                    if neighbor in path:
+                        cycle_start = path.index(neighbor)
+                        cycle = path[cycle_start:] + [neighbor]
+                        cycles.append(cycle)
                     return True
             
             rec_stack.remove(node)

@@ -4,12 +4,16 @@ Structural impact analysis based on the dependency graph.
 
 File: backend/app/services/prediction_service.py
 """
-from typing import List, Dict, Any, Optional
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from datetime import datetime, timezone, timedelta
 import hashlib
 import json
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.services.dependency_graph import build_dependency_graph, DependencyGraph
 
@@ -54,6 +58,21 @@ class PredictionService:
             return cached
 
         graph = self._load_graph(project_id)
+
+        # Skip files not yet indexed in the graph — caller gets a zero-impact result.
+        unknown = [f for f in changed_files if f not in graph.all_files]
+        if unknown:
+            logger.debug(
+                "[Prediction] predict_impact: %d file(s) not in graph, returning zero-impact: %s",
+                len(unknown), unknown,
+            )
+            return {
+                "directly_affected": [],
+                "transitively_affected": [],
+                "risk_score": 0,
+                "suggestions": [],
+                "circular_warnings": [],
+            }
 
         # Directly affected: files that import any of the changed files
         directly_affected: set = set()
