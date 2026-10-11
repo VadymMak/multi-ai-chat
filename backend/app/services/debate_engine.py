@@ -43,7 +43,7 @@ _CAP_ASSEMBLER = 1500
 _CAP_REBUTTAL  = 600
 
 # Per-role wall-clock timeout (seconds)
-_ROLE_TIMEOUT = 25.0
+_ROLE_TIMEOUT = 60.0
 
 # Rough cost rates (input_per_1m, output_per_1m) in USD
 _COST_RATES: Dict[str, Tuple[float, float]] = {
@@ -125,16 +125,19 @@ async def _call_role(
     cost = _estimate_cost(model_key, max_tokens)
 
     async def _do() -> str:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                ask_model,
-                [{"role": "user", "content": prompt}],
-                model_key=model_key,
-                system_prompt=system,
-                max_tokens=max_tokens,
-            ),
-            timeout=_ROLE_TIMEOUT,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    ask_model,
+                    [{"role": "user", "content": prompt}],
+                    model_key=model_key,
+                    system_prompt=system,
+                    max_tokens=max_tokens,
+                ),
+                timeout=_ROLE_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as te:
+            raise RuntimeError(f"timeout after {_ROLE_TIMEOUT}s") from te
 
     if trace_obj is None:
         return await _do(), cost
