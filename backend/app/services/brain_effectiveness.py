@@ -281,7 +281,24 @@ def compute_session_summary(
     ).fetchall()
 
     total = len(rows)
-    brain_assisted = sum(1 for r in rows if r.brain_assisted in (True, 1))
+    brain_rows = [r for r in rows if r.brain_assisted in (True, 1)]
+    no_brain_rows = [r for r in rows if r.brain_assisted not in (True, 1)]
+
+    def _agg(rlist: list) -> Dict[str, Any]:
+        n = len(rlist)
+        if n == 0:
+            return {"sessions": 0, "avg_cost_usd": 0.0, "avg_retries": 0.0, "proxy_success_rate": 0.0}
+        cost = sum(float(r.session_cost or 0) for r in rlist)
+        retries = sum(int(r.retry_count or 0) for r in rlist)
+        zero_retry = sum(1 for r in rlist if (r.retry_count or 0) == 0)
+        return {
+            "sessions": n,
+            "avg_cost_usd": round(cost / n, 6),
+            "avg_retries": round(retries / n, 3),
+            "proxy_success_rate": round(zero_retry / n * 100, 2),
+        }
+
+    brain_assisted = len(brain_rows)
     proxy_success = sum(1 for r in rows if (r.retry_count or 0) == 0)
     total_cost = sum(float(r.session_cost or 0) for r in rows)
     total_retries = sum(int(r.retry_count or 0) for r in rows)
@@ -291,7 +308,7 @@ def compute_session_summary(
         mode = r.brain_mode or "enabled"
         by_brain_mode[mode] = by_brain_mode.get(mode, 0) + 1
 
-    return {
+    result: Dict[str, Any] = {
         "project_id": project_id,
         "days": days,
         "total_sessions": total,
@@ -302,8 +319,17 @@ def compute_session_summary(
         "avg_cost_per_session_usd": round(total_cost / total, 6) if total else 0.0,
         "avg_retries_per_session": round(total_retries / total, 3) if total else 0.0,
         "by_brain_mode": by_brain_mode,
-        "note": (
-            "No with/without comparison: ~100% sessions use Brain via hook. "
-            "Set brain_mode='holdout' on a % of sessions for true A/B baseline."
-        ),
+        "with_brain": _agg(brain_rows),
+        "without_brain": _agg(no_brain_rows),
     }
+    if total_retries == 0:
+        result["retry_warning"] = (
+            "All session_retry_count=0: upload with updated upload_usage_to_railway.py "
+            "to backfill real retry counts (is_error:true scanner)."
+        )
+    else:
+        result["note"] = (
+            "proxy_success_rate = sessions with zero tool errors or correction markers. "
+            "Set brain_mode='holdout' on a % of sessions for true A/B baseline."
+        )
+    return result

@@ -108,6 +108,7 @@ class UsageRecordIn(BaseModel):
     raw_jsonl_path: Optional[str] = None
     surface: str = "code"
     brain_mode: str = "enabled"
+    session_retry_count: int = 0
 
 
 class SyncRequest(BaseModel):
@@ -496,7 +497,7 @@ def sync_usage_logs(
                     cost_usd, cost_without_cache_usd, cache_savings_usd,
                     used_brain_context, brain_tools_called,
                     had_retry, raw_jsonl_path,
-                    surface, brain_mode
+                    surface, brain_mode, session_retry_count
                 ) VALUES (
                     %(session_id)s, %(message_id)s, %(request_id)s, %(timestamp)s, %(model)s,
                     (SELECT id FROM projects
@@ -509,7 +510,7 @@ def sync_usage_logs(
                     %(cost_usd)s, %(cost_without_cache_usd)s, %(cache_savings_usd)s,
                     %(used_brain_context)s, %(brain_tools_called)s,
                     %(had_retry)s, %(raw_jsonl_path)s,
-                    %(surface)s, %(brain_mode)s
+                    %(surface)s, %(brain_mode)s, %(session_retry_count)s
                 )
                 ON CONFLICT (message_id) DO NOTHING
                 RETURNING id
@@ -540,6 +541,7 @@ def sync_usage_logs(
                     "raw_jsonl_path": rec.raw_jsonl_path,
                     "surface": getattr(rec, "surface", "code") or "code",
                     "brain_mode": getattr(rec, "brain_mode", "enabled") or "enabled",
+                    "session_retry_count": int(getattr(rec, "session_retry_count", 0) or 0),
                 }
                 try:
                     cur.execute(insert_sql, params)

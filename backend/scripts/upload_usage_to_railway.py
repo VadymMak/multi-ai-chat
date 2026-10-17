@@ -29,6 +29,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 DEFAULT_URL = "https://multi-ai-chat-production.up.railway.app/api/usage/sync"
+
+# Correction markers for user-turn retry detection (case-insensitive substring match)
+_CORRECTION_MARKERS = (
+    "no,", "no.", "wrong", "incorrect", "that's wrong", "not right",
+    "нет,", "нет.", "не так", "переделай", "не верно", "ошибка",
+    "исправь", "fix this", "this is wrong", "try again",
+)
 DEFAULT_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
     "eyJzdWIiOiIxIiwiZXhwIjoxODA5MDYwMTA2fQ."
@@ -113,6 +120,49 @@ class UsageRecord:
     raw_jsonl_path: str
     surface: str = "code"
     brain_mode: str = "enabled"
+    session_retry_count: int = 0
+
+
+def _is_correction(text: str) -> bool:
+    t = text.lower().strip()
+    return any(t.startswith(m) or m in t[:60] for m in _CORRECTION_MARKERS)
+
+
+def scan_retries_for_file(path: Path) -> Dict[str, int]:
+    """Count retries per session_id: tool_result.is_error:true OR correction markers."""
+    retries: Dict[str, int] = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "user":
+                    continue
+                sid = obj.get("sessionId") or obj.get("session_id")
+                if not sid:
+                    continue
+                content = (obj.get("message") or {}).get("content") or []
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    # Signal (a): tool execution error
+                    if block.get("type") == "tool_result" and block.get("is_error") is True:
+                        retries[sid] = retries.get(sid, 0) + 1
+                    # Signal (b): correction text from user
+                    elif block.get("type") == "text":
+                        txt = block.get("text") or block.get("content") or ""
+                        if isinstance(txt, str) and _is_correction(txt):
+                            retries[sid] = retries.get(sid, 0) + 1
+    except Exception:
+        pass
+    return retries
 
 
 def project_name_from_dir(dir_name: str) -> Tuple[str, str]:
@@ -202,6 +252,8 @@ def parse_assistant_line(
 
 def parse_jsonl_file(path: Path, since: Optional[date]) -> List[UsageRecord]:
     decoded, encoded = project_name_from_dir(path.parent.name)
+    # Pre-scan for retries so we can stamp session_retry_count on each record
+    retries_by_session = scan_retries_for_file(path)
     out: List[UsageRecord] = []
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -223,6 +275,9 @@ def parse_jsonl_file(path: Path, since: Optional[date]) -> List[UsageRecord]:
                         rec_date = None
                     if rec_date and rec_date < since:
                         continue
+                # Stamp real session retry count
+                if rec.session_id and rec.session_id in retries_by_session:
+                    rec.session_retry_count = retries_by_session[rec.session_id]
                 out.append(rec)
     except Exception as e:
         print(f"WARN: failed to parse {path}: {e}", file=sys.stderr)
