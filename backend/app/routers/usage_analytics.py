@@ -354,9 +354,78 @@ def run_brain_effectiveness_backfill(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Manually trigger incremental backfill of brain_effectiveness from claude_usage_logs."""
+    """Idempotent UPSERT backfill: updates retries/tokens from session_retry_count."""
     inserted = backfill_from_usage_logs(db, project_id=project_id)
     return {"inserted": inserted, "project_id": project_id}
+
+
+@router.get("/diag-retry")
+def diag_retry(
+    session_id: str = "861dc7f6-98f0-41a4-ac32-60cd535c50f5",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Diagnostic: verify retry pipeline for a session. Shows DB state for both layers."""
+    results: Dict[str, Any] = {}
+
+    # Layer 1: claude_usage_logs
+    row1 = db.execute(text("""
+        SELECT session_id,
+               MAX(session_retry_count) AS session_retry_count,
+               COUNT(*) AS msg_count
+        FROM claude_usage_logs
+        WHERE session_id = :sid
+        GROUP BY session_id
+    """), {"sid": session_id}).fetchone()
+    results["layer1_claude_usage_logs"] = (
+        {"session_id": session_id,
+         "session_retry_count": row1.session_retry_count if row1 else None,
+         "msg_count": row1.msg_count if row1 else 0,
+         "ok": (row1.session_retry_count or 0) > 0 if row1 else False}
+    )
+
+    # Layer 2: brain_effectiveness
+    rows2 = db.execute(text("""
+        SELECT be.retries
+        FROM brain_effectiveness be
+        JOIN claude_usage_logs c ON be.usage_log_id = c.id
+        WHERE c.session_id = :sid
+        LIMIT 3
+    """), {"sid": session_id}).fetchall()
+    results["layer2_brain_effectiveness"] = {
+        "retries_sample": [r.retries for r in rows2],
+        "ok": any((r.retries or 0) > 0 for r in rows2),
+    }
+
+    # pg_constraint check
+    try:
+        constraints = db.execute(text("""
+            SELECT conname, contype FROM pg_constraint
+            WHERE conrelid = 'brain_effectiveness'::regclass
+            ORDER BY conname
+        """)).fetchall()
+        results["pg_constraint_brain_effectiveness"] = [
+            {"name": r.conname, "type": r.contype} for r in constraints
+        ]
+        results["uq_constraint_present"] = any(
+            r.conname == "uq_brain_eff_usage_log" for r in constraints
+        )
+    except Exception as e:
+        results["pg_constraint_error"] = str(e)
+
+    # Top retries in claude_usage_logs
+    top = db.execute(text("""
+        SELECT session_id, MAX(session_retry_count) AS retries
+        FROM claude_usage_logs
+        GROUP BY session_id
+        ORDER BY retries DESC NULLS LAST
+        LIMIT 5
+    """)).fetchall()
+    results["top_retry_sessions"] = [
+        {"session_id": r.session_id, "retries": r.retries} for r in top
+    ]
+
+    return results
 
 
 def _load_usage_parser():
