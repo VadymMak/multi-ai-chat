@@ -65,4 +65,5 @@ CMD ["sh", "-c", "export PYTHONPATH=/app:$PYTHONPATH && \
      python backend/scripts/remove_eval_contamination.py && \
      python backend/migrations/add_surface_brain_mode.py && \
      python backend/migrations/add_brain_effectiveness_unique_usage_log.py && \
+     python backend/migrations/add_brain_inject_log.py && \
      uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

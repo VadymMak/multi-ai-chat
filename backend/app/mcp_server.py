@@ -2296,12 +2296,23 @@ async def setup_prompt_hook(
         return f"ERROR: scope must be 'user' or 'project', got {scope!r}"
 
     py = python_path or _sys.executable
-    hook_script = (
+    source_script = (
         Path(script_path).resolve() if script_path
         else (Path(__file__).resolve().parent.parent / "scripts" / "brain_context_hook.py")
     )
-    if not hook_script.exists():
-        return f"ERROR: hook script not found at {hook_script}"
+    if not source_script.exists():
+        return f"ERROR: hook script not found at {source_script}"
+
+    # For user scope, copy the script to ~/.claude/scripts/ so the hook
+    # works across all projects (not just the multi-ai-chat repo directory).
+    if scope == "user":
+        scripts_dir = Path.home() / ".claude" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        hook_script = scripts_dir / "brain_context_hook.py"
+        import shutil as _shutil
+        _shutil.copy2(str(source_script), str(hook_script))
+    else:
+        hook_script = source_script
 
     target = (
         Path.home() / ".claude" / "settings.json" if scope == "user"
@@ -2333,8 +2344,9 @@ async def setup_prompt_hook(
                 and "brain_context_hook" in (h.get("command") or "")
             ):
                 return (
-                    f"✅ Brain hook already installed in {target}\n"
-                    f"   Command: {h.get('command')}"
+                    f"✅ Brain hook already installed in {target} (script updated to B-Lite)\n"
+                    f"   Command: {h.get('command')}\n"
+                    f"   Script copied to: {hook_script}"
                 )
 
     submit_hooks.append({
@@ -2343,7 +2355,8 @@ async def setup_prompt_hook(
 
     target.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     return (
-        f"✅ Installed Brain UserPromptSubmit hook in {target}\n"
+        f"✅ Installed Brain UserPromptSubmit hook (B-Lite inline injection) in {target}\n"
+        f"   Script: {hook_script}\n"
         f"   Command: {command}\n"
         f"   Restart Claude Code (or open a new session) for it to take effect."
     )

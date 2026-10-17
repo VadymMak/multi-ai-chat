@@ -309,6 +309,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to load traces router: {e}")
 
+try:
+    from app.routers.brain_inject import router as brain_inject_router  # type: ignore
+    app.include_router(brain_inject_router)
+    logger.info("Loaded router: brain_inject → /api/brain/inject")
+except Exception as e:
+    logger.error(f"Failed to load brain_inject router: {e}")
+
 # ─────────────────────── MCP server ──────────────────────────────
 # This is the most reliable pattern for mcp==1.26.0
 mcp_app = mcp.streamable_http_app()
