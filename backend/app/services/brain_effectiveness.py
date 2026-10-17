@@ -92,10 +92,11 @@ def record_request(
 
 def backfill_from_usage_logs(db: Session, project_id: Optional[int] = None) -> int:
     """
-    Incrementally sync brain_effectiveness rows from claude_usage_logs.
-    Only inserts rows whose usage_log_id is not yet in brain_effectiveness.
-    Safe to call repeatedly — never deletes existing rows.
-    Returns the number of newly inserted rows.
+    Idempotently sync brain_effectiveness rows from claude_usage_logs.
+    Uses UPSERT (ON CONFLICT usage_log_id DO UPDATE) so re-running updates
+    retries/tokens/cost/used_brain from fresh session_retry_count values.
+    Requires unique index uq_brain_eff_usage_log_id (migration adds it).
+    Returns rowcount (inserts + updates).
     """
     project_filter = "AND c.project_id = :pid" if project_id is not None else ""
     params: Dict[str, Any] = {"pid": project_id} if project_id is not None else {}
