@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -26,6 +27,12 @@ from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    import certifi
+    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    _SSL_CTX = ssl.create_default_context()  # system CA bundle fallback
 
 
 DEFAULT_URL = "https://multi-ai-chat-production.up.railway.app/api/usage/sync"
@@ -296,7 +303,7 @@ def post_batch(url: str, token: str, records: List[Dict[str, Any]]) -> Dict[str,
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             payload = resp.read().decode("utf-8", errors="replace")
             try:
                 return json.loads(payload) if payload else {}
