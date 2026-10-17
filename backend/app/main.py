@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
         try:
             import importlib.util as _ilu
             from pathlib import Path as _Path
-            _mig_path = _Path(__file__).resolve().parent.parent / "migrations" / "add_surface_brain_mode.py"
+            _mig_path = _Path(__file__).resolve().parent.parent / "backend" / "migrations" / "add_surface_brain_mode.py"
             _spec = _ilu.spec_from_file_location("add_surface_brain_mode", _mig_path)
             _mig_mod = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_mig_mod)
