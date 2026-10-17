@@ -106,6 +106,8 @@ class UsageRecordIn(BaseModel):
     brain_tools_called: List[str] = Field(default_factory=list)
     had_retry: bool = False
     raw_jsonl_path: Optional[str] = None
+    surface: str = "code"
+    brain_mode: str = "enabled"
 
 
 class SyncRequest(BaseModel):
@@ -493,7 +495,8 @@ def sync_usage_logs(
                     cache_read_tokens, total_tokens,
                     cost_usd, cost_without_cache_usd, cache_savings_usd,
                     used_brain_context, brain_tools_called,
-                    had_retry, raw_jsonl_path
+                    had_retry, raw_jsonl_path,
+                    surface, brain_mode
                 ) VALUES (
                     %(session_id)s, %(message_id)s, %(request_id)s, %(timestamp)s, %(model)s,
                     (SELECT id FROM projects
@@ -505,7 +508,8 @@ def sync_usage_logs(
                     %(cache_read_tokens)s, %(total_tokens)s,
                     %(cost_usd)s, %(cost_without_cache_usd)s, %(cache_savings_usd)s,
                     %(used_brain_context)s, %(brain_tools_called)s,
-                    %(had_retry)s, %(raw_jsonl_path)s
+                    %(had_retry)s, %(raw_jsonl_path)s,
+                    %(surface)s, %(brain_mode)s
                 )
                 ON CONFLICT (message_id) DO NOTHING
                 RETURNING id
@@ -534,6 +538,8 @@ def sync_usage_logs(
                     "brain_tools_called": list(rec.brain_tools_called or []),
                     "had_retry": rec.had_retry,
                     "raw_jsonl_path": rec.raw_jsonl_path,
+                    "surface": getattr(rec, "surface", "code") or "code",
+                    "brain_mode": getattr(rec, "brain_mode", "enabled") or "enabled",
                 }
                 try:
                     cur.execute(insert_sql, params)
