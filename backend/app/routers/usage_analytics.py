@@ -457,6 +457,38 @@ def diag_retry(
         {"session_retry_count": r.session_retry_count, "rows": r.cnt} for r in dist
     ]
 
+    # Direct UPDATE test: can we actually write session_retry_count?
+    try:
+        test_row = db.execute(text("""
+            SELECT id, message_id FROM claude_usage_logs
+            WHERE session_id = :sid AND message_id IS NOT NULL
+            LIMIT 1
+        """), {"sid": session_id}).fetchone()
+        if test_row:
+            db.execute(text("""
+                UPDATE claude_usage_logs
+                SET session_retry_count = 99
+                WHERE id = :rid
+            """), {"rid": test_row.id})
+            db.commit()
+            after = db.execute(text("""
+                SELECT session_retry_count FROM claude_usage_logs WHERE id = :rid
+            """), {"rid": test_row.id}).scalar()
+            results["direct_update_test"] = {
+                "row_id": test_row.id,
+                "message_id": test_row.message_id,
+                "set_to": 99,
+                "read_back": after,
+                "ok": after == 99,
+            }
+            # Restore to 0
+            db.execute(text("""
+                UPDATE claude_usage_logs SET session_retry_count = 0 WHERE id = :rid
+            """), {"rid": test_row.id})
+            db.commit()
+    except Exception as e:
+        results["direct_update_test"] = {"error": str(e)}
+
     return results
 
 
@@ -530,6 +562,7 @@ def sync_usage_logs(
                 used_brain_context=r.used_brain_context,
                 brain_tools_called=r.brain_tools_called or [],
                 had_retry=r.had_retry,
+                session_retry_count=r.session_retry_count,
                 raw_jsonl_path=r.raw_jsonl_path or "",
             ))
 
@@ -664,6 +697,25 @@ def sync_usage_logs(
                             rec.message_id,
                         )
                         first_error_logged = True
+            # Bulk-stamp session_retry_count for ALL rows of each uploaded session,
+            # not only the rows in this batch. This backfills older rows that were
+            # inserted before session_retry_count was being sent correctly.
+            session_counts: dict[str, int] = {}
+            for rec in records:
+                sid = rec.session_id
+                cnt = int(getattr(rec, "session_retry_count", 0) or 0)
+                if cnt > session_counts.get(sid, 0):
+                    session_counts[sid] = cnt
+            if session_counts:
+                stamp_cur = conn.cursor()
+                for sid, cnt in session_counts.items():
+                    if cnt > 0:
+                        stamp_cur.execute(
+                            "UPDATE claude_usage_logs SET session_retry_count = %s WHERE session_id = %s AND session_retry_count != %s",
+                            (cnt, sid, cnt),
+                        )
+                stamp_cur.close()
+
             cur.close()
         except Exception:
             logger.exception("psycopg2 upload path failed")
