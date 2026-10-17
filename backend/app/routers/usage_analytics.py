@@ -425,6 +425,38 @@ def diag_retry(
         {"session_id": r.session_id, "retries": r.retries} for r in top
     ]
 
+    # Sample raw rows for the target session — check exact column values
+    sample_rows = db.execute(text("""
+        SELECT id, message_id, session_retry_count, had_retry, surface, brain_mode, timestamp
+        FROM claude_usage_logs
+        WHERE session_id = :sid
+        ORDER BY timestamp DESC
+        LIMIT 3
+    """), {"sid": session_id}).fetchall()
+    results["sample_rows_from_target_session"] = [
+        {
+            "id": r.id,
+            "message_id": r.message_id,
+            "session_retry_count": r.session_retry_count,
+            "had_retry": r.had_retry,
+            "surface": r.surface,
+            "brain_mode": r.brain_mode,
+        }
+        for r in sample_rows
+    ]
+
+    # Check what session_retry_count distribution looks like globally
+    dist = db.execute(text("""
+        SELECT session_retry_count, COUNT(*) AS cnt
+        FROM claude_usage_logs
+        GROUP BY session_retry_count
+        ORDER BY session_retry_count DESC
+        LIMIT 10
+    """)).fetchall()
+    results["global_retry_count_distribution"] = [
+        {"session_retry_count": r.session_retry_count, "rows": r.cnt} for r in dist
+    ]
+
     return results
 
 
