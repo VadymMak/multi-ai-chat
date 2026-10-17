@@ -112,13 +112,16 @@ def backfill_from_usage_logs(db: Session, project_id: Optional[int] = None) -> i
                 SELECT
                     c.project_id, c.id, c.used_brain_context,
                     c.total_tokens, c.cost_usd,
-                    CASE WHEN c.had_retry THEN 1 ELSE 0 END,
+                    COALESCE(c.session_retry_count, CASE WHEN c.had_retry THEN 1 ELSE 0 END),
                     c.brain_tools_called
                 FROM claude_usage_logs c
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM brain_effectiveness b WHERE b.usage_log_id = c.id
-                )
-                {project_filter}
+                WHERE TRUE {project_filter}
+                ON CONFLICT (usage_log_id) DO UPDATE SET
+                    retries           = EXCLUDED.retries,
+                    tokens_used       = EXCLUDED.tokens_used,
+                    cost_usd          = EXCLUDED.cost_usd,
+                    used_brain        = EXCLUDED.used_brain,
+                    brain_tools_called= EXCLUDED.brain_tools_called
             """),
             params,
         )

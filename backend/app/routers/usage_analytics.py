@@ -512,7 +512,11 @@ def sync_usage_logs(
                     %(had_retry)s, %(raw_jsonl_path)s,
                     %(surface)s, %(brain_mode)s, %(session_retry_count)s
                 )
-                ON CONFLICT (message_id) DO NOTHING
+                ON CONFLICT (message_id) DO UPDATE SET
+                    session_retry_count = EXCLUDED.session_retry_count,
+                    surface             = EXCLUDED.surface,
+                    brain_mode          = EXCLUDED.brain_mode,
+                    had_retry           = EXCLUDED.had_retry
                 RETURNING id
             """
             for rec in records:
