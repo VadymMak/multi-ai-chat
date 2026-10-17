@@ -5233,31 +5233,50 @@ async def consumption_report(days: int = 30) -> str:
     db = _open_db()
     try:
         # ── by_surface ──────────────────────────────────────────────
-        surface_rows = db.execute(
-            text("""
-                SELECT
-                    COALESCE(surface, 'code')      AS surface,
-                    COUNT(*)                       AS requests,
-                    COALESCE(SUM(cost_usd), 0)     AS cost,
-                    COALESCE(SUM(cache_savings_usd), 0) AS savings,
-                    COALESCE(SUM(total_tokens), 0) AS tokens
-                FROM claude_usage_logs
-                WHERE timestamp >= :since
-                GROUP BY COALESCE(surface, 'code')
-                ORDER BY cost DESC
-            """),
-            {"since": since},
-        ).fetchall()
-
-        by_surface = {
-            r.surface: {
-                "requests": int(r.requests or 0),
-                "cost_usd": round(float(r.cost or 0), 4),
-                "cache_savings_usd": round(float(r.savings or 0), 4),
-                "tokens": int(r.tokens or 0),
+        try:
+            surface_rows = db.execute(
+                text("""
+                    SELECT
+                        COALESCE(surface, 'code')      AS surface,
+                        COUNT(*)                       AS requests,
+                        COALESCE(SUM(cost_usd), 0)     AS cost,
+                        COALESCE(SUM(cache_savings_usd), 0) AS savings,
+                        COALESCE(SUM(total_tokens), 0) AS tokens
+                    FROM claude_usage_logs
+                    WHERE timestamp >= :since
+                    GROUP BY COALESCE(surface, 'code')
+                    ORDER BY cost DESC
+                """),
+                {"since": since},
+            ).fetchall()
+            by_surface = {
+                r.surface: {
+                    "requests": int(r.requests or 0),
+                    "cost_usd": round(float(r.cost or 0), 4),
+                    "cache_savings_usd": round(float(r.savings or 0), 4),
+                    "tokens": int(r.tokens or 0),
+                }
+                for r in surface_rows
             }
-            for r in surface_rows
-        }
+        except Exception:
+            db.rollback()
+            fb = db.execute(
+                text("""
+                    SELECT COUNT(*) AS requests,
+                           COALESCE(SUM(cost_usd), 0)     AS cost,
+                           COALESCE(SUM(cache_savings_usd), 0) AS savings,
+                           COALESCE(SUM(total_tokens), 0) AS tokens
+                    FROM claude_usage_logs WHERE timestamp >= :since
+                """),
+                {"since": since},
+            ).fetchone()
+            by_surface = {"code": {
+                "requests": int(fb.requests or 0),
+                "cost_usd": round(float(fb.cost or 0), 4),
+                "cache_savings_usd": round(float(fb.savings or 0), 4),
+                "tokens": int(fb.tokens or 0),
+                "note": "surface column pending migration",
+            }}
 
         # ── by_project ──────────────────────────────────────────────
         proj_rows = db.execute(
@@ -5337,7 +5356,11 @@ async def consumption_report(days: int = 30) -> str:
         }
 
         # ── brain_roi (session-level) ────────────────────────────────
-        brain_roi = compute_session_summary(db, project_id=None, days=days)
+        try:
+            brain_roi = compute_session_summary(db, project_id=None, days=days)
+        except Exception:
+            db.rollback()
+            brain_roi = {"note": "session_retry_count/brain_mode columns pending migration"}
 
         return _cap_json({
             "days": days,
