@@ -111,6 +111,8 @@ class UsageRecord:
     brain_tools_called: List[str]
     had_retry: bool
     raw_jsonl_path: str
+    surface: str = "code"
+    brain_mode: str = "enabled"
 
 
 def project_name_from_dir(dir_name: str) -> Tuple[str, str]:
@@ -168,6 +170,11 @@ def parse_assistant_line(
         model, input_tokens, output_tokens, cache_creation, cache_read
     )
 
+    surface = "code"
+    path_str = str(jsonl_path)
+    if "local-agent-mode-sessions" in path_str or "cowork" in path_str.lower():
+        surface = "cowork"
+
     return UsageRecord(
         session_id=obj.get("sessionId") or obj.get("session_id"),
         message_id=msg.get("id"),
@@ -188,6 +195,8 @@ def parse_assistant_line(
         brain_tools_called=brain_tools,
         had_retry=bool(obj.get("isApiErrorMessage")),
         raw_jsonl_path=str(jsonl_path),
+        surface=surface,
+        brain_mode="enabled",
     )
 
 

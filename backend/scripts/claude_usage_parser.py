@@ -67,6 +67,30 @@ BRAIN_TOOL_NAMES = {
     "brain_help",
 }
 
+# Correction markers for retry detection (user turn signals an explicit correction)
+_CORRECTION_MARKERS: Tuple[str, ...] = (
+    "no ", "no,", "wrong", "didn't work", "did not work", "not working",
+    "still fail", "still not", "try again", "revert", "undo",
+    "doesn't work", "does not work", "that's wrong", "that is wrong",
+    "incorrect", "not right", "not correct", "redo",
+    # Russian
+    "не так", "не работает", "переделай", "снова попробуй", "опять не",
+    "неверно", "неправильно", "попробуй снова",
+)
+
+
+def _detect_surface(jsonl_path: Path) -> str:
+    """Infer surface from JSONL path: cowork session dirs → 'cowork', else 'code'."""
+    s = str(jsonl_path)
+    if "local-agent-mode-sessions" in s or "cowork" in s.lower():
+        return "cowork"
+    return "code"
+
+
+def _is_correction(text_content: str) -> bool:
+    low = text_content.lower().strip()
+    return any(low.startswith(m) or f" {m}" in low for m in _CORRECTION_MARKERS)
+
 
 def detect_model_family(model: str) -> str:
     """Map a model id like 'claude-opus-4-7' to a pricing key."""
@@ -101,6 +125,9 @@ class UsageRecord:
     brain_tools_called: List[str]
     had_retry: bool
     raw_jsonl_path: str
+    surface: str = "code"
+    brain_mode: str = "enabled"
+    session_retry_count: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -228,7 +255,56 @@ def parse_assistant_record(
         brain_tools_called=brain_tools,
         had_retry=bool(obj.get("isApiErrorMessage")),
         raw_jsonl_path=str(jsonl_path),
+        surface=_detect_surface(jsonl_path),
+        brain_mode="enabled",
+        session_retry_count=0,  # filled later by _update_session_retry_counts
     )
+
+
+def scan_session_retries(path: Path) -> Dict[str, int]:
+    """
+    Return {session_id: retry_count} by scanning ALL turns in a JSONL file.
+
+    A retry is counted when a user turn contains:
+      (a) a tool_result block with is_error=true, OR
+      (b) text content matching a correction marker.
+    Time-window heuristics are intentionally excluded — too many false positives.
+    """
+    retries: Dict[str, int] = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "user":
+                    continue
+                sid = obj.get("sessionId") or obj.get("session_id") or ""
+                if not sid:
+                    continue
+                content = (obj.get("message") or {}).get("content") or obj.get("content") or []
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    # signal (a): tool_result with error
+                    if block.get("type") == "tool_result" and block.get("is_error"):
+                        retries[sid] = retries.get(sid, 0) + 1
+                        break
+                    # signal (b): plain text correction marker
+                    if block.get("type") == "text":
+                        txt = block.get("text") or ""
+                        if isinstance(txt, str) and _is_correction(txt):
+                            retries[sid] = retries.get(sid, 0) + 1
+                            break
+    except Exception as e:
+        logger.warning("scan_session_retries failed for %s: %s", path, e)
+    return retries
 
 
 def parse_jsonl_file(path: Path) -> List[UsageRecord]:
@@ -299,6 +375,9 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                 "brain_tools_called": rec.brain_tools_called,
                 "had_retry": rec.had_retry,
                 "raw_jsonl_path": rec.raw_jsonl_path,
+                "surface": rec.surface,
+                "brain_mode": rec.brain_mode,
+                "session_retry_count": rec.session_retry_count,
             }
             dialect = db.bind.dialect.name if db.bind else "postgresql"
             # SAVEPOINT per record so a single bad row doesn't poison the
@@ -314,7 +393,8 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                                 cache_read_tokens, total_tokens,
                                 cost_usd, cost_without_cache_usd, cache_savings_usd,
                                 used_brain_context, brain_tools_called,
-                                had_retry, raw_jsonl_path
+                                had_retry, raw_jsonl_path,
+                                surface, brain_mode, session_retry_count
                             ) VALUES (
                                 :session_id, :message_id, :request_id, :timestamp, :model,
                                 :project_id, :project_path, :project_name,
@@ -322,7 +402,8 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                                 :cache_read_tokens, :total_tokens,
                                 :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
                                 :used_brain_context, :brain_tools_called,
-                                :had_retry, :raw_jsonl_path
+                                :had_retry, :raw_jsonl_path,
+                                :surface, :brain_mode, :session_retry_count
                             )
                             ON CONFLICT (message_id) DO NOTHING
                             RETURNING id
@@ -354,7 +435,8 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                                     cache_read_tokens, total_tokens,
                                     cost_usd, cost_without_cache_usd, cache_savings_usd,
                                     used_brain_context, brain_tools_called,
-                                    had_retry, raw_jsonl_path
+                                    had_retry, raw_jsonl_path,
+                                    surface, brain_mode, session_retry_count
                                 ) VALUES (
                                     :session_id, :message_id, :request_id, :timestamp, :model,
                                     :project_id, :project_path, :project_name,
@@ -362,7 +444,8 @@ def insert_records(db: Session, records: List[UsageRecord]) -> Dict[str, int]:
                                     :cache_read_tokens, :total_tokens,
                                     :cost_usd, :cost_without_cache_usd, :cache_savings_usd,
                                     :used_brain_context, :brain_tools_called,
-                                    :had_retry, :raw_jsonl_path
+                                    :had_retry, :raw_jsonl_path,
+                                    :surface, :brain_mode, :session_retry_count
                                 )
                             """),
                             params,
@@ -436,33 +519,89 @@ def aggregate_daily(db: Session) -> int:
 # ─────────────────────────────────────────────────────────────────
 # Entry points
 # ─────────────────────────────────────────────────────────────────
+def iter_cowork_jsonl_files() -> Iterable[Path]:
+    """Yield JSONL files from Cowork local-agent-mode-sessions sandbox dirs."""
+    cowork_root = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Claude"
+        / "local-agent-mode-sessions"
+    )
+    if not cowork_root.exists():
+        return
+    for jsonl in cowork_root.rglob("*.jsonl"):
+        # Only pick up the Claude Code session JSONLs inside .claude/projects/
+        if ".claude" in jsonl.parts and "projects" in jsonl.parts:
+            yield jsonl
+
+
+def _update_session_retry_counts(db: Session, retries_by_session: Dict[str, int]) -> int:
+    """Stamp session_retry_count on all rows matching each session_id. Returns updated count."""
+    if not retries_by_session:
+        return 0
+    dialect = db.bind.dialect.name if db.bind else "postgresql"
+    updated = 0
+    for sid, count in retries_by_session.items():
+        if not sid or count == 0:
+            continue
+        try:
+            result = db.execute(
+                text("UPDATE claude_usage_logs SET session_retry_count = :c WHERE session_id = :s"),
+                {"c": count, "s": sid},
+            )
+            updated += result.rowcount or 0
+        except Exception as e:
+            logger.warning("retry count update failed for session %s: %s", sid, e)
+    db.commit()
+    return updated
+
+
 def sync_usage(
     db: Session,
     root: Optional[Path] = None,
     since: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Read all JSONL files under `root`, insert new records, refresh aggregates."""
+    """Read all JSONL files, insert new records, compute session retries, refresh aggregates."""
     root = Path(root) if root else default_claude_root()
     all_records: List[UsageRecord] = []
+    retries_by_session: Dict[str, int] = {}
     files_scanned = 0
 
+    # Standard Claude Code JSONL
     for jsonl in iter_jsonl_files(root):
         files_scanned += 1
         recs = parse_jsonl_file(jsonl)
         if since:
             recs = [r for r in recs if r.timestamp.date() >= since]
         all_records.extend(recs)
+        for sid, cnt in scan_session_retries(jsonl).items():
+            retries_by_session[sid] = retries_by_session.get(sid, 0) + cnt
+
+    # Cowork JSONL (same format, different root, surface='cowork')
+    cowork_files = 0
+    for jsonl in iter_cowork_jsonl_files():
+        cowork_files += 1
+        recs = parse_jsonl_file(jsonl)
+        if since:
+            recs = [r for r in recs if r.timestamp.date() >= since]
+        all_records.extend(recs)
+        for sid, cnt in scan_session_retries(jsonl).items():
+            retries_by_session[sid] = retries_by_session.get(sid, 0) + cnt
 
     insert_result = insert_records(db, all_records)
+    retry_updated = _update_session_retry_counts(db, retries_by_session)
     daily_rows = aggregate_daily(db)
 
     return {
         "root": str(root),
         "files_scanned": files_scanned,
+        "cowork_files_scanned": cowork_files,
         "records_parsed": len(all_records),
         "inserted": insert_result["inserted"],
         "skipped": insert_result["skipped"],
         "daily_stat_rows": daily_rows,
+        "retry_sessions_updated": retry_updated,
     }
 
 

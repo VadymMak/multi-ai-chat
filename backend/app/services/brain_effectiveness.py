@@ -228,3 +228,82 @@ def compute_summary(
         "retry_rate_with_brain": retry_rate_with,
         "retry_rate_without_brain": retry_rate_without,
     }
+
+
+def compute_session_summary(
+    db: Session,
+    project_id: Optional[int] = None,
+    days: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Session-level Brain ROI.
+
+    Groups claude_usage_logs by session_id. A session is brain_assisted if
+    any row in the session has used_brain_context=true.
+    proxy_success = session has session_retry_count == 0.
+
+    Note: since ~100% of sessions call Brain via the hook, no with/without
+    comparison is made here. Instead we report:
+      - total sessions, brain_assisted count, avg cost per session
+      - proxy_success_rate (sessions with zero retries / total sessions)
+      - avg_retries_per_session
+    brain_mode breakdown is included for future A/B analysis.
+    """
+    from datetime import datetime, timedelta
+
+    conditions: List[str] = []
+    params: Dict[str, Any] = {}
+
+    if project_id is not None:
+        conditions.append("project_id = :pid")
+        params["pid"] = project_id
+    if days and days > 0:
+        since = datetime.utcnow() - timedelta(days=int(days))
+        conditions.append("timestamp >= :since")
+        params["since"] = since
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    rows = db.execute(
+        text(f"""
+            SELECT
+                session_id,
+                MAX(CASE WHEN used_brain_context THEN 1 ELSE 0 END) AS brain_assisted,
+                COALESCE(SUM(cost_usd), 0)    AS session_cost,
+                COALESCE(SUM(total_tokens), 0) AS session_tokens,
+                MAX(session_retry_count)       AS retry_count,
+                MAX(brain_mode)                AS brain_mode
+            FROM claude_usage_logs
+            {where}
+            GROUP BY session_id
+        """),
+        params,
+    ).fetchall()
+
+    total = len(rows)
+    brain_assisted = sum(1 for r in rows if r.brain_assisted in (True, 1))
+    proxy_success = sum(1 for r in rows if (r.retry_count or 0) == 0)
+    total_cost = sum(float(r.session_cost or 0) for r in rows)
+    total_retries = sum(int(r.retry_count or 0) for r in rows)
+
+    by_brain_mode: Dict[str, int] = {}
+    for r in rows:
+        mode = r.brain_mode or "enabled"
+        by_brain_mode[mode] = by_brain_mode.get(mode, 0) + 1
+
+    return {
+        "project_id": project_id,
+        "days": days,
+        "total_sessions": total,
+        "brain_assisted_sessions": brain_assisted,
+        "brain_assisted_pct": round(brain_assisted / total * 100, 2) if total else 0.0,
+        "proxy_success_sessions": proxy_success,
+        "proxy_success_rate": round(proxy_success / total * 100, 2) if total else 0.0,
+        "avg_cost_per_session_usd": round(total_cost / total, 6) if total else 0.0,
+        "avg_retries_per_session": round(total_retries / total, 3) if total else 0.0,
+        "by_brain_mode": by_brain_mode,
+        "note": (
+            "No with/without comparison: ~100% sessions use Brain via hook. "
+            "Set brain_mode='holdout' on a % of sessions for true A/B baseline."
+        ),
+    }

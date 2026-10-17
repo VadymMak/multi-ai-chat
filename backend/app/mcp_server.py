@@ -5206,4 +5206,153 @@ async def debate_result(debate_id: str) -> str:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
+# ─────────────────────────────────────────────────────────────────
+# consumption_report — surface-aware cost + session-level Brain ROI
+# ─────────────────────────────────────────────────────────────────
+@mcp.tool()
+async def consumption_report(days: int = 30) -> str:
+    """
+    Surface-aware usage/cost tracker with session-level Brain ROI.
+
+    Returns:
+      by_surface: cost breakdown for code / cowork / api
+      by_project: top projects by cost
+      by_model:   cost by model
+      cache:      savings_usd and hit_ratio
+      brain_roi:  session-level with proxy_success_rate and avg_retries
+
+    Args:
+        days: Look-back window in days (default 30, max 365).
+    """
+    from datetime import datetime, timedelta
+    from app.services.brain_effectiveness import compute_session_summary
+
+    days = max(1, min(int(days), 365))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    db = _open_db()
+    try:
+        # ── by_surface ──────────────────────────────────────────────
+        surface_rows = db.execute(
+            text("""
+                SELECT
+                    COALESCE(surface, 'code')      AS surface,
+                    COUNT(*)                       AS requests,
+                    COALESCE(SUM(cost_usd), 0)     AS cost,
+                    COALESCE(SUM(cache_savings_usd), 0) AS savings,
+                    COALESCE(SUM(total_tokens), 0) AS tokens
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+                GROUP BY COALESCE(surface, 'code')
+                ORDER BY cost DESC
+            """),
+            {"since": since},
+        ).fetchall()
+
+        by_surface = {
+            r.surface: {
+                "requests": int(r.requests or 0),
+                "cost_usd": round(float(r.cost or 0), 4),
+                "cache_savings_usd": round(float(r.savings or 0), 4),
+                "tokens": int(r.tokens or 0),
+            }
+            for r in surface_rows
+        }
+
+        # ── by_project ──────────────────────────────────────────────
+        proj_rows = db.execute(
+            text("""
+                SELECT project_id, MAX(project_name) AS name,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+                GROUP BY project_id
+                ORDER BY cost DESC
+                LIMIT 10
+            """),
+            {"since": since},
+        ).fetchall()
+
+        by_project = [
+            {
+                "project_id": r.project_id,
+                "project_name": r.name,
+                "requests": int(r.req or 0),
+                "cost_usd": round(float(r.cost or 0), 4),
+            }
+            for r in proj_rows
+        ]
+
+        # ── by_model ────────────────────────────────────────────────
+        model_rows = db.execute(
+            text("""
+                SELECT model,
+                       COUNT(*) AS req,
+                       COALESCE(SUM(cost_usd), 0) AS cost,
+                       COALESCE(SUM(total_tokens), 0) AS tokens
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+                GROUP BY model
+                ORDER BY cost DESC
+            """),
+            {"since": since},
+        ).fetchall()
+
+        by_model = [
+            {
+                "model": r.model,
+                "requests": int(r.req or 0),
+                "cost_usd": round(float(r.cost or 0), 4),
+                "tokens": int(r.tokens or 0),
+            }
+            for r in model_rows
+        ]
+
+        # ── cache ───────────────────────────────────────────────────
+        cache_row = db.execute(
+            text("""
+                SELECT
+                    COALESCE(SUM(input_tokens), 0)          AS in_t,
+                    COALESCE(SUM(cache_creation_tokens), 0) AS cc_t,
+                    COALESCE(SUM(cache_read_tokens), 0)     AS cr_t,
+                    COALESCE(SUM(cost_usd), 0)              AS cost,
+                    COALESCE(SUM(cost_without_cache_usd), 0) AS cost_no_cache,
+                    COALESCE(SUM(cache_savings_usd), 0)     AS savings
+                FROM claude_usage_logs
+                WHERE timestamp >= :since
+            """),
+            {"since": since},
+        ).fetchone()
+
+        denom = int(cache_row.in_t or 0) + int(cache_row.cc_t or 0) + int(cache_row.cr_t or 0)
+        cache_no_cache = float(cache_row.cost_no_cache or 0)
+        cache_savings = float(cache_row.savings or 0)
+        cache = {
+            "savings_usd": round(cache_savings, 4),
+            "cost_without_cache_usd": round(cache_no_cache, 4),
+            "actual_cost_usd": round(float(cache_row.cost or 0), 4),
+            "hit_ratio": round(int(cache_row.cr_t or 0) / denom, 4) if denom else 0.0,
+            "savings_pct": round(cache_savings / cache_no_cache * 100, 2) if cache_no_cache else 0.0,
+        }
+
+        # ── brain_roi (session-level) ────────────────────────────────
+        brain_roi = compute_session_summary(db, project_id=None, days=days)
+
+        return _cap_json({
+            "days": days,
+            "by_surface": by_surface,
+            "by_project": by_project,
+            "by_model": by_model,
+            "cache": cache,
+            "brain_roi": brain_roi,
+        })
+
+    except Exception as exc:
+        logger.error("consumption_report error: %s", exc)
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    finally:
+        db.close()
+
+
 __all__ = ["mcp"]

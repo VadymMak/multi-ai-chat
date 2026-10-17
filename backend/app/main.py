@@ -47,6 +47,14 @@ async def lifespan(app: FastAPI):
             logger.info(
                 f"ℹ️ Migration skipped (already done or not needed): {e}")
 
+        # 🔧 Migration: add surface, brain_mode, session_retry_count columns
+        try:
+            from migrations.add_surface_brain_mode import run_migration as _run_surface_migration
+            _run_surface_migration()
+            logger.info("✅ Migration: add_surface_brain_mode complete")
+        except Exception as e:
+            logger.info(f"ℹ️ Migration add_surface_brain_mode skipped: {e}")
+
         # Create superuser on startup if configured
         await create_superuser()
 
