@@ -27,7 +27,8 @@ from app.memory.models import User
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/brain", tags=["brain-inject"])
 
-_MIN_SCORE: float = float(os.environ.get("BRAIN_INJECT_MIN_SCORE", "0.35"))
+_MIN_SCORE: float = float(os.environ.get("BRAIN_INJECT_MIN_SCORE", "0.60"))
+_MIN_MATCHES: int = int(os.environ.get("BRAIN_INJECT_MIN_MATCHES", "2"))
 _ENABLED: bool = os.environ.get("BRAIN_INJECT_ENABLED", "true").lower() not in ("false", "0", "no")
 _MAX_CHARS: int = 1600  # ≈400 tokens
 
@@ -38,14 +39,14 @@ class InjectResponse(BaseModel):
     source: str = ""  # "pitfall", "skill", "empty"
 
 
-def _keyword_score(text_blob: str, query: str) -> float:
-    """Fraction of query words (len>3) found in text_blob (case-insensitive)."""
+def _keyword_score(text_blob: str, query: str) -> tuple[float, int]:
+    """Return (fraction, num_matches) for query words (len>3) in text_blob."""
     words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 3]
     if not words:
-        return 0.0
+        return 0.0, 0
     blob = text_blob.lower()
-    matches = sum(1 for w in words if w in blob)
-    return matches / len(words)
+    matched = [w for w in words if w in blob]
+    return len(matched) / len(words), len(matched)
 
 
 @router.get("/inject", response_model=InjectResponse)
@@ -65,6 +66,8 @@ def brain_inject(
     best_error_id: Optional[int] = None
     best_skill_id: Optional[int] = None
 
+    best_matches = 0
+
     # ── Search pitfalls (learned_errors) ─────────────────────────────
     try:
         rows = db.execute(text("""
@@ -77,9 +80,10 @@ def brain_inject(
         """)).fetchall()
         for row in rows:
             blob = f"{row.error_pattern or ''} {row.solution_pattern or ''}"
-            score = _keyword_score(blob, q)
+            score, n_matches = _keyword_score(blob, q)
             if score > best_score:
                 best_score = score
+                best_matches = n_matches
                 best_source = "pitfall"
                 best_error_id = row.id
                 best_skill_id = None
@@ -90,19 +94,21 @@ def brain_inject(
     except Exception:
         logger.exception("[brain-inject] pitfall search failed")
 
-    # ── Search skills (brain_skills) ──────────────────────────────────
+    # ── Search skills (brain_skills) — skip huge meta-skills ─────────
     try:
         skill_rows = db.execute(text("""
             SELECT id, name, description, content, category
             FROM brain_skills
+            WHERE length(content) <= 2000
             ORDER BY updated_at DESC
             LIMIT 50
         """)).fetchall()
         for row in skill_rows:
             blob = f"{row.name or ''} {row.description or ''} {row.content or ''}"
-            score = _keyword_score(blob, q)
+            score, n_matches = _keyword_score(blob, q)
             if score > best_score:
                 best_score = score
+                best_matches = n_matches
                 best_source = "skill"
                 best_skill_id = row.id
                 best_error_id = None
@@ -110,8 +116,8 @@ def brain_inject(
     except Exception:
         logger.exception("[brain-inject] skill search failed")
 
-    # ── Threshold gate ────────────────────────────────────────────────
-    if best_score < _MIN_SCORE or not best_injection:
+    # ── Threshold gate: fraction >= MIN_SCORE AND matched words >= MIN_MATCHES
+    if best_score < _MIN_SCORE or best_matches < _MIN_MATCHES or not best_injection:
         _log_inject(db, q, project, "empty", 0.0, "", None, None)
         return InjectResponse()
 
