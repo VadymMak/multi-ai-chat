@@ -49,8 +49,12 @@ async def lifespan(app: FastAPI):
 
         # 🔧 Migration: add surface, brain_mode, session_retry_count columns
         try:
-            from migrations.add_surface_brain_mode import run_migration as _run_surface_migration
-            _run_surface_migration()
+            import importlib.util as _ilu
+            _mig_path = Path(__file__).resolve().parent.parent / "migrations" / "add_surface_brain_mode.py"
+            _spec = _ilu.spec_from_file_location("add_surface_brain_mode", _mig_path)
+            _mig_mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mig_mod)
+            _mig_mod.run_migration()
             logger.info("✅ Migration: add_surface_brain_mode complete")
         except Exception as e:
             logger.info(f"ℹ️ Migration add_surface_brain_mode skipped: {e}")
